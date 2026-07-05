@@ -122,6 +122,34 @@ install_service() {
     info "  Status: systemctl --user status gigabyte-keyboard-rgb.service"
 }
 
+# --- Install desktop entry + icon (app menu entry) ---
+install_desktop_entry() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local desktop_src="$script_dir/data/gigabyte-keyboard-rgb-tray.desktop"
+    local icon_src="$script_dir/data/gigabyte-keyboard-rgb.svg"
+
+    # App menu entry
+    local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    mkdir -p "$apps_dir"
+    cp "$desktop_src" "$apps_dir/gigabyte-keyboard-rgb-tray.desktop"
+    info "App menu entry installed: $apps_dir/gigabyte-keyboard-rgb-tray.desktop"
+
+    # Icon (scalable, lookup-able by name 'gigabyte-keyboard-rgb')
+    local icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+    mkdir -p "$icon_dir"
+    cp "$icon_src" "$icon_dir/gigabyte-keyboard-rgb.svg"
+
+    # Refresh icon + desktop caches if the tools exist
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        gtk-update-icon-cache -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+    fi
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "$apps_dir" 2>/dev/null || true
+    fi
+    info "Tray icon installed to icon theme."
+}
+
 main() {
     echo "=== $DESCRIPTION ==="
     echo
@@ -135,6 +163,7 @@ main() {
     install_python_pkg
     install_udev
     install_service
+    install_desktop_entry
 
     echo
     info "Installation complete!"
@@ -145,9 +174,12 @@ main() {
     echo "  gigabyte-rgb-tray            Launch tray icon app"
     echo "  gigabyte-rgb --help          Full CLI help"
     echo
-    echo "The tray app will start automatically on next login."
-    echo "To start it now:"
-    echo "  systemctl --user start gigabyte-keyboard-rgb.service"
+    echo "How to start the tray app:"
+    echo "  - Look for 'Gigabyte Keyboard RGB' in your application menu"
+    echo "    (GNOME app grid, KDE kicker, rofi, dmenu, etc.) and click it"
+    echo "  - Or run 'gigabyte-rgb-tray' from the terminal"
+    echo "  - It auto-starts on login via systemd user service"
+    echo "    (manage with: systemctl --user status|start|stop|restart gigabyte-keyboard-rgb.service)"
     echo
     echo "If you use GNOME and don't see the tray icon, install:"
     echo "  gnome-shell-extension-appindicator"

@@ -6,4 +6,4 @@ Exec=gigabyte-rgb-tray
 Icon=gigabyte-keyboard-rgb
 Terminal=false
 Categories=Hardware;Settings;
-X-GNOME-Autostart-enabled=true
+Keywords=keyboard;rgb;backlight;gigabyte;aero;aorus;light;

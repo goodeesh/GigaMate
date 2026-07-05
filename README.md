@@ -103,7 +103,9 @@ After installing, log out and back in, or restart GNOME Shell (`Alt+F2` then `r`
 
 ### Tray icon app
 
-After installation, the tray app starts automatically on login via systemd. You'll see a keyboard icon in your system tray.
+After installation, the tray app starts automatically on login via systemd. You'll also find **"Gigabyte Keyboard RGB"** in your application menu (GNOME app grid, KDE kicker, rofi, dmenu, etc.) — clicking it launches the tray icon if the systemd service isn't running.
+
+Once running, you'll see a keyboard icon in your system tray.
 
 **Menu:**
 - **Colour** — radio list of 11 colours
