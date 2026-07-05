@@ -172,8 +172,8 @@ The tool sends an 8-byte USB HID Feature Report via control transfer on **Interf
 | 1 | Padding | Always `0x00` |
 | 2 | Program | `0x01` = static (use this; others are buggy) |
 | 3 | Speed | `0x01` (fastest) to `0x0A` (slowest) |
-| 4 | Brightness | `0x00` (off) to `0x64` (100%) |
-| 5 | Colour | `0x01`–`0x07` (see table above) |
+| 4 | Brightness | `0x00` (off) to `0x64` (max); hue is non-linear in this byte for some colour bytes — see [Colours](#colours) |
+| 5 | Colour | `0x01`–`0x07` colour family; the visible hue depends on byte 4 as well (see [Colours](#colours)) |
 | 6 | Padding | Always `0x01` |
 | 7 | Checksum | `(255 - sum(bytes 0-6)) & 0xFF` |
 
