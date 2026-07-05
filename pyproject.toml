@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gigabyte-keyboard-rgb"
+version = "0.1.0"
+description = "Control the keyboard backlight on Gigabyte Aero/AORUS laptops"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "adriansc"},
+]
+keywords = ["gigabyte", "aero", "keyboard", "rgb", "backlight"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Hardware :: Hardware Drivers",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pyusb>=1.2",
+]
+
+[project.scripts]
+gigabyte-rgb = "gigabyte_keyboard_rgb.cli:main"
+gigabyte-rgb-tray = "gigabyte_keyboard_rgb.tray:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

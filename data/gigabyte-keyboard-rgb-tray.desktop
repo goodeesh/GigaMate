@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Gigabyte Keyboard RGB
+Comment=Keyboard backlight control tray icon
+Exec=gigabyte-rgb-tray
+Icon=gigabyte-keyboard-rgb
+Terminal=false
+Categories=Hardware;Settings;
+X-GNOME-Autostart-enabled=true

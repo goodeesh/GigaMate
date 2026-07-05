@@ -1,0 +1,13 @@
+[Unit]
+Description=Gigabyte keyboard RGB tray
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/gigabyte-rgb-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
