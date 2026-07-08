@@ -37,6 +37,11 @@ need to run them and submit the result.
 ### Step 1: Install GigaMate
 
 ```sh
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
+```
+
+Or if you prefer to review first:
+```sh
 git clone https://github.com/goodeesh/GigaMate.git
 cd GigaMate
 ./install.sh
@@ -262,22 +267,6 @@ Profiles define keyboard RGB and optional ACPI capabilities.
 ```
 
 See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md) for the complete reference.
-
----
-
-## Releasing a New Version
-
-(Maintainers only.)
-
-1. **Update version** in `src/gigamate/__init__.py` and `pyproject.toml`
-2. **Update** `CHANGELOG.md`
-3. **Open a PR** with the version bump
-4. **After merge**, tag the commit:
-   ```sh
-   git tag vX.Y.Z <squash-commit-sha>
-   git push origin vX.Y.Z
-   ```
-5. **Create a release** on GitHub with release notes
 
 ---
 

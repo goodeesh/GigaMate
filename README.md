@@ -31,10 +31,7 @@ See [LICENSE](LICENSE).
 ## Quick Start
 
 ```sh
-git clone https://github.com/goodeesh/GigaMate.git
-cd GigaMate
-./install.sh        # Self-contained: detects distro, installs deps,
-                    # builds kernel module, sets up service + udev
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
 ```
 
 After install, the tray app auto-starts on login. You can also launch it manually:
@@ -59,6 +56,12 @@ gigamate-tray        # System tray control centre
 
 ### Quick install (recommended)
 
+**One-liner:**
+```sh
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
+```
+
+**Or with git (review first):**
 ```sh
 git clone https://github.com/goodeesh/GigaMate.git
 cd GigaMate
@@ -418,7 +421,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
 
 ## Uninstalling
 
+**One-liner:**
 ```sh
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/uninstall.sh | bash
+```
+
+**Or with git:**
+```sh
+cd GigaMate
 ./uninstall.sh
 ```
 
