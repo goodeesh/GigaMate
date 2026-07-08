@@ -1,5 +1,6 @@
 {
   "name": "Gigabyte Aero X16 (EG61VH)",
+  "version": 2,
   "vid": "0x0414",
   "pid": "0x8105",
   "interfaces": [1, 3],
@@ -16,5 +17,23 @@
     "white":        {"0": [7, 0],   "1": [7, 25],  "2": [7, 50]},
     "light_blue":   {"0": [7, 0],   "1": [7, 90],  "2": [7, 100]},
     "blush_pink":   {"0": [7, 0],   "1": [6, 75],  "2": [7, 75]}
+  },
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "fan_count": 2,
+    "fan_labels": ["CPU Fan", "GPU Fan"],
+    "sensor_labels": {
+      "temp_cpu": "CPU Temp",
+      "temp_socket": "Socket Temp"
+    },
+    "profiles": {
+      "0": {"name": "Quiet", "desc": "Low fan noise, capped GPU power"},
+      "1": {"name": "Balanced", "desc": "Balanced performance and noise"},
+      "2": {"name": "Performance", "desc": "High performance, more fan noise"},
+      "3": {"name": "Gaming", "desc": "Maximum GPU power"}
+    },
+    "backend": "module"
   }
 }

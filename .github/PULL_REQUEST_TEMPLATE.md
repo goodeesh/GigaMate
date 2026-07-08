@@ -1,32 +1,27 @@
-## Description
+---
+name: New model support
+about: Add a device profile for your Gigabyte laptop
+title: 'Add support for [Your Model Name]'
+labels: new-model
 
-<!-- Briefly describe what this PR does and why. -->
+---
 
-## Type of change
+## Device information
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing behaviour to change)
-- [ ] Documentation update
-- [ ] Hardware support (adding a new keyboard model)
+- **Model name:**
+- **USB VID:PID:**
+- **ACPI available:** yes / no (run `gigamate detect --acpi` to check)
+
+## Changes
+
+- [ ] Added `src/gigamate/profile_data/{VID}_{PID}.json`
 
 ## Checklist
 
-- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md)
-- [ ] My code follows the existing style of this project
-- [ ] I have added/updated tests for my changes if they touch `protocol.py`, `config.py`, or `cli.py`
-- [ ] `python -m pytest tests/ -v` passes locally
-- [ ] I have updated the README if my change affects the colour table, CLI usage, or installation instructions
-- [ ] I have referenced any issues this PR closes (e.g. "Closes #123")
-
-## Hardware tested on (if applicable)
-
-- Laptop model:
-- CPU:
-- GPU:
-- Keyboard USB ID (`lsusb`):
-- Colours/levels tested: 
+- [ ] I have run `gigamate calibrate rgb` — keyboard colours are mapped
+- [ ] I have run `gigamate detect --acpi` — ACPI capabilities are probed (if available)
+- [ ] I have tested: `gigamate status` shows correct sensor readings
+- [ ] I have tested: `gigamate profile gaming` switches power profile (if ACPI)
+- [ ] Profile JSON passes validation (`python -m pytest tests/`)
 
 ## Additional notes
-
-<!-- Anything else the reviewer should know. -->

@@ -1,9 +1,9 @@
 import pytest
-from gigabyte_keyboard_rgb.protocol import (
+from gigamate.protocol import (
     make_checksum, make_command, COLOURS, COLOUR_MAP, BRIGHTNESS_LABELS,
     set_static,
 )
-from gigabyte_keyboard_rgb.profiles import DeviceProfile
+from gigamate.profiles import DeviceProfile
 
 
 def test_red_full():

@@ -24,5 +24,22 @@ env/
 .DS_Store
 Thumbs.db
 
+# Kernel module build artifacts
+src/gigamate_acpi/*.o
+src/gigamate_acpi/*.ko
+src/gigamate_acpi/*.mod.c
+src/gigamate_acpi/*.mod
+src/gigamate_acpi/Module.symvers
+src/gigamate_acpi/modules.order
+src/gigamate_acpi/.cache.mk
+src/gigamate_acpi/.tmp_versions/
+
+# Internal planning / notes (not for distribution)
+TODO.md
+FEATURE_FAN_CONTROL.md
+
+# pytest cache
+.pytest_cache/
+
 # Local test runs
 *.log

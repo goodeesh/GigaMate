@@ -1,13 +1,15 @@
 import json
 import pytest
 
-from gigabyte_keyboard_rgb.profiles import (
+from gigamate.profiles import (
     DeviceProfile,
+    AcpiConfig,
     load_builtin_profiles,
     load_user_profiles,
     all_profiles,
     resolve_profile,
     save_user_profile,
+    validate_profile,
     BUILTIN_DATA_DIR,
     USER_PROFILES_DIR,
 )
@@ -47,7 +49,7 @@ def test_resolve_unknown():
 def test_user_profile_overrides_builtin(tmp_path, monkeypatch):
     user_dir = tmp_path / "profiles"
     user_dir.mkdir(parents=True)
-    monkeypatch.setattr("gigabyte_keyboard_rgb.profiles.USER_PROFILES_DIR", user_dir)
+    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", user_dir)
     override = {
         "name": "Custom Override",
         "vid": "0x0414",
@@ -89,7 +91,7 @@ def test_json_roundtrip():
 def test_save_user_profile(tmp_path, monkeypatch):
     user_dir = tmp_path / "profiles"
     user_dir.mkdir(parents=True)
-    monkeypatch.setattr("gigabyte_keyboard_rgb.profiles.USER_PROFILES_DIR", user_dir)
+    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", user_dir)
     profile = DeviceProfile(
         vid=0x0414, pid=0x7A3C, name="Test",
         colour_map={"x": {0: (1, 0), 1: (1, 50), 2: (1, 100)}},
@@ -155,5 +157,91 @@ def test_all_profiles_includes_builtin():
 
 def test_no_user_profiles_dir(tmp_path, monkeypatch):
     non_existent = tmp_path / "nope"
-    monkeypatch.setattr("gigabyte_keyboard_rgb.profiles.USER_PROFILES_DIR", non_existent)
+    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", non_existent)
     assert load_user_profiles() == {}
+
+
+class TestAcpiConfig:
+    def test_defaults(self):
+        cfg = AcpiConfig()
+        assert cfg.has_fan_control is False
+        assert cfg.has_temperature is False
+        assert cfg.has_power_profiles is False
+        assert cfg.fan_count == 0
+        assert cfg.fan_labels == []
+        assert cfg.backend == "module"
+
+    def test_roundtrip(self):
+        cfg = AcpiConfig(
+            has_fan_control=True,
+            has_temperature=True,
+            has_power_profiles=True,
+            fan_count=2,
+            fan_labels=["CPU Fan", "GPU Fan"],
+            sensor_labels={"temp_cpu": "CPU"},
+            profiles={"0": {"name": "Quiet"}, "3": {"name": "Gaming"}},
+            backend="module",
+        )
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Test", acpi=cfg,
+        )
+        d = profile.to_dict()
+        assert "acpi" in d
+        assert d["acpi"]["has_fan_control"] is True
+        assert d["acpi"]["fan_count"] == 2
+        assert d["acpi"]["profiles"]["0"]["name"] == "Quiet"
+
+        # Roundtrip
+        restored = DeviceProfile.from_dict(d)
+        assert restored.has_acpi is True
+        assert restored.acpi is not None
+        assert restored.acpi.has_fan_control is True
+        assert restored.acpi.fan_labels == ["CPU Fan", "GPU Fan"]
+        assert restored.acpi.profiles["0"]["name"] == "Quiet"
+
+    def test_missing_acpi_is_backward_compat(self):
+        d = {
+            "name": "Old", "vid": "0x0414", "pid": "0x8105",
+            "interfaces": [1, 3], "control_interface": 3,
+            "colour_map": {},
+        }
+        profile = DeviceProfile.from_dict(d)
+        assert profile.has_acpi is False
+        assert profile.acpi is None
+
+
+class TestValidateProfile:
+    def test_valid_full_profile(self):
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Valid",
+            interfaces=[1, 3], control_interface=3,
+            colour_map={"red": {0: (1, 0), 1: (1, 25), 2: (1, 100)}},
+            acpi=AcpiConfig(
+                has_power_profiles=True,
+                profiles={"0": {"name": "Quiet"}, "3": {"name": "Gaming"}},
+            ),
+        )
+        errors = validate_profile(profile)
+        assert errors == []
+
+    def test_invalid_profile_id(self):
+        profile = DeviceProfile(
+            vid=0xFFFF, pid=0xFFFF, name="Bad",
+            acpi=AcpiConfig(
+                has_power_profiles=True,
+                profiles={"5": {"name": "Turbo"}},
+            ),
+        )
+        errors = validate_profile(profile)
+        # Should warn about profile ID 5 out of range
+        profile_ids = [e for e in errors if "profile ID" in e]
+        assert len(profile_ids) >= 1
+
+    def test_invalid_backend(self):
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Test",
+            acpi=AcpiConfig(backend="nonexistent"),
+        )
+        errors = validate_profile(profile)
+        backends = [e for e in errors if "backend" in e]
+        assert len(backends) >= 1

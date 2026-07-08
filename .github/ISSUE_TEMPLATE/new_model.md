@@ -1,23 +1,18 @@
 ---
-title: "New model support: [your model name here]"
+name: New model support (I can't open a Pull Request)
+about: Use this if you cannot create a Pull Request yourself
+title: 'Model support: [Your model name]'
 labels: new-model
+
 ---
 
-**Laptop model / name:** (e.g. Gigabyte Aorus 15BKF)
+**For fastest inclusion, please open a Pull Request instead:**
+https://github.com/goodeesh/GigaMate/blob/main/CONTRIBUTING.md#adding-a-new-model
 
-**Model code:** (from laptop bottom sticker, if known)
+Use this issue template only if you cannot use git or GitHub PRs.
 
-**`lsusb` output:**
-```
-paste `lsusb | grep -i gigabyte` here
-```
+**Laptop model:** 
+**USB VID:PID:** (from `lsusb | grep -i gigabyte`)
+**ACPI available:** yes / no (run `gigamate detect --acpi`)
 
-**Attach calibration JSON:**
-Drag the file produced by `gigabyte-rgb --calibrate` here.
-(It's at `~/.config/gigabyte-keyboard-rgb/profiles/<VID>_<PID>.json`)
-
-**Checklist:**
-- [ ] I ran `gigabyte-rgb detect` and confirmed my keyboard shows up
-- [ ] I ran `gigabyte-rgb --calibrate` and completed all prompts
-- [ ] After restarting the tray, the colours shown match my keyboard
-- [ ] I have attached the calibration JSON file above
+**Attach your profile JSON file** (from `~/.config/gigamate/profiles/`):

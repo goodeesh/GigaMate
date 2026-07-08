@@ -1,11 +1,11 @@
 [Unit]
-Description=Gigabyte keyboard RGB tray
+Description=GigaMate — Gigabyte laptop management
 After=graphical-session.target
 PartOf=graphical-session.target
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/gigabyte-rgb-tray
+ExecStart=%h/.local/bin/gigamate-tray
 Restart=on-failure
 RestartSec=5
 

@@ -31,3 +31,30 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest tests/ -v
+
+  validate-profiles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: |
+          pip install -e .
+      - name: Validate all built-in profiles
+        run: |
+          python -c "
+from gigamate.profiles import load_builtin_profiles, validate_profile
+profiles = load_builtin_profiles()
+print(f'Checking {len(profiles)} profile(s)...')
+for pid, profile in profiles.items():
+    errors = validate_profile(profile)
+    if errors:
+        print(f'ERROR: Profile {pid[0]:04X}:{pid[1]:04X} ({profile.name}):')
+        for e in errors:
+            print(f'  - {e}')
+        exit(1)
+    print(f'  ✅ {pid[0]:04X}:{pid[1]:04X}  {profile.name}')
+print('All profiles valid!')
+          "

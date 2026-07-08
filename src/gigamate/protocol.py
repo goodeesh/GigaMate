@@ -166,15 +166,15 @@ def print_detect():
         print(f"  Available colours: {', '.join(profile.colour_names)}")
         print()
         print("  To use:")
-        print(f"    gigabyte-rgb static <colour>")
+        print(f"    gigamate rgb static <colour>")
     else:
         print(f"  Found: VID={vid:04X} PID={pid:04X}  ({vid:04X}:{pid:04X})")
         print(f"  Model: unknown \u2014 not in profile database")
         print(f"  \u2718 Unsupported. To add support:")
-        print(f"    gigabyte-rgb --calibrate")
+        print(f"    gigamate rgb calibrate")
         print()
         print(f"  Safe action:")
-        print(f"    gigabyte-rgb off")
+        print(f"    gigamate rgb off")
     print()
     print(f"Known profiles ({len(profiles)}):")
     for key, p in sorted(profiles.items()):

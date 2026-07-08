@@ -18,6 +18,23 @@ OFF_CMD = bytes([0x08, 0x00, 0x01, 0x06, 0x00, 0x01, 0x01, 0xF2])
 
 
 @dataclass
+class AcpiConfig:
+    """ACPI capabilities for a specific laptop model.
+
+    Describes what ACPI/WMI features the laptop supports.
+    All fields have safe defaults — only set what you know works.
+    """
+    has_fan_control: bool = False
+    has_temperature: bool = False
+    has_power_profiles: bool = False
+    fan_count: int = 0
+    fan_labels: List[str] = field(default_factory=list)
+    sensor_labels: Dict[str, str] = field(default_factory=dict)
+    profiles: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    backend: str = "module"
+
+
+@dataclass
 class DeviceProfile:
     vid: int
     pid: int
@@ -25,6 +42,8 @@ class DeviceProfile:
     interfaces: List[int] = field(default_factory=lambda: [1, 3])
     control_interface: int = 3
     colour_map: Dict[str, Dict[int, Tuple[int, int]]] = field(default_factory=dict)
+    acpi: Optional[AcpiConfig] = None
+    version: int = 1
 
     @property
     def id(self) -> Tuple[int, int]:
@@ -45,11 +64,22 @@ class DeviceProfile:
     def reverse_map(self) -> Dict[int, str]:
         return {v: k for k, v in self.full_map.items()}
 
+    @property
+    def has_acpi(self) -> bool:
+        """Whether this profile has ACPI capabilities defined."""
+        return self.acpi is not None
+
+    @property
+    def has_rgb(self) -> bool:
+        """Whether this profile has keyboard RGB colour mapping."""
+        return bool(self.colour_map)
+
     def to_dict(self) -> dict:
         cmap = {}
         for colour, levels in self.colour_map.items():
             cmap[colour] = {str(k): list(v) for k, v in levels.items()}
-        return {
+        result = {
+            "version": self.version,
             "name": self.name,
             "vid": f"0x{self.vid:04X}",
             "pid": f"0x{self.pid:04X}",
@@ -57,6 +87,18 @@ class DeviceProfile:
             "control_interface": self.control_interface,
             "colour_map": cmap,
         }
+        if self.acpi is not None:
+            result["acpi"] = {
+                "has_fan_control": self.acpi.has_fan_control,
+                "has_temperature": self.acpi.has_temperature,
+                "has_power_profiles": self.acpi.has_power_profiles,
+                "fan_count": self.acpi.fan_count,
+                "fan_labels": list(self.acpi.fan_labels),
+                "sensor_labels": dict(self.acpi.sensor_labels),
+                "profiles": dict(self.acpi.profiles),
+                "backend": self.acpi.backend,
+            }
+        return result
 
     @classmethod
     def from_dict(cls, d: dict) -> "DeviceProfile":
@@ -65,13 +107,30 @@ class DeviceProfile:
         cmap = {}
         for colour, levels in d.get("colour_map", {}).items():
             cmap[colour] = {int(k): tuple(v) for k, v in levels.items()}
+
+        acpi = None
+        if "acpi" in d:
+            a = d["acpi"]
+            acpi = AcpiConfig(
+                has_fan_control=a.get("has_fan_control", False),
+                has_temperature=a.get("has_temperature", False),
+                has_power_profiles=a.get("has_power_profiles", False),
+                fan_count=int(a.get("fan_count", 0)),
+                fan_labels=list(a.get("fan_labels", [])),
+                sensor_labels=dict(a.get("sensor_labels", {})),
+                profiles=dict(a.get("profiles", {})),
+                backend=str(a.get("backend", "module")),
+            )
+
         return cls(
             vid=vid,
             pid=pid,
             name=d.get("name", f"{vid:04X}:{pid:04X}"),
+            version=d.get("version", 1),
             interfaces=list(d.get("interfaces", [1, 3])),
             control_interface=int(d.get("control_interface", 3)),
             colour_map=cmap,
+            acpi=acpi,
         )
 
 
@@ -152,6 +211,57 @@ def save_user_profile(profile: DeviceProfile) -> Path:
     return path
 
 
+def validate_profile(profile: DeviceProfile) -> List[str]:
+    """Validate a device profile and return a list of warnings/errors.
+
+    Returns an empty list if the profile is valid.
+    """
+    errors: List[str] = []
+
+    if not profile.name:
+        errors.append("Profile name is empty")
+
+    if not (0x0000 <= profile.vid <= 0xFFFF):
+        errors.append(f"Invalid VID: {profile.vid:04X}")
+
+    if not (0x0000 <= profile.pid <= 0xFFFF):
+        errors.append(f"Invalid PID: {profile.pid:04X}")
+
+    if not profile.interfaces:
+        errors.append("No USB interfaces specified")
+
+    if profile.has_rgb:
+        for colour_name, levels in profile.colour_map.items():
+            if not colour_name:
+                errors.append("Colour name is empty")
+            for level_key in (0, 1, 2):
+                if level_key not in levels:
+                    errors.append(f"Colour '{colour_name}' missing brightness level {level_key}")
+                else:
+                    byte5, byte4 = levels[level_key]
+                    if not (0x00 <= byte5 <= 0xFF):
+                        errors.append(f"Colour '{colour_name}' level {level_key}: byte5 out of range")
+                    if not (0x00 <= byte4 <= 0xFF):
+                        errors.append(f"Colour '{colour_name}' level {level_key}: byte4 out of range")
+
+    if profile.has_acpi:
+        acpi = profile.acpi
+        if acpi.has_power_profiles:
+            for pid_str in acpi.profiles:
+                try:
+                    p = int(pid_str)
+                    if not (0 <= p <= 3):
+                        errors.append(f"ACPI profile ID {pid_str} out of range (0-3)")
+                except ValueError:
+                    errors.append(f"ACPI profile ID '{pid_str}' is not a valid integer")
+                if "name" not in acpi.profiles[pid_str]:
+                    errors.append(f"ACPI profile {pid_str} missing 'name' field")
+        if acpi.backend not in ("module", "acpi_call"):
+            errors.append(f"Unknown ACPI backend: {acpi.backend}")
+
+    return errors
+
+
 def _test_interface(dev, iface: int) -> bool:
     from .protocol import make_command
     try:
@@ -173,7 +283,7 @@ def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
 
     print()
     print("=" * 60)
-    print("  Gigabyte Keyboard RGB — Calibration")
+    print("  GigaMate — Keyboard RGB Calibration")
     print("=" * 60)
     print()
     print(f"Detected: VID={vid:04X} PID={pid:04X}")
@@ -349,9 +459,8 @@ def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
     print("=" * 60)
     print(f"\n  {len(colour_map)} colour(s) mapped: {', '.join(sorted(colour_map.keys()))}")
     print()
-    print(f"  Saved to: ~/.config/gigabyte-keyboard-rgb/profiles/")
-    print(f"  To share: submit the file at")
-    print(f"    https://github.com/goodeesh/gigabyte-keyboard-rgb/issues/new")
+    print(f"  Saved to: ~/.config/gigamate/profiles/")
+    print(f"  To contribute: run 'gigamate profile contribute'")
     print()
 
     return profile

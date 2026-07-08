@@ -1,8 +1,23 @@
 import json
+from pathlib import Path
 
 from .paths import CONFIG_DIR
 from .profiles import detect_device, resolve_profile
+
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+# Legacy path for migration
+_OLD_CONFIG_DIR = Path.home() / ".config" / "gigabyte-keyboard-rgb"
+_OLD_CONFIG_FILE = _OLD_CONFIG_DIR / "config.json"
+
+
+def _migrate_old_config():
+    """Migrate config from old gigabyte-keyboard-rgb location to new gigamate location."""
+    if _OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(_OLD_CONFIG_FILE.read_text())
+        import sys
+        print("info: Migrated settings from ~/.config/gigabyte-keyboard-rgb/ to ~/.config/gigamate/", file=sys.stderr)
 
 DEFAULT_CONFIG = {
     "colour": "light_purple",
@@ -70,6 +85,9 @@ def _migrate_profile_id(data):
 
 
 def load():
+    # Migrate from old config path if needed
+    _migrate_old_config()
+
     config = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
         try:
