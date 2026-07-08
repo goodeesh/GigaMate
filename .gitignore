@@ -31,6 +31,8 @@ src/gigamate_acpi/*.mod.c
 src/gigamate_acpi/*.mod
 src/gigamate_acpi/Module.symvers
 src/gigamate_acpi/modules.order
+src/gigamate_acpi/.*.cmd
+src/gigamate_acpi/.*.o.cmd
 src/gigamate_acpi/.cache.mk
 src/gigamate_acpi/.tmp_versions/
 
