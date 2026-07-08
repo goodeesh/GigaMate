@@ -82,11 +82,6 @@ class GigaMateTrayApp:
         # Menu item references (for updating)
         self._reload_item: Optional[Gtk.MenuItem] = None
 
-        # Radio button maps (for grid-based layouts)
-        self._colour_rb_map: Dict[str, Gtk.RadioButton] = {}
-        self._brightness_rb_map: Dict[int, Gtk.RadioButton] = {}
-        self._profile_rb_map: Dict[int, Gtk.RadioButton] = {}
-
         self._building = True
         self._detect_on_startup()
         self._init_acpi()
@@ -179,8 +174,8 @@ class GigaMateTrayApp:
 
     def _build_acpi_only_menu(self) -> None:
         """Menu when ACPI is available but keyboard is not found."""
-        self._append_power_profile_section()
         self._append_status_section()
+        self._append_power_profile_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -214,116 +209,64 @@ class GigaMateTrayApp:
         self._append_quit()
 
     def _build_supported_menu(self) -> None:
-        """Full menu: Status on top, then Profiles, Colours (grid), Brightness (grid)."""
-        # ── Live Status section (ACPI) — always top ──
+        """Full menu: Status on top, then Profiles, then Colours, Brightness."""
+        # ── Live Status section (ACPI) — always on top ──
         self._append_status_section()
 
-        # ── Power Profile section (ACPI) — 2-column grid ──
+        # ── Power Profile section (ACPI) ──
         self._append_power_profile_section()
 
-        # ── Keyboard Colours section — 2-column grid ──
+        # ── Keyboard RGB section ──
         if self._profile is not None and self._profile.has_rgb:
             self._menu.append(Gtk.SeparatorMenuItem())
             colour_header = Gtk.MenuItem(label="Colour")
             colour_header.set_sensitive(False)
             self._menu.append(colour_header)
 
-            colours = self._profile.colour_names
-            items = [(cname, cname.replace("_", " ").title()) for cname in colours]
-            active = self._current_colour
+            colour_group = None
+            for cname in self._profile.colour_names:
+                label = cname.replace("_", " ").title()
+                item = Gtk.RadioMenuItem(group=colour_group, label=label)
+                if colour_group is None:
+                    colour_group = item
+                if cname == self._current_colour:
+                    item.set_active(True)
+                item.connect("toggled", self._on_colour_changed, cname)
+                self._menu.append(item)
+                self._colour_items[cname] = item
 
-            self._append_radio_rows(items, 2, self._on_colour_selected, active)
-
-        # ── Keyboard Brightness section — 3-column grid ──
-        if self._profile is not None and self._profile.has_rgb:
             self._menu.append(Gtk.SeparatorMenuItem())
-            bright_header = Gtk.MenuItem(label="Brightness")
-            bright_header.set_sensitive(False)
-            self._menu.append(bright_header)
 
-            items = [(level, label) for level, label in enumerate(BRIGHTNESS_NAMES)]
-            active = self._current_brightness
+            brightness_header = Gtk.MenuItem(label="Brightness")
+            brightness_header.set_sensitive(False)
+            self._menu.append(brightness_header)
 
-            self._append_radio_rows(items, 3, self._on_brightness_selected, active)
+            bright_group = None
+            for level, label in enumerate(BRIGHTNESS_NAMES):
+                item = Gtk.RadioMenuItem(group=bright_group, label=label)
+                if bright_group is None:
+                    bright_group = item
+                if level == self._current_brightness:
+                    item.set_active(True)
+                item.connect("toggled", self._on_brightness_changed, level)
+                self._menu.append(item)
+                self._brightness_items[level] = item
+
+            self._menu.append(Gtk.SeparatorMenuItem())
 
         # ── Settings items ──
-        self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
 
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_about()
         self._append_quit()
 
-    def _on_colour_selected(self, cname: str) -> None:
-        """Handle colour selection from grid."""
-        self._current_colour = cname
-        self._apply_colour()
-
-    def _on_brightness_selected(self, level: int) -> None:
-        """Handle brightness selection from grid."""
-        self._current_brightness = level
-        self._apply_colour()
-
     # ────────────────────────────────────────────
     # Section builders
     # ────────────────────────────────────────────
 
-    def _append_radio_rows(
-        self,
-        items: List[tuple],
-        columns: int,
-        callback,
-        active_key=None,
-    ) -> None:
-        """Append radio buttons in multi-column rows.
-
-        Each row is one GtkMenuItem containing a GtkBox with `columns` radio
-        buttons. All radio buttons share the same group across rows.
-
-        Args:
-            items: list of (key, label) tuples
-            columns: number of radio buttons per row
-            callback: function(key) called when a radio button is selected
-            active_key: key of the initially active button
-        """
-        first_rb = None
-
-        for idx, (key, label) in enumerate(items):
-            col = idx % columns
-            if col == 0:
-                # Start a new row (GtkMenuItem with horizontal GtkBox)
-                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-                box.set_margin_start(4)
-                box.set_margin_end(4)
-                row_item = Gtk.MenuItem()
-                row_item.add(box)
-                self._menu.append(row_item)
-
-            rb = Gtk.RadioButton.new_with_label_from_widget(first_rb, label)
-            if first_rb is None:
-                first_rb = rb
-
-            if active_key is not None and key == active_key:
-                rb.set_active(True)
-
-            rb.connect("toggled", self._on_radio_toggled, key, callback)
-            box.pack_start(rb, True, True, 0)
-
-    def _on_radio_toggled(self, button: Gtk.RadioButton, key, callback) -> None:
-        """Handle a row radio button toggle. Fire callback if active, close menu."""
-        if not button.get_active():
-            return
-        if self._building:
-            return
-        try:
-            callback(key)
-        except Exception:
-            pass
-        if self._menu is not None:
-            self._menu.deactivate()
-
     def _append_power_profile_section(self) -> None:
-        """Add Power Profile as 2-column radio rows."""
+        """Add Power Profile radio group (only if ACPI has power profiles)."""
         if self._acpi_caps is None or not self._acpi_caps.has_power_profiles:
             return
 
@@ -332,6 +275,7 @@ class GigaMateTrayApp:
         header.set_sensitive(False)
         self._menu.append(header)
 
+        # Get profile names: from AcpiConfig if available, otherwise use defaults
         if self._profile is not None and self._profile.has_acpi and self._profile.acpi:
             profile_names = self._profile.acpi.profiles
         else:
@@ -340,31 +284,28 @@ class GigaMateTrayApp:
                 for k, v in FanProfile.names().items()
             }
 
-        items = []
-        active_key = None
+        group = None
+        self._profile_items = {}
+
         for pid_int in sorted(int(k) for k in profile_names.keys()):
-            entry = profile_names.get(str(pid_int), {})
+            pid_str = str(pid_int)
+            entry = profile_names.get(pid_str, {})
             label = entry.get("name", f"Profile {pid_int}")
-            items.append((pid_int, label))
+            item = Gtk.RadioMenuItem(group=group, label=label)
+            if group is None:
+                group = item
             if self._current_acpi_profile == pid_int:
-                active_key = pid_int
-
-        if items:
-            self._append_radio_rows(items, 2, self._on_profile_selected, active_key)
-
-    def _on_profile_selected(self, profile_id: int) -> None:
-        """Handle profile selection."""
-        if self._acpi_controller is None:
-            return
-        self._acpi_controller.set_profile(FanProfile(profile_id))
-        self._current_acpi_profile = profile_id
-        self._save_config()
+                item.set_active(True)
+            item.connect("toggled", self._on_profile_changed, pid_int)
+            self._menu.append(item)
+            self._profile_items[pid_int] = item
 
     def _append_status_section(self) -> None:
         """Add a single-line live status display (only if ACPI is available)."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
 
+        self._menu.append(Gtk.SeparatorMenuItem())
         self._status_items = []
         item = Gtk.MenuItem(label="ACPI initialising...")
         item.set_sensitive(False)
@@ -758,9 +699,6 @@ class GigaMateTrayApp:
             self._menu = None
         self._colour_items = {}
         self._brightness_items = {}
-        self._colour_rb_map = {}
-        self._brightness_rb_map = {}
-        self._profile_rb_map = {}
         self._profile_items = {}
         self._status_items = []
 
