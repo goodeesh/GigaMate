@@ -1,30 +1,99 @@
-# Contributing to Gigabyte Keyboard RGB Control
+# Contributing to GigaMate
 
-Thanks for your interest in contributing! This is a small project and we welcome help — especially from people who have access to Gigabyte/AORUS hardware we haven't been able to test ourselves.
+Thanks for your interest in contributing! GigaMate is a community-driven project
+that makes Gigabyte laptop management possible on Linux. Whether you're adding
+support for a new laptop model, fixing a bug, or improving documentation —
+every contribution counts.
 
-## Code of conduct
+---
 
-Be kind. This is a hobby project maintained in spare time. Patience and clear communication go a long way.
+## Code of Conduct
 
-## Ways to contribute
+Be kind, patient, and constructive. This is a hobby project maintained in
+spare time. Clear communication goes a long way.
 
-- **Hardware testing** — Run `gigabyte-rgb detect` and `--calibrate` on a model not in the [hardware table](README.md#tested-hardware), then [submit the resulting JSON](#adding-a-new-model) as a profile.
-- **Bug reports** — If something doesn't work, please open an issue with the steps to reproduce, your distro, kernel version, and `lsusb` output.
-- **Code improvements** — Per-key custom layouts, packaging, translations, and CI improvements are all welcome.
-- **Documentation** — Typos, clarifications, and new model entries are appreciated.
+---
 
-## Before you start
+## Ways to Contribute
 
-- The `master` branch is **protected**: no direct pushes, even for maintainers. All changes go through a pull request.
-- A GitHub Actions workflow runs the test suite on Python 3.8–3.12 for every PR. Your PR will not merge until CI is green.
-- Linear history is enforced — use **squash merge** when merging your PR (GitHub will do this automatically if you click "Squash and merge").
+| Area | What's involved | Skill level |
+|------|----------------|-------------|
+| **Add a new laptop model** | Run calibration tools, submit a profile via PR | **No coding needed** |
+| **Test on new hardware** | Install, run `gigamate status`, report results | No coding |
+| **Report bugs** | Open an issue with steps to reproduce | No coding |
+| **ACPI research** | Probe additional WMBC/WMBD commands | Intermediate (ACPI) |
+| **Code improvements** | Kernel module, Python, packaging | Developer |
+| **Documentation** | Typos, clarifications, translations | No coding |
+| **Packaging** | AUR, COPR, Flatpak, Debian packages | Developer |
 
-## Setup
+---
+
+## Adding a New Model (No Coding Required)
+
+The most valuable contribution you can make is adding support for your
+Gigabyte laptop model. The calibration tools do all the work — you just
+need to run them and submit the result.
+
+### Step 1: Install GigaMate
+
+```sh
+git clone https://github.com/goodeesh/GigaMate.git
+cd GigaMate
+./install.sh
+```
+
+### Step 2: Calibrate keyboard RGB
+
+```sh
+gigamate calibrate rgb
+```
+
+This interactive session (~5 minutes) sends colour samples to your keyboard
+and asks you to name what you see. It saves a profile to
+`~/.config/gigamate/profiles/{VID}_{PID}.json`.
+
+### Step 3: Probe ACPI capabilities
+
+```sh
+gigamate detect --acpi
+```
+
+This automatically probes all ACPI commands and detects:
+- Temperature sensors (CPU, socket)
+- Fan RPM readback
+- Fan duty cycle readback
+- Power profile switching (Quiet/Balanced/Performance/Gaming)
+
+The results are appended to your device profile.
+
+### Step 4: Test
+
+```sh
+gigamate status                   # Verify readings
+gigamate profile gaming           # Test profile switching
+```
+
+### Step 5: Contribute via Pull Request
+
+```sh
+gigamate profile contribute
+```
+
+This prints step-by-step instructions to fork the repo, add your profile,
+and open a Pull Request. You'll need a GitHub account and basic git knowledge.
+
+**Prefer not to use git?** Open a
+[GitHub issue](https://github.com/goodeesh/GigaMate/issues/new)
+with your profile JSON attached, and a maintainer will add it.
+
+---
+
+## Development Setup
 
 ```sh
 # Fork the repo on GitHub, then:
-git clone https://github.com/<your-username>/gigabyte-keyboard-rgb.git
-cd gigabyte-keyboard-rgb
+git clone https://github.com/<your-username>/GigaMate.git
+cd GigaMate
 
 # Create a virtual env (optional but recommended)
 python -m venv .venv
@@ -37,104 +106,120 @@ pip install pytest
 # Run the tests
 python -m pytest tests/ -v
 
-# Run the CLI against real hardware (if you have a supported keyboard)
-gigabyte-rgb detect
-gigabyte-rgb static purple
+# Test the CLI against real hardware (if you have a supported keyboard)
+gigamate rgb detect
+gigamate status
 ```
 
-## Making changes
+---
 
-1. Create a branch from `master`:
+## Making Changes
+
+1. **Create a branch** from `main`:
    ```sh
    git checkout -b fix/short-description
    ```
 
-2. Make your changes. Keep commits focused — one logical change per commit is ideal.
+2. **Make your changes.** Keep commits focused — one logical change per commit.
 
-3. Add or update tests in `tests/` if your change touches `protocol.py`, `config.py`, or `cli.py`. The tray app is hard to unit-test (it needs a real display), so we focus tests on the protocol logic.
+3. **Add or update tests** in `tests/` if your change touches:
+   - `protocol.py` — USB RGB protocol
+   - `config.py` — Config persistence
+   - `acpi.py` — ACPI communication
+   - `profiles.py` — Profile system
+   - `cli.py` — CLI commands
 
-4. Make sure everything passes locally:
+4. **Run tests locally:**
    ```sh
    python -m pytest tests/ -v
    ```
 
-5. Commit and push to your fork:
+5. **Commit and push:**
    ```sh
    git add -A
    git commit -m "Short imperative commit message"
    git push -u origin fix/short-description
    ```
 
-6. Open a pull request:
+6. **Open a Pull Request:**
    ```sh
-   gh pr create --base master
+   gh pr create --repo goodeesh/GigaMate --base main
    ```
-   or use the GitHub web UI.
+   Or use the GitHub web UI.
 
-## Pull request guidelines
+---
 
-- Use the PR template (it'll auto-populate when you create a PR from the GitHub web UI).
-- Reference any issues your PR closes (e.g. "Closes #12").
-- If your change affects the colour/protocol tables in the README, update the docs in the same PR.
-- If your PR adds a new model to the tested-hardware table, please include the `lsusb` output as evidence.
+## Pull Request Guidelines
 
-## Branch protection rules (current)
+- Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md) — it auto-populates
+- Reference any issues your PR closes (e.g. "Closes #12")
+- If your PR adds a new model:
+  - Include the profile JSON in `src/gigamate/profile_data/`
+  - Update the hardware table in `README.md`
+  - Include `lsbusb` output as evidence
+- If your change affects the ACPI layer, mention what hardware you tested on
+- Keep the scope focused — one model per PR, one fix per PR
 
-The `master` branch has the following protection enabled:
+---
 
-| Rule | Setting |
-|---|---|
-| Direct pushes | ❌ Blocked for everyone |
-| Pull request required | ✅ Yes |
-| Approving reviews | 0 (you can merge your own PR) |
-| CI must pass | ✅ All 5 Python versions |
-| Branch must be up to date | ✅ Required |
-| Force pushes | ❌ Blocked |
-| Branch deletion | ❌ Blocked |
-| Linear history | ✅ Required (use squash merge) |
+## Testing ACPI Without Hardware
 
-## Code style
+Use the mock backend:
 
-- Follow the existing style (PEP 8, 4-space indent, snake_case for functions/vars).
-- Don't add comments unless the code is genuinely non-obvious.
-- Keep functions short and focused.
+```sh
+GIGAMATE_ACPI_MOCK=1 gigamate status
+```
 
-## Adding a new model
+This returns plausible static values (65°C, 3580 RPM, Balanced profile)
+for testing the Python layer without requiring a Gigabyte laptop.
 
-The tool has a **calibration system** that lets you add support for any
-Gigabyte USB keyboard without writing code.
+---
 
-### For users (no code needed)
+## Kernel Module Development
 
-1. **Install** the tool as described in the [README](README.md#installation)
-2. **Run detection**:
-   ```sh
-   gigabyte-rgb detect
-   ```
-3. **Run calibration** (interactive, ~5 minutes):
-   ```sh
-   gigabyte-rgb --calibrate
-   ```
-   You will be prompted to name colours as the keyboard cycles through
-   `(byte5, byte4)` sample points. The tool saves a JSON profile to
-   `~/.config/gigabyte-keyboard-rgb/profiles/{VID}_{PID}.json`.
-4. **Use the profile**: Click **Reload profiles** in the tray menu, or
-   restart the service: `systemctl --user restart gigabyte-keyboard-rgb.service`
-5. **Share your work**: Open a
-   [GitHub issue](https://github.com/goodeesh/gigabyte-keyboard-rgb/issues/new)
-   and attach the JSON file. We'll add it to the built-in set.
+The `gigamate_acpi` kernel module lives in `src/gigamate_acpi/`.
 
-### For contributors (adding a built-in profile)
+### Building
 
-If you have calibration JSON from a tested laptop, you can add it as a
-built-in profile in a PR:
+```sh
+cd src/gigamate_acpi
+make CC=clang LLVM=1    # Use clang if kernel was built with it
+```
 
-1. Copy the JSON to `src/gigabyte_keyboard_rgb/profile_data/{VID}_{PID}.json`
-2. Ensure the file follows the schema (see any existing file as a template)
-3. Run the tests: `python -m pytest tests/ -v`
-4. Open a PR as described in [Making changes](#making-changes)
+### Testing
 
-### Profile JSON schema
+```sh
+# Load
+sudo insmod gigamate_acpi.ko
+
+# Verify
+ls /sys/devices/platform/gigamate_acpi/
+cat /sys/devices/platform/gigamate_acpi/temp1_input
+
+# Profile switching
+echo 3 | sudo tee /sys/devices/platform/gigamate_acpi/profile
+
+# Unload
+sudo rmmod gigamate_acpi
+```
+
+### Adding new ACPI commands
+
+The module uses `acpi_wmbc_read()` and `acpi_wmbd_write()` helpers.
+See `docs/research.md` for the full ACPI command reference.
+
+1. Add a `DEVICE_ATTR_RO` for the new sensor
+2. Add the `show` function that calls `acpi_wmbc_read()`
+3. Add the attribute to `gigamate_acpi_dev_attrs[]` in `probe()`
+4. Add corresponding read in `acpi.py` → `ModuleBackend`
+
+---
+
+## Profile JSON Schema (v2)
+
+Profiles define keyboard RGB and optional ACPI capabilities.
+
+### Minimal RGB-only profile
 
 ```json
 {
@@ -150,32 +235,52 @@ built-in profile in a PR:
 }
 ```
 
-| Field | Description |
-|---|---|
-| `name` | Human-readable model name |
-| `vid` / `pid` | USB VID and PID as hex strings |
-| `interfaces` | USB interfaces to detach (typically `[1, 3]`) |
-| `control_interface` | Interface for `ctrl_transfer` (typically `3`) |
-| `colour_map` | Map of colour name → brightness level `"0"/"1"/"2"` → `[byte5, byte4]` |
+### Full profile with ACPI
 
-Profile JSON files in `~/.config/gigabyte-keyboard-rgb/profiles/` override
-built-in files with the same `(VID, PID)`, so users can customise without
-modifying the package.
+```json
+{
+  "name": "Gigabyte Aero X16 (EG61VH)",
+  "version": 2,
+  "vid": "0x0414",
+  "pid": "0x8105",
+  "interfaces": [1, 3],
+  "control_interface": 3,
+  "colour_map": { ... },
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "fan_count": 2,
+    "fan_labels": ["CPU Fan", "GPU Fan"],
+    "profiles": {
+      "0": {"name": "Quiet", "desc": "Low fan noise"},
+      "3": {"name": "Gaming", "desc": "Maximum GPU power"}
+    },
+    "backend": "module"
+  }
+}
+```
 
-## Releasing a new version
+See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md) for the complete reference.
 
-(Maintainers only.) Version bumps follow the pattern:
+---
 
-1. Update `__version__` in `src/gigabyte_keyboard_rgb/__init__.py`.
-2. Update `version` in `pyproject.toml`.
-3. Open a PR with the version bump.
-4. After merge, tag the squash commit:
+## Releasing a New Version
+
+(Maintainers only.)
+
+1. **Update version** in `src/gigamate/__init__.py` and `pyproject.toml`
+2. **Update** `CHANGELOG.md`
+3. **Open a PR** with the version bump
+4. **After merge**, tag the commit:
    ```sh
-   git tag v0.X.Y <squash-commit-sha>
-   git push origin v0.X.Y
+   git tag vX.Y.Z <squash-commit-sha>
+   git push origin vX.Y.Z
    ```
-5. GitHub will show the tag on the releases page; create a release with release notes.
+5. **Create a release** on GitHub with release notes
+
+---
 
 ## Questions?
 
-Open an issue with the `question` label and we'll get back to you as soon as possible.
+Open an issue with the `question` label.
