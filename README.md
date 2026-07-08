@@ -7,348 +7,123 @@ power profile switching — all in one system tray app with community-driven mod
 
 ---
 
-## Features
-
-| Feature | Description | How to use |
-|---------|-------------|------------|
-| 🎨 **Keyboard RGB** | 11 colours, 3 brightness levels | `gigamate rgb static purple` |
-| 🌡️ **Temperature monitoring** | CPU & socket temp from ACPI sensors | `gigamate status` |
-| 🔧 **Fan monitoring** | RPM + duty cycle for CPU & GPU fans | `gigamate status` |
-| ⚡ **Power profiles** | Switch Quiet/Balanced/Performance/Gaming | `gigamate profile gaming` |
-| 🖥️ **System tray app** | All controls in one menu, live status | `gigamate-tray` |
-| 🔌 **Kernel module** | Direct ACPI access via sysfs | Auto-installed |
-| 👥 **Community profiles** | Add your model without coding | `gigamate calibrate --all` |
-
----
-
-## ⚠ Disclaimer
-
-**Use this software entirely at your own risk.** No warranty expressed or implied.
-See [LICENSE](LICENSE).
-
----
-
 ## Quick Start
 
 ```sh
 curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
 ```
 
-After install, the tray app auto-starts on login. You can also launch it manually:
-
-```sh
-gigamate-tray        # System tray control centre
-```
+After install, the tray app auto-starts on login. Launch manually with `gigamate-tray`.
 
 ---
 
-## Tested Hardware
+## Features
 
-| Manufacturer | Model | CPU | GPU | USB ID | ACPI | Status |
-|---|---|---|---|---|---|---|
-| Gigabyte | Aero X16 (EG61VH) | AMD Ryzen AI 350 | RTX 5060 | `0414:8105` | ✅ AMW0 | ✅ Full support |
-
-**Your model not listed?** See [Adding a new model](#adding-a-new-model).
-
----
-
-## Installation
-
-### Quick install (recommended)
-
-**One-liner:**
-```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
-```
-
-**Or with git (review first):**
-```sh
-git clone https://github.com/goodeesh/GigaMate.git
-cd GigaMate
-./install.sh
-```
-
-The installer will:
-1. Detect your distribution and install system dependencies
-2. Build and install the `gigamate_acpi` kernel module (if kernel headers available)
-3. Install the Python package via `pip --user` or `pipx`
-4. Install a udev rule for non-root USB access
-5. Install and start a systemd user service (auto-start on login)
-6. Migrate settings from old `gigabyte-keyboard-rgb` config if present
-
-### Manual install
-
-```sh
-# System dependencies (Arch)
-sudo pacman -S python-pyusb python-gobject gtk3 libappindicator-gtk3 linux-headers
-
-# System dependencies (Debian/Ubuntu)
-sudo apt install python3-usb python3-gi python3-gi-cairo \
-  gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 linux-headers-$(uname -r)
-
-# System dependencies (Fedora)
-sudo dnf install python3-pyusb python3-gobject gtk3 libappindicator-gtk3 kernel-devel
-
-# Build kernel module (requires kernel headers)
-cd src/gigamate_acpi
-make CC=clang LLVM=1      # Use clang if kernel was built with it
-sudo make install
-sudo modprobe gigamate_acpi
-
-# Install Python package
-pip install --user .
-
-# udev rule
-sudo cp data/99-gigamate.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-
-# systemd user service
-cp data/gigamate.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now gigamate.service
-```
-
-### GNOME users: tray icon support
-
-Install the AppIndicator extension:
-
-```sh
-# Arch
-sudo pacman -S gnome-shell-extension-appindicator
-
-# Debian/Ubuntu
-sudo apt install gnome-shell-extension-appindicator
-
-# Fedora
-sudo dnf install gnome-shell-extension-appindicator
-```
-
-Log out and back in, or restart GNOME Shell (`Alt+F2` then `r`).
-
-### Upgrading from gigabyte-keyboard-rgb
-
-The installer automatically migrates your settings from
-`~/.config/gigabyte-keyboard-rgb/` to `~/.config/gigamate/` on first run.
-
-The old `gigabyte-rgb` CLI command still works and shows a deprecation notice
-pointing to the new `gigamate` command.
+- **Keyboard RGB** — Set colour and brightness from tray or CLI
+- **Temperature monitoring** — CPU and system temperatures
+- **Fan monitoring** — RPM and duty cycle readback
+- **Power profiles** — Switch between Quiet/Balanced/Performance/Gaming
+- **System tray app** — All controls in one place, live status updates
+- **Community model profiles** — Add your laptop model without coding
 
 ---
 
 ## Usage
 
-### System tray app (primary interface)
+### System tray app
 
-After installation, look for **GigaMate** in your application menu or run
-`gigamate-tray`. The tray icon provides:
+The tray icon shows colour, brightness, power profile, and live status:
 
 ```
-Colour
-  ○ Red  ○ Green  ○ Yellow …  ○ Light Purple •  …  ○ Blush Pink
-Brightness
-  ○ Off  ○ Dim  ○ Full •
-──────────────────────────────────
-Power Profile
-  ○ Quiet  ○ Balanced  ○ Performance  ○ Gaming •
-──────────────────────────────────
-Status: CPU: 56°C  |  Fan: 1875 RPM  |  Gaming
-──────────────────────────────────
-☐ Apply on startup
+Colour → 11+ colours depending on your model
+Brightness → Off / Dim / Full
+Power Profile → Quiet / Balanced / Performance / Gaming
+Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming
+Apply on startup
 Reload profiles
-──────────────────────────────────
-About
-──────────────────────────────────
-Quit
 ```
 
-The status line updates automatically every 5 seconds.
-
-### CLI reference
+### CLI
 
 ```sh
-# RGB keyboard
-gigamate rgb static <colour>        # Set colour
-gigamate rgb off                    # Turn backlight off
-gigamate rgb detect                 # Scan for keyboards
-gigamate rgb cycle                  # Cycle through colours
-gigamate rgb calibrate              # Interactive RGB calibration
-
-# System status
-gigamate status                     # Full hardware status
-
-# Power profiles
-gigamate profile                    # Show current profile
-gigamate profile gaming             # Switch to Gaming
-gigamate profile quiet              # Switch to Quiet/eco
-
-# Detection
-gigamate detect                     # Show keyboard + ACPI info
-gigamate detect --acpi              # Detailed ACPI capability probe
-
-# Calibration
-gigamate calibrate rgb              # Keyboard RGB only
-gigamate calibrate acpi             # ACPI auto-probe only
-gigamate calibrate all              # Combined
-
-# Version
-gigamate version
+gigamate rgb static <colour>     # Set keyboard colour
+gigamate rgb off                 # Turn backlight off
+gigamate rgb detect              # Scan for keyboards
+gigamate rgb calibrate           # Interactive RGB calibration
+gigamate status                  # Full hardware status
+gigamate profile                 # Show current power profile
+gigamate profile gaming          # Switch to Gaming mode
+gigamate detect                  # Show keyboard + ACPI info
+gigamate detect --acpi           # Probe ACPI capabilities
+gigamate calibrate all           # Complete model calibration
+gigamate profile contribute      # Share your profile via PR
 ```
 
-### Legacy CLI
-
-The old `gigabyte-rgb` command syntax still works:
-
-```sh
-gigabyte-rgb static purple          # Same as 'gigamate rgb static purple'
-gigabyte-rgb --calibrate            # Same as 'gigamate rgb calibrate'
-gigabyte-rgb detect                 # Same as 'gigamate rgb detect'
-```
+Legacy `gigabyte-rgb` commands still work with a deprecation notice.
 
 ---
 
-## Adding a new model
+## Adding a New Model
 
-GigaMate supports any Gigabyte Aero/AORUS laptop with a community-driven
-profile system. Adding a new model takes ~10 minutes and requires **no coding**.
-
-### Step 1: Calibrate keyboard RGB
+Your laptop isn't supported yet? Run these three commands:
 
 ```sh
-gigamate calibrate rgb
+gigamate calibrate rgb              # Map keyboard colours (5 min)
+gigamate detect --acpi              # Probe ACPI capabilities
+gigamate profile contribute         # Print PR instructions to share
 ```
 
-This interactive session sends colour samples to your keyboard and asks you
-to name them. It saves a profile to `~/.config/gigamate/profiles/`.
-
-### Step 2: Probe ACPI capabilities
-
-```sh
-gigamate detect --acpi
-```
-
-This automatically probes all ACPI commands and detects what sensors and
-power profiles your laptop supports.
-
-### Step 3: Combine and test
-
-```sh
-gigamate calibrate all               # RGB + ACPI in one command
-gigamate status                      # Verify readings look correct
-gigamate profile gaming              # Test profile switching
-```
-
-### Step 4: Contribute your profile
-
-```sh
-gigamate profile contribute          # Prints PR instructions
-```
-
-This shows step-by-step instructions to:
-1. Fork the repository on GitHub
-2. Add your profile file
-3. Open a Pull Request
-
-Your profile will be reviewed and added to the next release, making it
-available for all users with the same laptop model.
+No coding required. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
-## Built-in profiles
+## Installation
 
-| VID:PID | Model | Since | RGB | ACPI |
-|---------|-------|-------|-----|------|
-| `0414:8105` | Gigabyte Aero X16 (EG61VH) | v0.1.0 | ✅ 11 colours | ✅ Full |
+### One-liner (recommended)
 
-User profiles in `~/.config/gigamate/profiles/` override built-ins with the same VID:PID.
+```sh
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
+```
+
+The installer auto-detects your distro, installs dependencies, builds the kernel
+module (if headers available), sets up udev rules, and installs a systemd service.
+
+### Manual install
+
+See the [Installation wiki page](https://github.com/goodeesh/GigaMate/wiki/Installation)
+for per-distro manual steps.
+
+### Upgrading from gigabyte-keyboard-rgb
+
+Settings migrate automatically from `~/.config/gigabyte-keyboard-rgb/` on first run.
 
 ---
 
 ## How It Works
 
-### Architecture
+GigaMate has two hardware backends:
 
-```
-┌─────────────────────────────────────────┐
-│         Tray App (gigamate-tray)        │
-│  ┌───────────────────────────────────┐  │
-│  │  CLI (gigamate)                   │  │
-│  └──────────┬────────────────────────┘  │
-└─────────────┼───────────────────────────┘
-              │
-┌─────────────▼───────────────────────────┐
-│           Python Modules                │
-│  • acpi.py      ACPI/WMI interface      │
-│  • protocol.py  USB HID RGB protocol    │
-│  • profiles.py  Device profile system   │
-│  • config.py    Persistent settings     │
-└──────┬──────────────────────┬───────────┘
-       │                      │
-┌──────▼──────────┐  ┌───────▼───────────┐
-│ gigamate_acpi.ko │  │ USB HID (pyusb)  │
-│ (kernel module)  │  │ Interface 3      │
-│ ACPI WMBD/WMBC   │  │ 8-byte commands  │
-│ via sysfs        │  │                  │
-└──────────────────┘  └──────────────────┘
-```
+| Backend | Purpose | Communication |
+|---------|---------|---------------|
+| **USB HID** | Keyboard RGB | 8-byte control transfers via pyusb |
+| **Kernel module** | Fan, temp, power | ACPI WMBD/WMBC via sysfs |
 
-### Keyboard RGB
+The kernel module (`gigamate_acpi.ko`) exposes sensors at
+`/sys/devices/platform/gigamate_acpi/`. The Python layer auto-detects
+which backends are available and degrades gracefully if one is missing.
 
-The keyboard uses an 8-byte USB HID Feature Report on Interface 3:
-
-```
-[0x08, 0x00, program, speed, brightness, colour, 0x01, checksum]
-```
-
-See [Colours](#colours) for the 11 empirically determined colour mappings.
-
-### ACPI Fan & Power Control
-
-The laptop exposes an AMW0 WMI device (`\_SB.PCI0.AMW0`) with two methods:
-- **WMBC** — read sensors (temperature, RPM, duty cycle)
-- **WMBD** — write commands (power profile switching)
-
-The kernel module provides a sysfs interface at `/sys/devices/platform/gigamate_acpi/`:
-
-| File | R/W | ACPI call | Description |
-|------|-----|-----------|-------------|
-| `temp1_input` | R | `WMBC 0xE1` | CPU temperature (°C) |
-| `temp2_input` | R | `WMBC 0xE2` | Socket temperature (°C) |
-| `fan1_input` | R | `WMBC 0xE4` | Fan 1 RPM |
-| `fan2_input` | R | `WMBC 0xE5` | Fan 2 RPM |
-| `pwm1` | R | `WMBC 0x46` | CPU fan duty (%) |
-| `pwm2` | R | `WMBC 0x47` | GPU fan duty (%) |
-| `pwm1_total` | R | `WMBC 0x50` | Total fan duty (%) |
-| `profile` | R/W | `WMBD 0xED` | Power profile (0=Quiet … 3=Gaming) |
-
-Full ACPI command reference in [docs/research.md](docs/research.md).
+Each laptop model is described by a JSON profile defining its RGB colour map
+and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
 
 ---
 
-## Colours
+## Built-in Profiles
 
-The keyboard firmware has a non-linear colour response. The tool exposes
-11 empirically determined colours:
+| VID:PID | Model |
+|---------|-------|
+| `0414:8105` | Gigabyte Aero X16 (EG61VH) |
 
-| Name | Dim `(byte5, byte4)` | Full `(byte5, byte4)` |
-|------|---------------------|----------------------|
-| Red | `(0x01, 0x19)` | `(0x01, 0x64)` |
-| Green | `(0x02, 0x19)` | `(0x02, 0x64)` |
-| Yellow | `(0x03, 0x19)` | `(0x03, 0x64)` |
-| Blue | `(0x04, 0x19)` | `(0x04, 0x64)` |
-| Orange | `(0x05, 0x19)` | `(0x05, 0x32)` |
-| Dark Yellow | `(0x05, 0x4B)` | `(0x05, 0x64)` |
-| Purple | `(0x06, 0x19)` | `(0x06, 0x32)` |
-| Light Purple | `(0x06, 0x5A)` | `(0x06, 0x64)` |
-| White | `(0x07, 0x19)` | `(0x07, 0x32)` |
-| Light Blue | `(0x07, 0x5A)` | `(0x07, 0x64)` |
-| Blush Pink | `(0x06, 0x4B)` | `(0x07, 0x4B)` |
-
-> **Technical note:** The Aero X16 firmware has a transitional hue zone around
-> brightness byte `0x4B`. To give Light Purple and Light Blue proper dim levels,
-> we use `0x5A` (past the pink zone). Blush Pink is a single entry where Dim
-> uses the purple colour byte and Full uses the white colour byte.
-
-There is no custom RGB mode — only preset colour bytes.
+User profiles in `~/.config/gigamate/profiles/` override built-ins for the same VID:PID.
 
 ---
 
@@ -356,79 +131,42 @@ There is no custom RGB mode — only preset colour bytes.
 
 ```
 GigaMate/
-├── src/
-│   ├── gigamate/               # Python package
-│   │   ├── __init__.py         # Version, docstring
-│   │   ├── __main__.py         # python -m gigamate support
-│   │   ├── acpi.py             # ACPI communication layer
-│   │   ├── cli.py              # CLI (gigamate command)
-│   │   ├── config.py           # JSON config persistence
-│   │   ├── paths.py            # Shared path constants
-│   │   ├── profiles.py         # Device profiles + calibration
-│   │   ├── protocol.py         # USB HID RGB protocol
-│   │   ├── tray.py             # AppIndicator3 tray app
-│   │   └── profile_data/       # Built-in JSON profiles
-│   │       └── 0414_8105.json
-│   └── gigamate_acpi/          # Kernel module source
-│       ├── Makefile
-│       └── gigamate_acpi.c
-├── data/
-│   ├── 99-gigamate.rules       # udev rule
-│   ├── gigamate.service        # systemd user unit
-│   ├── gigamate.svg            # tray icon
-│   └── gigamate.desktop        # desktop entry
-├── docs/
-│   ├── research.md             # Hardware research notes
-│   └── PROFILE_SCHEMA.md       # v2 profile JSON schema
-├── tests/
-│   ├── test_acpi.py            # ACPI layer tests
-│   ├── test_profiles.py        # Profile tests
-│   └── test_protocol.py        # Protocol tests
-├── install.sh                  # Cross-distro installer
-├── uninstall.sh                # Uninstaller
-├── pyproject.toml              # PEP 621 build metadata
-├── CHANGELOG.md
-├── CONTRIBUTING.md
-└── README.md                   # This file
+├── src/gigamate/             # Python package
+├── src/gigamate_acpi/        # Kernel module source
+├── data/                     # Service, udev, icon, desktop
+├── docs/                     # Research notes + profile schema
+├── tests/                    # 65+ unit tests
+├── install.sh / uninstall.sh
+├── README.md / CONTRIBUTING.md / CHANGELOG.md
+└── pyproject.toml / LICENSE
 ```
 
 ---
 
 ## Acknowledgements
 
-- **[Paul Ridgway](https://blockdev.io/gigabyte-aero-w15-keyboard-and-linux-ubuntu/)** — Original reverse engineering of the 8-byte USB HID protocol
-- **[paul-ridgway/aero-keyboard](https://github.com/paul-ridgway/aero-keyboard)** — Ruby protocol implementation
+- **[Paul Ridgway](https://blockdev.io/gigabyte-aero-w15-keyboard-and-linux-ubuntu/)** — Original USB HID protocol reverse engineering
+- **[paul-ridgway/aero-keyboard](https://github.com/paul-ridgway/aero-keyboard)** — Ruby implementation
 - **[yurikhan/aero-keyboard-rgb](https://github.com/yurikhan/aero-keyboard-rgb)** — Python port
-- **[b4ckspace/aero-rgb-linux](https://github.com/b4ckspace/aero-rgb-linux)** — Early C utility
-- **[Nesh108/MyAorusKeyboardSDK](https://github.com/Nesh108/MyAorusKeyboardSDK)** — Windows SDK
 - **[PyUSB](https://pyusb.github.io/pyusb/)** — Python USB library
-- **Linux kernel** — USB HID, ACPI, sysfs subsystems
-- **The open-source community** — Countless forum posts, GitHub issues, and wiki pages
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
+- **Adding a new model** — Calibrate + submit profile via PR
+- **ACPI research** — Investigate additional commands on your model
+- **Packaging** — Help with AUR, COPR, Flatpak
+
+## Uninstalling
+
+```sh
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/uninstall.sh | bash
+```
 
 ---
 
 ## License
 
 MIT License — see [LICENSE](LICENSE).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
-- **Testing on new hardware** — Calibrate + submit profile via PR
-- **ACPI research** — Investigate additional WMBC/WMBD commands
-- **Packaging** — Help with distro packages (AUR, COPR, Flatpak)
-
-## Uninstalling
-
-**One-liner:**
-```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/uninstall.sh | bash
-```
-
-**Or with git:**
-```sh
-cd GigaMate
-./uninstall.sh
-```
-
-Or manually: `pip uninstall gigamate` + remove udev rule + systemd unit.
