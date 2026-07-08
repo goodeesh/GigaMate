@@ -417,7 +417,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
 - **Testing on new hardware** — Calibrate + submit profile via PR
 - **ACPI research** — Investigate additional WMBC/WMBD commands
 - **Packaging** — Help with distro packages (AUR, COPR, Flatpak)
-- **Translations** — Internationalise the tray menu
 
 ## Uninstalling
 

@@ -23,7 +23,7 @@ spare time. Clear communication goes a long way.
 | **Report bugs** | Open an issue with steps to reproduce | No coding |
 | **ACPI research** | Probe additional WMBC/WMBD commands | Intermediate (ACPI) |
 | **Code improvements** | Kernel module, Python, packaging | Developer |
-| **Documentation** | Typos, clarifications, translations | No coding |
+| **Documentation** | Typos, clarifications | No coding |
 | **Packaging** | AUR, COPR, Flatpak, Debian packages | Developer |
 
 ---
