@@ -1,4 +1,6 @@
-# Allow userspace access to the Gigabyte USB-HID keyboard for RGB control
-# Install: sudo cp into /etc/udev/rules.d/ then udevadm control --reload-rules
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="8105", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="8105", MODE="0666"
+# GigaMate — allow non-root USB control for Gigabyte keyboard RGB
+# All known Gigabyte vendor IDs: 0414 (primary), 1044 (secondary), 04D9 (third)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", ATTRS{idProduct}=="*", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="*", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0666"

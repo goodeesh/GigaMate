@@ -106,10 +106,21 @@ build_kernel_module() {
 
     info "Building gigamate_acpi.ko..."
     make -C "$mod_src" clean 2>/dev/null || true
-    make -C "$mod_src"
+    # Try with clang first (modern kernels), fall back to default compiler
+    if make -C "$mod_src" CC=clang LLVM=1 2>/dev/null; then
+        info "Built with clang"
+    else
+        make -C "$mod_src" || {
+            warn "Kernel module build failed."
+            warn "Fan/power features will be disabled."
+            return
+        }
+        info "Built with default compiler"
+    fi
 
     info "Installing kernel module (needs sudo)..."
-    sudo make -C "$mod_src" install
+    sudo make -C "$mod_src" install 2>/dev/null || \
+    sudo make -C "$mod_src" CC=clang LLVM=1 install
     sudo depmod -a
 
     info "Loading module..."
