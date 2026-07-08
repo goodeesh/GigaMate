@@ -232,8 +232,7 @@ class GigaMateTrayApp:
             items = [(cname, cname.replace("_", " ").title()) for cname in colours]
             active = self._current_colour
 
-            grid_item = self._build_radio_grid(items, 2, self._on_colour_grid_changed, active)
-            self._menu.append(grid_item)
+            self._append_radio_rows(items, 2, self._on_colour_selected, active)
 
         # ── Keyboard Brightness section — 3-column grid ──
         if self._profile is not None and self._profile.has_rgb:
@@ -245,8 +244,7 @@ class GigaMateTrayApp:
             items = [(level, label) for level, label in enumerate(BRIGHTNESS_NAMES)]
             active = self._current_brightness
 
-            grid_item = self._build_radio_grid(items, 3, self._on_brightness_grid_changed, active)
-            self._menu.append(grid_item)
+            self._append_radio_rows(items, 3, self._on_brightness_selected, active)
 
         # ── Settings items ──
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -256,12 +254,12 @@ class GigaMateTrayApp:
         self._append_about()
         self._append_quit()
 
-    def _on_colour_grid_changed(self, cname: str) -> None:
+    def _on_colour_selected(self, cname: str) -> None:
         """Handle colour selection from grid."""
         self._current_colour = cname
         self._apply_colour()
 
-    def _on_brightness_grid_changed(self, level: int) -> None:
+    def _on_brightness_selected(self, level: int) -> None:
         """Handle brightness selection from grid."""
         self._current_brightness = level
         self._apply_colour()
@@ -270,36 +268,36 @@ class GigaMateTrayApp:
     # Section builders
     # ────────────────────────────────────────────
 
-    def _build_radio_grid(
+    def _append_radio_rows(
         self,
         items: List[tuple],
         columns: int,
         callback,
         active_key=None,
-    ) -> Gtk.MenuItem:
-        """Build a GtkMenuItem containing a GtkGrid of radio buttons.
+    ) -> None:
+        """Append radio buttons in multi-column rows.
+
+        Each row is one GtkMenuItem containing a GtkBox with `columns` radio
+        buttons. All radio buttons share the same group across rows.
 
         Args:
             items: list of (key, label) tuples
-            columns: number of columns
-            callback: function(key) called when selected
+            columns: number of radio buttons per row
+            callback: function(key) called when a radio button is selected
             active_key: key of the initially active button
-        Returns:
-            GtkMenuItem with embedded GtkGrid
         """
-        rows = (len(items) + columns - 1) // columns
-
-        grid = Gtk.Grid()
-        grid.set_column_spacing(6)
-        grid.set_row_spacing(0)
-        grid.set_margin_start(4)
-        grid.set_margin_end(4)
-
         first_rb = None
 
         for idx, (key, label) in enumerate(items):
-            row = idx // columns
             col = idx % columns
+            if col == 0:
+                # Start a new row (GtkMenuItem with horizontal GtkBox)
+                box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                box.set_margin_start(4)
+                box.set_margin_end(4)
+                row_item = Gtk.MenuItem()
+                row_item.add(box)
+                self._menu.append(row_item)
 
             rb = Gtk.RadioButton.new_with_label_from_widget(first_rb, label)
             if first_rb is None:
@@ -308,15 +306,11 @@ class GigaMateTrayApp:
             if active_key is not None and key == active_key:
                 rb.set_active(True)
 
-            rb.connect("toggled", self._on_radio_grid_toggled, key, callback)
-            grid.attach(rb, col, row, 1, 1)
+            rb.connect("toggled", self._on_radio_toggled, key, callback)
+            box.pack_start(rb, True, True, 0)
 
-        item = Gtk.MenuItem()
-        item.add(grid)
-        return item
-
-    def _on_radio_grid_toggled(self, button: Gtk.RadioButton, key, callback) -> None:
-        """Handle a grid radio button toggle. Fire callback if active, close menu."""
+    def _on_radio_toggled(self, button: Gtk.RadioButton, key, callback) -> None:
+        """Handle a row radio button toggle. Fire callback if active, close menu."""
         if not button.get_active():
             return
         if self._building:
@@ -325,12 +319,11 @@ class GigaMateTrayApp:
             callback(key)
         except Exception:
             pass
-        # Close the menu
         if self._menu is not None:
             self._menu.deactivate()
 
     def _append_power_profile_section(self) -> None:
-        """Add Power Profile as a 2-column radio grid."""
+        """Add Power Profile as 2-column radio rows."""
         if self._acpi_caps is None or not self._acpi_caps.has_power_profiles:
             return
 
@@ -339,7 +332,6 @@ class GigaMateTrayApp:
         header.set_sensitive(False)
         self._menu.append(header)
 
-        # Get profile names
         if self._profile is not None and self._profile.has_acpi and self._profile.acpi:
             profile_names = self._profile.acpi.profiles
         else:
@@ -357,14 +349,11 @@ class GigaMateTrayApp:
             if self._current_acpi_profile == pid_int:
                 active_key = pid_int
 
-        if not items:
-            return
+        if items:
+            self._append_radio_rows(items, 2, self._on_profile_selected, active_key)
 
-        grid_item = self._build_radio_grid(items, 2, self._on_profile_grid_changed, active_key)
-        self._menu.append(grid_item)
-
-    def _on_profile_grid_changed(self, profile_id: int) -> None:
-        """Handle profile selection from grid."""
+    def _on_profile_selected(self, profile_id: int) -> None:
+        """Handle profile selection."""
         if self._acpi_controller is None:
             return
         self._acpi_controller.set_profile(FanProfile(profile_id))
