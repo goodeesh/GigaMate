@@ -7,6 +7,23 @@ power profile switching — all in one system tray app with community-driven mod
 
 ---
 
+## ⚠ Disclaimer
+
+**Use this software entirely at your own risk.**
+
+GigaMate writes directly to hardware — USB HID for keyboard RGB and ACPI
+for fan/power control. The authors accept no responsibility for any damage,
+malfunction, or data loss caused by using this software.
+
+Known risks:
+- Certain animated keyboard effects can hang the keyboard firmware
+  (requires USB reset to recover). Only `static` mode is safe.
+- ACPI profile switching adjusts CPU/GPU power limits.
+
+Tested on specific Gigabyte models only. Other models may behave differently.
+
+---
+
 ## Quick Start
 
 ```sh
