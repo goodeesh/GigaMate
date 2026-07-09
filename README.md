@@ -115,6 +115,9 @@ which backends are available and degrades gracefully if one is missing.
 Each laptop model is described by a JSON profile defining its RGB colour map
 and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
 
+For details on the USB RGB protocol and ACPI reverse engineering, see
+[docs/RGB_PROTOCOL.md](docs/RGB_PROTOCOL.md) and [docs/research.md](docs/research.md).
+
 ---
 
 ## Built-in Profiles
