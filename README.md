@@ -1,6 +1,6 @@
 # GigaMate — Gigabyte Laptop Management for Linux
 
-**Bringing gimate (Windows) hardware features to Linux (without the AI crap)** Keyboard RGB backlight, fan monitoring,
+**Bringing gimate (Windows) hardware features to Linux (without the AI crap). Control your hardware: ** Keyboard RGB backlight, fan monitoring,
 power profile switching — all in one system tray app with community-driven model support.
 
 ![GigaMate icon](data/gigamate.svg)
