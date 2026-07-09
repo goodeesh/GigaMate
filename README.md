@@ -140,7 +140,7 @@ GigaMate/
 ├── docs/                     # Research notes + profile schema
 ├── tests/                    # 65+ unit tests
 ├── install.sh / uninstall.sh
-├── README.md / CONTRIBUTING.md / CHANGELOG.md
+├── README.md / CONTRIBUTING.md
 └── pyproject.toml / LICENSE
 ```
 
