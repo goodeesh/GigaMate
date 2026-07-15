@@ -43,8 +43,16 @@ if lsmod 2>/dev/null | grep -q gigamate_acpi; then
     sudo modprobe -r gigamate_acpi 2>/dev/null || true
 fi
 
-MODULE_FILE="/lib/modules/$(uname -r)/extra/gigamate_acpi.ko"
-if [ -f "$MODULE_FILE" ]; then
+# Check both possible install paths
+MODULE_FILE=""
+for path in "/lib/modules/$(uname -r)/updates/gigamate_acpi.ko" \
+            "/lib/modules/$(uname -r)/extra/gigamate_acpi.ko"; do
+    if [ -f "$path" ]; then
+        MODULE_FILE="$path"
+        break
+    fi
+done
+if [ -n "$MODULE_FILE" ]; then
     sudo rm -f "$MODULE_FILE"
     sudo depmod -a 2>/dev/null || true
     info "Removed kernel module: $MODULE_FILE"
