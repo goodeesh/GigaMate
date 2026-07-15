@@ -260,7 +260,7 @@ class ModuleBackend(AcpiBackend):
     def detect(self) -> AcpiCapabilities:
         caps = AcpiCapabilities(backend="module")
         if not GIGAMATE_ACPI_SYSFS.is_dir():
-            return caps
+            return AcpiCapabilities(backend="none")
 
         # Check which sysfs files exist
         if (GIGAMATE_ACPI_SYSFS / "temp1_input").exists():
