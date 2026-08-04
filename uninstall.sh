@@ -43,6 +43,13 @@ if lsmod 2>/dev/null | grep -q gigamate_acpi; then
     sudo modprobe -r gigamate_acpi 2>/dev/null || true
 fi
 
+# Remove DKMS registration (auto-rebuild source)
+if command -v dkms &>/dev/null && dkms status 2>/dev/null | grep -q '^gigamate_acpi'; then
+    info "Removing gigamate_acpi from DKMS (needs sudo)..."
+    sudo dkms remove gigamate_acpi --all 2>/dev/null || true
+    sudo rm -rf /usr/src/gigamate_acpi-* 2>/dev/null || true
+fi
+
 # Check both possible install paths
 MODULE_FILE=""
 for path in "/lib/modules/$(uname -r)/updates/gigamate_acpi.ko" \

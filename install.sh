@@ -44,27 +44,27 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3"
-            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3
+            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms"
+            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms
             info "Installing kernel headers (for module build)..."
             sudo pacman -S --needed linux-headers 2>/dev/null || warn "Could not install linux-headers"
             ;;
         debian|ubuntu|pop|mint)
-            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0"
+            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms"
             sudo apt update
-            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0
+            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms
             info "Installing kernel headers..."
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3"
-            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms"
+            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms
             info "Installing kernel headers..."
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         suse|opensuse|sles)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3"
-            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms"
+            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms
             info "Installing kernel headers..."
             sudo zypper install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
@@ -89,6 +89,7 @@ build_kernel_module() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local mod_src="$script_dir/src/gigamate_acpi"
+    local mod_version="1.0.0"
 
     header "Building ACPI kernel module"
 
@@ -104,27 +105,62 @@ build_kernel_module() {
         return
     fi
 
-    info "Building gigamate_acpi.ko..."
-    make -C "$mod_src" clean 2>/dev/null || true
-    # Try with clang first (modern kernels), fall back to default compiler
-    if make -C "$mod_src" CC=clang LLVM=1 2>/dev/null; then
-        info "Built with clang"
-    else
-        make -C "$mod_src" || {
-            warn "Kernel module build failed."
+    # Preferred: DKMS (auto-rebuilds on kernel updates). Requires dkms from
+    # the distro's official repos — never from AUR.
+    if command -v dkms &>/dev/null; then
+        info "Using DKMS to build and install the module..."
+        if ! sudo dkms add "$mod_src" -v "$mod_version" 2>/dev/null; then
+            warn "DKMS add failed."
             warn "Fan/power features will be disabled."
             return
-        }
-        info "Built with default compiler"
+        fi
+        # Try the default compiler first, then fall back to clang/LLVM
+        if sudo dkms build -m gigamate_acpi -v "$mod_version" 2>/dev/null ||
+           sudo env CC=clang LLVM=1 dkms build -m gigamate_acpi -v "$mod_version" 2>/dev/null; then
+            info "Module built via DKMS"
+        else
+            warn "DKMS build failed."
+            warn "Fan/power features will be disabled."
+            return
+        fi
+        if sudo dkms install -m gigamate_acpi -v "$mod_version"; then
+            info "Module installed via DKMS."
+        else
+            warn "DKMS install failed."
+            warn "Fan/power features will be disabled."
+            return
+        fi
+    else
+        warn "dkms not found — falling back to a manual build."
+        warn "The module will NOT auto-rebuild after kernel updates."
+        warn "Install dkms from your distro's official repos and re-run install.sh."
+        info "Building gigamate_acpi.ko..."
+        make -C "$mod_src" clean 2>/dev/null || true
+        if make -C "$mod_src" CC=clang LLVM=1 2>/dev/null; then
+            info "Built with clang"
+        else
+            make -C "$mod_src" || {
+                warn "Kernel module build failed."
+                warn "Fan/power features will be disabled."
+                return
+            }
+            info "Built with default compiler"
+        fi
+        sudo make -C "$mod_src" install 2>/dev/null || \
+        sudo make -C "$mod_src" CC=clang LLVM=1 install
+        sudo depmod -a
     fi
-
-    info "Installing kernel module (needs sudo)..."
-    sudo make -C "$mod_src" install 2>/dev/null || \
-    sudo make -C "$mod_src" CC=clang LLVM=1 install
-    sudo depmod -a
 
     info "Loading module..."
     sudo modprobe gigamate_acpi 2>/dev/null || warn "Module load failed — is this a Gigabyte laptop with AMW0 ACPI?"
+
+    # Verify the sysfs interface actually appeared
+    if [ -d /sys/devices/platform/gigamate_acpi ]; then
+        info "Module loaded, sysfs interface ready: /sys/devices/platform/gigamate_acpi"
+    else
+        warn "Module loaded but no sysfs interface appeared."
+        warn "Your laptop may not expose the AMW0 ACPI device — fan/power features will not work."
+    fi
 
     # Auto-load on boot
     local load_conf="/etc/modules-load.d/gigamate_acpi.conf"

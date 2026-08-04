@@ -174,11 +174,12 @@ class AcpiCallBackend(AcpiBackend):
     """
 
     def detect(self) -> AcpiCapabilities:
-        caps = AcpiCapabilities(backend="acpi_call")
         if not PROC_ACPI_CALL.exists():
-            return caps
+            return AcpiCapabilities(backend="none")
         if not os.access(str(PROC_ACPI_CALL), os.W_OK):
-            return caps
+            return AcpiCapabilities(backend="none")
+
+        caps = AcpiCapabilities(backend="acpi_call")
 
         # Probe sensors
         if self._wmbc_read(0xE1) is not None:

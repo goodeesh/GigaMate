@@ -278,7 +278,7 @@ def cmd_status(args) -> None:
                 print()
     else:
         print(f"  ACPI:  ❌ Not available")
-        print("     Install the kernel module or acpi_call module to enable.")
+        print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
         print()
 
 
@@ -463,8 +463,10 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
         print("  No ACPI interface detected.")
         print()
         print("  To enable ACPI features:")
-        print("    1. Install kernel headers and run install.sh")
-        print("    2. Or install acpi_call-dkms module")
+        print("    1. Install kernel headers and re-run install.sh")
+        print("       (builds and loads the bundled gigamate_acpi module, no extra packages)")
+        print("    2. If you already have the acpi_call module installed,")
+        print("       it is used automatically as a fallback.")
         return
 
     backend_name = {"module": "kernel module", "acpi_call": "acpi_call", "mock": "mock"}.get(
