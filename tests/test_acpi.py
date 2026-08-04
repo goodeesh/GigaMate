@@ -8,9 +8,12 @@ from gigamate.acpi import (
     FanState,
     AcpiCapabilities,
     MockBackend,
+    AcpiCallBackend,
+    ModuleBackend,
     AcpiController,
     probe_acpi_capabilities,
 )
+from gigamate import acpi as acpi_module
 
 
 class TestFanProfile:
@@ -213,6 +216,39 @@ class TestAcpiController:
         caps1 = ctrl.capabilities
         caps2 = ctrl.capabilities
         assert caps1 is caps2  # same object (cached)
+
+
+class TestAcpiCallBackendDetection:
+    def test_missing_proc_file_means_no_backend(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "call")
+        caps = AcpiCallBackend().detect()
+        assert caps.backend == "none"
+
+    def test_unwritable_proc_file_means_no_backend(self, monkeypatch, tmp_path):
+        proc = tmp_path / "call"
+        proc.write_text("0x0\n")
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", proc)
+        monkeypatch.setattr(os, "access", lambda path, mode: False)
+        caps = AcpiCallBackend().detect()
+        assert caps.backend == "none"
+
+    def test_present_writable_proc_file_reports_acpi_call(self, monkeypatch, tmp_path):
+        proc = tmp_path / "call"
+        proc.write_text("0x0\n")
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", proc)
+        monkeypatch.setattr(os, "access", lambda path, mode: True)
+        caps = AcpiCallBackend().detect()
+        assert caps.backend == "acpi_call"
+
+    def test_no_backend_auto_detect_returns_unavailable(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
+        monkeypatch.setattr(
+            acpi_module, "GIGAMATE_ACPI_SYSFS", tmp_path / "nonexistent-sysfs"
+        )
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "nonexistent-call")
+        ctrl = AcpiController()
+        assert ctrl.available is False
+        assert ctrl.capabilities.backend == "none"
 
 
 class TestProbeAcpiCapabilities:
