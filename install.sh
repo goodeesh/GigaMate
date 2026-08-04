@@ -34,6 +34,20 @@ detect_distro() {
     fi
 }
 
+# --- Map running kernel to the matching Arch-family headers package ---
+arch_headers_pkg() {
+    local kr
+    kr="$(uname -r)"
+    case "$kr" in
+        *cachyos-lts*) echo "linux-cachyos-lts-headers" ;;
+        *cachyos*)     echo "linux-cachyos-headers" ;;
+        *zen*)         echo "linux-zen-headers" ;;
+        *hardened*)    echo "linux-hardened-headers" ;;
+        *lts*)         echo "linux-lts-headers" ;;
+        *)             echo "linux-headers" ;;
+    esac
+}
+
 # --- Install system dependencies ---
 install_system_deps() {
     local distro
@@ -46,8 +60,15 @@ install_system_deps() {
         arch|archlinux|endeavouros|cachyos)
             info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms"
             sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms
-            info "Installing kernel headers (for module build)..."
-            sudo pacman -S --needed linux-headers 2>/dev/null || warn "Could not install linux-headers"
+            if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+                local headers_pkg
+                headers_pkg="$(arch_headers_pkg)"
+                info "Installing kernel headers for $(uname -r): $headers_pkg"
+                sudo pacman -S --needed "$headers_pkg" 2>/dev/null || \
+                    warn "Could not install $headers_pkg — install headers matching: $(uname -r)"
+            else
+                info "Kernel headers for $(uname -r) already present."
+            fi
             ;;
         debian|ubuntu|pop|mint)
             info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms"
@@ -89,7 +110,9 @@ build_kernel_module() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local mod_src="$script_dir/src/gigamate_acpi"
-    local mod_version="1.0.0"
+    local mod_version
+    mod_version="$(grep -E '^PACKAGE_VERSION=' "$mod_src/dkms.conf" | head -1 | cut -d= -f2 | tr -d '"')"
+    mod_version="${mod_version:-1.0.0}"
 
     header "Building ACPI kernel module"
 
@@ -101,7 +124,8 @@ build_kernel_module() {
     if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
         warn "Kernel headers not found at /lib/modules/$(uname -r)/build"
         warn "Cannot build kernel module. Fan/power features will be disabled."
-        warn "Install linux-headers and re-run install.sh to enable them."
+        warn "Install the kernel headers matching your running kernel ($(uname -r))"
+        warn "and re-run install.sh to enable them."
         return
     fi
 
@@ -109,8 +133,21 @@ build_kernel_module() {
     # the distro's official repos — never from AUR.
     if command -v dkms &>/dev/null; then
         info "Using DKMS to build and install the module..."
+
+        # Remove any existing registration so re-installs and upgrades work
+        local entry
+        for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1); do
+            info "Removing existing DKMS entry: $entry"
+            sudo dkms remove "$entry" --all 2>/dev/null || true
+        done
+
+        # Portable across dkms 2.x and 3.x: source must live under /usr/src
         make -C "$mod_src" clean 2>/dev/null || true
-        if ! sudo dkms add "$mod_src" 2>/dev/null; then
+        sudo rm -rf "/usr/src/gigamate_acpi-$mod_version"
+        sudo cp -r "$mod_src" "/usr/src/gigamate_acpi-$mod_version"
+        sudo find "/usr/src/gigamate_acpi-$mod_version" -name '*.o' -o -name '*.ko' -o -name '*.mod*' -o -name 'Module.symvers' -o -name 'modules.order' | sudo xargs -r rm -f
+
+        if ! sudo dkms add -m gigamate_acpi -v "$mod_version"; then
             warn "DKMS add failed."
             warn "Fan/power features will be disabled."
             return
@@ -161,6 +198,15 @@ build_kernel_module() {
     else
         warn "Module loaded but no sysfs interface appeared."
         warn "Your laptop may not expose the AMW0 ACPI device — fan/power features will not work."
+    fi
+
+    # Secure Boot: DKMS signs the module with its own key, which must be
+    # enrolled once or the module will not load after a reboot.
+    if [ -d /sys/firmware/efi ] && { ! command -v mokutil &>/dev/null || mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; }; then
+        warn "Secure Boot appears to be enabled."
+        warn "Enroll the DKMS signing key once so the module survives reboot:"
+        warn "  sudo mokutil --import /var/lib/dkms/mok.pub"
+        warn "Reboot, choose 'Enroll key from disk' in the MOK manager, and select mok.pub."
     fi
 
     # Auto-load on boot

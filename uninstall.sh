@@ -46,16 +46,17 @@ fi
 # Remove DKMS registration (auto-rebuild source)
 if command -v dkms &>/dev/null && dkms status 2>/dev/null | grep -q '^gigamate_acpi'; then
     info "Removing gigamate_acpi from DKMS (needs sudo)..."
-    for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi' | cut -d: -f1); do
+    for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi' | cut -d, -f1); do
         sudo dkms remove "$entry" --all 2>/dev/null || true
     done
     sudo rm -rf /usr/src/gigamate_acpi-* 2>/dev/null || true
 fi
 
-# Check both possible install paths
+# Check all possible install paths (manual and DKMS, incl. compressed names)
 MODULE_FILE=""
-for path in "/lib/modules/$(uname -r)/updates/gigamate_acpi.ko" \
-            "/lib/modules/$(uname -r)/extra/gigamate_acpi.ko"; do
+for path in "/lib/modules/$(uname -r)/updates/dkms/gigamate_acpi.ko"* \
+            "/lib/modules/$(uname -r)/updates/gigamate_acpi.ko"* \
+            "/lib/modules/$(uname -r)/extra/gigamate_acpi.ko"*; do
     if [ -f "$path" ]; then
         MODULE_FILE="$path"
         break

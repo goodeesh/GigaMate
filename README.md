@@ -105,6 +105,20 @@ curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | 
 The installer auto-detects your distro, installs dependencies, builds the kernel
 module (if headers available), sets up udev rules, and installs a systemd service.
 
+**ACPI kernel module (no AUR required):**
+
+- The `gigamate_acpi` kernel module is built and installed via **DKMS**
+  (installed from your distro's *official* repositories — never from AUR).
+- DKMS auto-rebuilds the module whenever your kernel is updated, so fan/temp/
+  power control keeps working across kernel upgrades.
+- You need the **kernel headers matching your running kernel** (`uname -r`).
+  The installer picks the right package for Arch-family kernels
+  (CachyOS/zen/lts/hardened); on Debian/Ubuntu it uses `linux-headers-$(uname -r)`,
+  on Fedora/SUSE `kernel-devel`.
+- If **Secure Boot** is enabled, enroll the DKMS signing key once after install:
+  `sudo mokutil --import /var/lib/dkms/mok.pub`, then reboot and confirm in the
+  MOK manager. Without this the module will not load after reboot.
+
 ### Manual install
 
 See the [Installation wiki page](https://github.com/goodeesh/GigaMate/wiki/Installation)
@@ -128,6 +142,8 @@ GigaMate has two hardware backends:
 The kernel module (`gigamate_acpi.ko`) exposes sensors at
 `/sys/devices/platform/gigamate_acpi/`. The Python layer auto-detects
 which backends are available and degrades gracefully if one is missing.
+If the `acpi_call` module happens to be installed on your system, it is
+used automatically as an optional fallback — GigaMate never requires it.
 
 Each laptop model is described by a JSON profile defining its RGB colour map
 and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
@@ -177,7 +193,7 @@ GigaMate/
 See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
 - **Adding a new model** — Calibrate + submit profile via PR
 - **ACPI research** — Investigate additional commands on your model
-- **Packaging** — Help with AUR, COPR, Flatpak
+- **Packaging** — Help with distro packages (Flatpak, COPR, etc.)
 
 ## Uninstalling
 
