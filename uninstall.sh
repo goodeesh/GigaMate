@@ -46,7 +46,9 @@ fi
 # Remove DKMS registration (auto-rebuild source)
 if command -v dkms &>/dev/null && dkms status 2>/dev/null | grep -q '^gigamate_acpi'; then
     info "Removing gigamate_acpi from DKMS (needs sudo)..."
-    sudo dkms remove gigamate_acpi --all 2>/dev/null || true
+    for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi' | cut -d: -f1); do
+        sudo dkms remove "$entry" --all 2>/dev/null || true
+    done
     sudo rm -rf /usr/src/gigamate_acpi-* 2>/dev/null || true
 fi
 

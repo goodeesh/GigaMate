@@ -109,7 +109,8 @@ build_kernel_module() {
     # the distro's official repos — never from AUR.
     if command -v dkms &>/dev/null; then
         info "Using DKMS to build and install the module..."
-        if ! sudo dkms add "$mod_src" -v "$mod_version" 2>/dev/null; then
+        make -C "$mod_src" clean 2>/dev/null || true
+        if ! sudo dkms add "$mod_src" 2>/dev/null; then
             warn "DKMS add failed."
             warn "Fan/power features will be disabled."
             return
