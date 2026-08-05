@@ -115,6 +115,14 @@ def save(config):
         "startup_apply": bool(config.get("startup_apply", True)),
         "profile_id": list(config.get("profile_id", DEFAULT_CONFIG["profile_id"])),
     }
+    acpi_profile = config.get("acpi_profile")
+    if acpi_profile is not None:
+        try:
+            acpi_profile = int(acpi_profile)
+            if 0 <= acpi_profile <= 3:
+                safe["acpi_profile"] = acpi_profile
+        except (ValueError, TypeError):
+            pass
     CONFIG_FILE.write_text(json.dumps(safe, indent=2) + "\n")
 
 
