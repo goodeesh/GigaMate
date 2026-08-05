@@ -485,6 +485,7 @@ class GigaMateTrayApp:
             self._acpi_controller.set_profile(FanProfile(profile_id))
             self._current_acpi_profile = profile_id
             self._save_config()
+            self._update_status()
         except Exception:
             pass
 
