@@ -118,14 +118,6 @@ class GigaMateTrayApp:
             self._acpi_controller = AcpiController()
             if self._acpi_controller.available:
                 self._acpi_caps = self._acpi_controller.capabilities
-                # Apply saved ACPI profile if configured
-                if self._current_acpi_profile is not None:
-                    try:
-                        self._acpi_controller.set_profile(
-                            FanProfile(self._current_acpi_profile)
-                        )
-                    except Exception:
-                        pass
             else:
                 self._acpi_controller = None
                 self._acpi_caps = None
@@ -159,8 +151,8 @@ class GigaMateTrayApp:
                 APP_ICON_PATH,
                 AppIndicator3.IndicatorCategory.HARDWARE,
             )
-            self._indicator.set_menu(self._menu)
             self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self._indicator.set_menu(self._menu)
 
     def _build_no_hardware_menu(self) -> None:
         """Menu when no Gigabyte hardware is detected at all."""
@@ -675,6 +667,13 @@ class GigaMateTrayApp:
         """Apply saved settings on startup."""
         if not self._startup_apply:
             return
+        if self._acpi_controller is not None and self._current_acpi_profile is not None:
+            try:
+                self._acpi_controller.set_profile(
+                    FanProfile(self._current_acpi_profile)
+                )
+            except Exception:
+                pass
         if self._unsupported or self._no_keyboard:
             return
         dev = self._get_keyboard()
