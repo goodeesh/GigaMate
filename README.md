@@ -40,6 +40,9 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **Temperature monitoring** — CPU and system temperatures
 - **Fan monitoring** — RPM and duty cycle readback
 - **Power profiles** — Switch between Quiet/Balanced/Performance/Gaming
+- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles
+- **On-Screen Display (OSD)** — Native KDE Plasma OSD overlay & universal desktop notifications
+- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon` (`power-saver`, `balanced`, `performance`)
 - **System tray app** — All controls in one place, live status updates
 - **Community model profiles** — Add your laptop model without coding
 
@@ -56,6 +59,7 @@ Colour → 11+ colours depending on your model
 Brightness → Off / Dim / Full
 Power Profile → Quiet / Balanced / Performance / Gaming
 Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming
+Sync system power profile
 Apply on startup
 Reload profiles
 ```
@@ -70,6 +74,7 @@ gigamate rgb calibrate           # Interactive RGB calibration
 gigamate status                  # Full hardware status
 gigamate profile                 # Show current power profile
 gigamate profile gaming          # Switch to Gaming mode
+gigamate profile cycle           # Cycle to next mode + trigger OSD
 gigamate detect                  # Show keyboard + ACPI info
 gigamate detect --acpi           # Probe ACPI capabilities
 gigamate calibrate all           # Complete model calibration
@@ -171,7 +176,7 @@ GigaMate/
 ├── src/gigamate_acpi/        # Kernel module source
 ├── data/                     # Service, udev, icon, desktop
 ├── docs/                     # Research notes + profile schema
-├── tests/                    # 65+ unit tests
+├── tests/                    # 85+ unit tests
 ├── install.sh / uninstall.sh
 ├── README.md / CONTRIBUTING.md
 └── pyproject.toml / LICENSE

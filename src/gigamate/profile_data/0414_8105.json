@@ -35,5 +35,13 @@
       "3": {"name": "Gaming", "desc": "Maximum GPU power"}
     },
     "backend": "module"
+  },
+  "hotkeys": {
+    "mode_switch": {
+      "interface": 2,
+      "report_id": 4,
+      "payload": "000084",
+      "key_name": "F7"
+    }
   }
 }

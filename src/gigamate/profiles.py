@@ -43,6 +43,7 @@ class DeviceProfile:
     control_interface: int = 3
     colour_map: Dict[str, Dict[int, Tuple[int, int]]] = field(default_factory=dict)
     acpi: Optional[AcpiConfig] = None
+    hotkeys: Dict[str, dict] = field(default_factory=dict)
     version: int = 1
 
     @property
@@ -98,6 +99,8 @@ class DeviceProfile:
                 "profiles": dict(self.acpi.profiles),
                 "backend": self.acpi.backend,
             }
+        if self.hotkeys:
+            result["hotkeys"] = dict(self.hotkeys)
         return result
 
     @classmethod
@@ -131,6 +134,7 @@ class DeviceProfile:
             control_interface=int(d.get("control_interface", 3)),
             colour_map=cmap,
             acpi=acpi,
+            hotkeys=dict(d.get("hotkeys", {})),
         )
 
 

@@ -61,6 +61,7 @@ hexadecimal USB identifiers (uppercase).
 | `control_interface` | int | yes | USB interface for ctrl_transfer, typically `3` |
 | `colour_map` | object | yes | Keyboard RGB colour definitions |
 | `acpi` | object | no | ACPI/fan/power profile capabilities |
+| `hotkeys` | object | no | Hardware hotkey definitions (e.g. F7 mode switch) |
 
 ---
 
@@ -155,6 +156,33 @@ Each key is a string profile ID (`"0"` through `"3"`) mapping to:
 |-------|------|-------------|
 | `name` | string | Display name, e.g. `"Quiet"`, `"Gaming"` |
 | `desc` | string | Optional description, e.g. `"Maximum GPU power"` |
+
+---
+
+## Hotkeys section (optional)
+
+The `hotkeys` section defines hardware hotkeys (such as the F7 Performance Mode switch)
+emitted via vendor HID reports.
+
+```json
+"hotkeys": {
+  "mode_switch": {
+    "interface": 2,
+    "report_id": 4,
+    "payload": "000084",
+    "key_name": "F7"
+  }
+}
+```
+
+### hotkeys sub-fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interface` | int | USB interface number emitting the report (typically 2) |
+| `report_id` | int | HID report ID (e.g. 4) |
+| `payload` | string | Expected byte payload in hex (e.g. `"000084"`) |
+| `key_name` | string | Human-readable key name (e.g. `"F7"`) |
 
 ---
 

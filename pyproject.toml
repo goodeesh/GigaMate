@@ -45,3 +45,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 gigamate = ["profile_data/*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

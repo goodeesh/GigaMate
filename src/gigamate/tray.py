@@ -29,6 +29,9 @@ from .config import load as load_config, save as save_config
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
+from .hotkeys import HotkeyListener
+from .osd import show_profile_osd
+from .system_power import sync_system_power, is_system_power_available
 
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
@@ -70,6 +73,8 @@ class GigaMateTrayApp:
         self._current_brightness = self._config.get("brightness", 2)
         self._startup_item: Optional[Gtk.CheckMenuItem] = None
         self._startup_apply = self._config.get("startup_apply", True)
+        self._sync_system_power = self._config.get("sync_system_power", True)
+        self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
@@ -79,12 +84,16 @@ class GigaMateTrayApp:
         self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
         self._status_timer_id: Optional[int] = None
 
+        # Hotkey listener state
+        self._hotkey_listener: Optional[HotkeyListener] = None
+
         # Menu item references (for updating)
         self._reload_item: Optional[Gtk.MenuItem] = None
 
         self._building = True
         self._detect_on_startup()
         self._init_acpi()
+        self._init_hotkeys()
         self._build_menu()
         self._building = False
         self._apply_on_startup()
@@ -124,6 +133,22 @@ class GigaMateTrayApp:
         else:
             self._acpi_controller = None
             self._acpi_caps = None
+
+    def _init_hotkeys(self) -> None:
+        """Initialise and start background hotkey listener."""
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener = None
+
+        vid = self._profile.vid if self._profile else (self._detected_vid or 0x0414)
+        pid = self._profile.pid if self._profile else (self._detected_pid or 0x8105)
+
+        self._hotkey_listener = HotkeyListener(
+            on_mode_switch=self._on_hotkey_cycle_profile,
+            vid=vid,
+            pid=pid,
+        )
+        self._hotkey_listener.start()
 
     # ────────────────────────────────────────────
     # Menu building
@@ -306,6 +331,12 @@ class GigaMateTrayApp:
 
     def _append_settings_items(self) -> None:
         """Add settings items at the bottom of the menu."""
+        if is_system_power_available():
+            self._sync_power_item = Gtk.CheckMenuItem(label="Sync system power profile")
+            self._sync_power_item.set_active(self._sync_system_power)
+            self._sync_power_item.connect("toggled", self._on_sync_power_toggled)
+            self._menu.append(self._sync_power_item)
+
         self._startup_item = Gtk.CheckMenuItem(label="Apply on startup")
         self._startup_item.set_active(self._startup_apply)
         self._startup_item.connect("toggled", self._on_startup_toggled)
@@ -438,6 +469,7 @@ class GigaMateTrayApp:
             if profile is not None:
                 self._profile = profile
                 self._unsupported = False
+                self._init_hotkeys()
                 self._rebuild_menu()
                 self._apply_on_startup()
         return False
@@ -484,14 +516,81 @@ class GigaMateTrayApp:
         try:
             self._acpi_controller.set_profile(FanProfile(profile_id))
             self._current_acpi_profile = profile_id
+            if self._sync_system_power:
+                sync_system_power(profile_id)
             self._save_config()
             self._update_status()
+        except Exception:
+            pass
+
+    def _on_hotkey_cycle_profile(self) -> None:
+        """Handle hardware hotkey (e.g. F7): cycle power profile and display OSD."""
+        if self._acpi_controller is None or not self._acpi_controller.available:
+            return
+
+        # Get available profiles
+        if self._profile is not None and self._profile.has_acpi and self._profile.acpi:
+            pids = sorted(int(k) for k in self._profile.acpi.profiles.keys())
+            p_data = self._profile.acpi.profiles
+        else:
+            pids = [0, 1, 2, 3]
+            p_data = {
+                str(int(v)): {"name": k.capitalize(), "desc": ""}
+                for k, v in FanProfile.names().items()
+            }
+
+        if not pids:
+            return
+
+        # Find current active profile
+        current_val = self._current_acpi_profile
+        if current_val is None:
+            current_fp = self._acpi_controller.get_profile()
+            current_val = current_fp.value if current_fp is not None else pids[0]
+
+        try:
+            curr_idx = pids.index(current_val)
+            next_idx = (curr_idx + 1) % len(pids)
+        except ValueError:
+            next_idx = 0
+
+        next_profile_id = pids[next_idx]
+        fp = FanProfile(next_profile_id)
+
+        try:
+            if self._acpi_controller.set_profile(fp):
+                self._current_acpi_profile = next_profile_id
+                if self._sync_system_power:
+                    sync_system_power(next_profile_id)
+                self._save_config()
+
+                # Update the active RadioMenuItem in GUI without triggering redundant callbacks
+                item = self._profile_items.get(next_profile_id)
+                if item is not None:
+                    self._building = True
+                    item.set_active(True)
+                    self._building = False
+
+                # Show OSD
+                entry = p_data.get(str(next_profile_id), {})
+                name = entry.get("name", f"Profile {next_profile_id}")
+                desc = entry.get("desc", "")
+                show_profile_osd(name, desc)
+
+                self._update_status()
         except Exception:
             pass
 
     # ────────────────────────────────────────────
     # Callbacks: Settings
     # ────────────────────────────────────────────
+
+    def _on_sync_power_toggled(self, item: Gtk.CheckMenuItem) -> None:
+        """Handle toggle for syncing system-level power profile."""
+        self._sync_system_power = item.get_active()
+        self._save_config()
+        if self._sync_system_power and self._current_acpi_profile is not None:
+            sync_system_power(self._current_acpi_profile)
 
     def _on_startup_toggled(self, item: Gtk.CheckMenuItem) -> None:
         self._startup_apply = item.get_active()
@@ -569,8 +668,9 @@ class GigaMateTrayApp:
             colours = self._profile.colour_names
             if colours:
                 self._current_colour = self._config.get("colour", colours[0])
-            # Re-init ACPI (profile may have changed)
+            # Re-init ACPI & Hotkeys (profile may have changed)
             self._init_acpi()
+            self._init_hotkeys()
             self._rebuild_menu()
             try:
                 self._indicator.set_label("", APP_ID)
@@ -583,12 +683,13 @@ class GigaMateTrayApp:
                 if ctrl.available:
                     self._acpi_controller = ctrl
                     self._acpi_caps = ctrl.capabilities
-            pass
+            self._init_hotkeys()
         else:
             self._profile = None
             self._unsupported = True
             self._acpi_controller = None
             self._acpi_caps = None
+            self._init_hotkeys()
             self._rebuild_menu()
 
         self._apply_on_startup()
@@ -646,6 +747,9 @@ class GigaMateTrayApp:
     def _on_quit(self, *args) -> None:
         """Save config and quit."""
         self._save_config()
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.stop()
+            self._hotkey_listener = None
         if self._status_timer_id is not None:
             GLib.source_remove(self._status_timer_id)
             self._status_timer_id = None
@@ -660,6 +764,7 @@ class GigaMateTrayApp:
         self._config["colour"] = self._current_colour
         self._config["brightness"] = self._current_brightness
         self._config["startup_apply"] = self._startup_apply
+        self._config["sync_system_power"] = self._sync_system_power
         if self._current_acpi_profile is not None:
             self._config["acpi_profile"] = self._current_acpi_profile
         save_config(self._config)
@@ -673,6 +778,8 @@ class GigaMateTrayApp:
                 self._acpi_controller.set_profile(
                     FanProfile(self._current_acpi_profile)
                 )
+                if self._sync_system_power:
+                    sync_system_power(self._current_acpi_profile)
             except Exception:
                 pass
         if self._unsupported or self._no_keyboard:

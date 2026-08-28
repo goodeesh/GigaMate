@@ -49,6 +49,8 @@ from .acpi import (
     probe_acpi_capabilities,
     AcpiCapabilities,
 )
+from .osd import show_profile_osd
+from .system_power import sync_system_power
 from .paths import CONFIG_DIR
 
 
@@ -325,6 +327,7 @@ def cmd_profile_set(args, name: str) -> None:
         if 0 <= val <= 3:
             fp = FanProfile(val)
             if ctrl.set_profile(fp):
+                sync_system_power(val)
                 profile = resolve_profile(args.vid, args.pid)
                 pname = _profile_name(fp, profile)
                 print(f"Power profile set to: {pname}  ({val})")
@@ -339,6 +342,7 @@ def cmd_profile_set(args, name: str) -> None:
     try:
         fp = FanProfile.from_name(name)
         if ctrl.set_profile(fp):
+            sync_system_power(fp.value)
             profile = resolve_profile(args.vid, args.pid)
             pname = _profile_name(fp, profile)
             print(f"Power profile set to: {pname}  ({fp.value})")
@@ -349,6 +353,52 @@ def cmd_profile_set(args, name: str) -> None:
     except KeyError:
         print(f"Unknown profile: '{name}'")
         print(f"Available: {', '.join(FanProfile.names().keys())}")
+        sys.exit(1)
+
+
+def cmd_profile_cycle(args) -> None:
+    """Cycle to the next power profile and show OSD."""
+    ctrl = AcpiController()
+    if not ctrl.available:
+        print("ACPI not available. No power profile control.")
+        sys.exit(1)
+
+    profile = resolve_profile(args.vid, args.pid)
+    if profile is not None and profile.has_acpi and profile.acpi:
+        pids = sorted(int(k) for k in profile.acpi.profiles.keys())
+        p_data = profile.acpi.profiles
+    else:
+        pids = [0, 1, 2, 3]
+        p_data = {
+            str(int(v)): {"name": k.capitalize(), "desc": ""}
+            for k, v in FanProfile.names().items()
+        }
+
+    if not pids:
+        print("No profiles configured.")
+        sys.exit(1)
+
+    current_fp = ctrl.get_profile()
+    current_val = current_fp.value if current_fp is not None else pids[0]
+
+    try:
+        curr_idx = pids.index(current_val)
+        next_idx = (curr_idx + 1) % len(pids)
+    except ValueError:
+        next_idx = 0
+
+    next_profile_id = pids[next_idx]
+    fp = FanProfile(next_profile_id)
+
+    if ctrl.set_profile(fp):
+        sync_system_power(next_profile_id)
+        entry = p_data.get(str(next_profile_id), {})
+        pname = entry.get("name", f"Profile {next_profile_id}")
+        desc = entry.get("desc", "")
+        print(f"Power profile cycled to: {pname}  ({next_profile_id})")
+        show_profile_osd(pname, desc)
+    else:
+        print(f"Failed to cycle profile to {next_profile_id}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -870,11 +920,14 @@ def _dispatch_profile(args) -> None:
       gigamate profile               → show current
       gigamate profile gaming        → set (shorthand)
       gigamate profile set gaming    → set (explicit)
+      gigamate profile cycle         → cycle to next profile + OSD
       gigamate profile contribute    → contribute
     """
     action = (args.action or "").lower()
 
-    if action == "contribute":
+    if action in ("cycle", "next"):
+        cmd_profile_cycle(args)
+    elif action == "contribute":
         cmd_profile_contribute(args)
     elif action == "show" or action == "":
         cmd_profile_show(args)
