@@ -32,6 +32,7 @@ from .acpi import (
 from .hotkeys import HotkeyListener
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
+from .gpu import get_gpu_state, gpu_short_status_text
 
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
@@ -318,13 +319,15 @@ class GigaMateTrayApp:
             self._profile_items[pid_int] = item
 
     def _append_status_section(self) -> None:
-        """Add a single-line live status display (only if ACPI is available)."""
-        if self._acpi_controller is None or not self._acpi_controller.available:
+        """Add a single-line live status display (ACPI sensors and/or dGPU state)."""
+        acpi_ok = self._acpi_controller is not None and self._acpi_controller.available
+        gpu_present = get_gpu_state().present
+        if not acpi_ok and not gpu_present:
             return
 
         self._menu.append(Gtk.SeparatorMenuItem())
         self._status_items = []
-        item = Gtk.MenuItem(label="ACPI initialising...")
+        item = Gtk.MenuItem(label="Status: reading...")
         item.set_sensitive(False)
         self._menu.append(item)
         self._status_items.append(item)
@@ -363,55 +366,57 @@ class GigaMateTrayApp:
 
     def _start_status_polling(self) -> None:
         """Start the periodic status update timer."""
-        if self._acpi_controller is not None and self._acpi_controller.available:
+        acpi_ok = self._acpi_controller is not None and self._acpi_controller.available
+        gpu_present = get_gpu_state().present
+        if acpi_ok or gpu_present:
             self._update_status()
             self._status_timer_id = GLib.timeout_add(
                 STATUS_POLL_INTERVAL_MS, self._update_status
             )
 
     def _update_status(self) -> bool:
-        """Poll ACPI sensors and update the status labels. Returns True to keep timer alive."""
+        """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
         if not self._status_items:
             return False
-        if self._acpi_controller is None or not self._acpi_controller.available:
-            return False
 
-        state: Optional[FanState] = None
-        try:
-            state = self._acpi_controller.read_state()
-        except Exception:
-            pass
-
-        if state is None:
-            for item in self._status_items:
-                item.set_label("Status: N/A")
-            return True
-
-        # Build status text based on available data
         parts = []
 
-        # Temperature
-        if state.temp_cpu is not None:
-            parts.append(f"CPU: {state.temp_cpu} C")
-        elif state.temp_socket is not None:
-            parts.append(f"Socket: {state.temp_socket} C")
+        # ACPI sensors
+        if self._acpi_controller is not None and self._acpi_controller.available:
+            state: Optional[FanState] = None
+            try:
+                state = self._acpi_controller.read_state()
+            except Exception:
+                pass
 
-        # Fan
-        if state.fan1_rpm is not None:
-            parts.append(f"Fan: {state.fan1_rpm} RPM")
+            if state is not None:
+                # Temperature
+                if state.temp_cpu is not None:
+                    parts.append(f"CPU: {state.temp_cpu} C")
+                elif state.temp_socket is not None:
+                    parts.append(f"Socket: {state.temp_socket} C")
 
-        # Duty
-        if state.duty_cpu is not None:
-            parts.append(f"{state.duty_cpu}%")
+                # Fan
+                if state.fan1_rpm is not None:
+                    parts.append(f"Fan: {state.fan1_rpm} RPM")
 
-        # Profile
-        if state.profile is not None and self._profile is not None and self._profile.acpi:
-            profiles = self._profile.acpi.profiles
-            entry = profiles.get(str(state.profile.value), {})
-            pname = entry.get("name", str(state.profile.value))
-            parts.append(f"Profile: {pname}")
+                # Duty
+                if state.duty_cpu is not None:
+                    parts.append(f"{state.duty_cpu}%")
 
-        text = "  |  ".join(parts) if parts else "ACPI: no data"
+                # Profile
+                if state.profile is not None and self._profile is not None and self._profile.acpi:
+                    profiles = self._profile.acpi.profiles
+                    entry = profiles.get(str(state.profile.value), {})
+                    pname = entry.get("name", str(state.profile.value))
+                    parts.append(f"Profile: {pname}")
+
+        # Discrete GPU state
+        gpu = get_gpu_state()
+        if gpu.present:
+            parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
+
+        text = "  |  ".join(parts) if parts else "Status: N/A"
 
         for item in self._status_items:
             try:

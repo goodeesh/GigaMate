@@ -43,6 +43,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles
 - **On-Screen Display (OSD)** — Native KDE Plasma OSD overlay & universal desktop notifications
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon` (`power-saver`, `balanced`, `performance`)
+- **dGPU monitoring** — Discrete NVIDIA GPU asleep/awake state (read-only sysfs; never wakes the GPU)
 - **System tray app** — All controls in one place, live status updates
 - **Community model profiles** — Add your laptop model without coding
 
@@ -58,7 +59,7 @@ The tray icon shows colour, brightness, power profile, and live status:
 Colour → 11+ colours depending on your model
 Brightness → Off / Dim / Full
 Power Profile → Quiet / Balanced / Performance / Gaming
-Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming
+Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep
 Sync system power profile
 Apply on startup
 Reload profiles
@@ -72,6 +73,7 @@ gigamate rgb off                 # Turn backlight off
 gigamate rgb detect              # Scan for keyboards
 gigamate rgb calibrate           # Interactive RGB calibration
 gigamate status                  # Full hardware status
+gigamate gpu status              # Show discrete GPU power state
 gigamate profile                 # Show current power profile
 gigamate profile gaming          # Switch to Gaming mode
 gigamate profile cycle           # Cycle to next mode + trigger OSD
@@ -150,6 +152,11 @@ which backends are available and degrades gracefully if one is missing.
 If the `acpi_call` module happens to be installed on your system, it is
 used automatically as an optional fallback — GigaMate never requires it.
 
+The **dGPU monitor** reads the NVIDIA GPU's power state from
+`/sys/bus/pci/devices/<bdf>/power/{runtime_status,power_state}`. These are
+plain kernel power-management reads — GigaMate never calls `nvidia-smi`, so
+checking the state does **not** wake the GPU.
+
 Each laptop model is described by a JSON profile defining its RGB colour map
 and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
 
@@ -176,7 +183,7 @@ GigaMate/
 ├── src/gigamate_acpi/        # Kernel module source
 ├── data/                     # Service, udev, icon, desktop
 ├── docs/                     # Research notes + profile schema
-├── tests/                    # 85+ unit tests
+├── tests/                    # 100+ unit tests
 ├── install.sh / uninstall.sh
 ├── README.md / CONTRIBUTING.md
 └── pyproject.toml / LICENSE

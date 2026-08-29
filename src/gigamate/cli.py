@@ -7,6 +7,7 @@ Usage:
     gigamate rgb cycle                         Cycle colours
     gigamate rgb calibrate                     Interactive RGB calibration
     gigamate status                            Show hardware status
+    gigamate gpu status                        Show discrete GPU power state
     gigamate profile [name]                    Show/set power profile
     gigamate profile contribute                Pull Request instructions
     gigamate detect [--acpi]                   Detect hardware
@@ -51,6 +52,7 @@ from .acpi import (
 )
 from .osd import show_profile_osd
 from .system_power import sync_system_power
+from .gpu import get_gpu_state, gpu_status_text
 from .paths import CONFIG_DIR
 
 
@@ -282,6 +284,28 @@ def cmd_status(args) -> None:
         print(f"  ACPI:  ❌ Not available")
         print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
         print()
+
+    # Discrete GPU state
+    gpu = get_gpu_state()
+    if gpu.present:
+        print("  ── Discrete GPU ──")
+        print(f"     dGPU state:   {gpu_status_text(gpu)}")
+        print()
+
+
+def cmd_gpu_status(args) -> None:
+    """Show the discrete GPU power state.
+
+    On systems without a discrete NVIDIA GPU this prints nothing.
+    """
+    gpu = get_gpu_state()
+    if not gpu.present:
+        return
+    print("GigaMate — Discrete GPU")
+    print()
+    print(f"  dGPU state:   {gpu_status_text(gpu)}")
+    print(f"  Runtime PM:   {gpu.status or 'unknown'}")
+    print(f"  Power state:  {gpu.power_state or 'unknown'}")
 
 
 # ────────────────────────────────────────────
@@ -868,6 +892,11 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     # --- version subcommand ---
     sub.add_parser("version", help="Show version")
 
+    # --- gpu subcommand ---
+    gpu_parser = sub.add_parser("gpu", help="Discrete GPU power state")
+    gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
+    gpu_sub.add_parser("status", help="Show discrete GPU power state")
+
     # Parse
     args = parser.parse_args()
 
@@ -887,6 +916,13 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         _dispatch_calibrate(args)
     elif args.command == "version":
         cmd_version(args)
+    elif args.command == "gpu":
+        if args.gpu_action in ("status", None):
+            cmd_gpu_status(args)
+        else:
+            print("GPU actions: status")
+            print("Example: gigamate gpu status")
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)
