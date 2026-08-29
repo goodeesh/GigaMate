@@ -25,6 +25,7 @@ class TestSystemPowerManager:
         assert mgr._profile_map[2] == "balanced"
 
     def test_is_available_dbus_success(self):
+        pytest.importorskip("gi")
         mgr = SystemPowerManager()
         with patch("gigamate.system_power._HAS_GIO", True), \
              patch("gi.repository.Gio.bus_get_sync") as mock_bus, \
@@ -37,6 +38,7 @@ class TestSystemPowerManager:
             assert mgr.is_available is True
 
     def test_set_system_profile_dbus_success(self):
+        pytest.importorskip("gi")
         mgr = SystemPowerManager()
         with patch("gigamate.system_power._HAS_GIO", True), \
              patch("gi.repository.Gio.bus_get_sync") as mock_bus, \
