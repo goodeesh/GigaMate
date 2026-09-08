@@ -45,12 +45,32 @@ APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
-IDLE_TIMEOUT_OPTIONS = [
+IDLE_STEP_OFF = 0  # sentinel: feature disabled ("do nothing")
+IDLE_TIMEOUT_STEPS = [
+    (IDLE_STEP_OFF, "Off"),
+    (10, "10 seconds"),
     (30, "30 seconds"),
     (60, "1 minute"),
     (120, "2 minutes"),
-    (300, "5 minutes"),
 ]
+
+
+def _idle_step_label(step: int) -> str:
+    for secs, label in IDLE_TIMEOUT_STEPS:
+        if secs == step:
+            return label
+    return f"{step} seconds"
+
+
+def _nearest_idle_step(timeout: int) -> int:
+    """Map an arbitrary stored timeout to the closest selectable step."""
+    best = IDLE_TIMEOUT_STEPS[1][0]
+    best_diff = abs(timeout - best)
+    for secs, _label in IDLE_TIMEOUT_STEPS[1:]:
+        diff = abs(timeout - secs)
+        if diff < best_diff:
+            best, best_diff = secs, diff
+    return best
 
 # Find icon: prefer local path, fall back to theme name
 _icon_paths = [
@@ -108,7 +128,7 @@ class GigaMateTrayApp:
         self._idle_dimmed = False
         self._idle_monitor: Optional[IdleMonitor] = None
         self._idle_fallback_timer_id: Optional[int] = None
-        self._idle_enable_item: Optional[Gtk.CheckMenuItem] = None
+        self._idle_parent_item: Optional[Gtk.MenuItem] = None
         self._idle_timeout_items: Dict[int, Gtk.RadioMenuItem] = {}
 
         # Menu item references (for updating)
@@ -266,57 +286,74 @@ class GigaMateTrayApp:
             self._on_idle_active()
         return True
 
-    def _on_idle_enabled_toggled(self, item: Gtk.CheckMenuItem) -> None:
-        if self._building:
-            return
-        self._idle_enabled = item.get_active()
-        if not self._idle_enabled and self._idle_dimmed:
-            # Re-enable path: restore immediately when turning the
-            # feature off while dimmed.
-            self._idle_dimmed = False
-            dev = self._get_keyboard()
-            if dev is not None and self._current_brightness != 0:
-                try:
-                    set_static(dev, self._current_colour,
-                               self._current_brightness, self._profile)
-                except Exception:
-                    pass
-        self._save_config()
-        self._init_idle()
+    def _idle_effective_step(self) -> int:
+        """Selectable step reflecting current state (Off when disabled)."""
+        if not self._idle_enabled:
+            return IDLE_STEP_OFF
+        return _nearest_idle_step(self._idle_timeout)
 
-    def _on_idle_timeout_changed(self, item: Gtk.RadioMenuItem, timeout: int) -> None:
+    def _update_idle_parent_label(self) -> None:
+        if self._idle_parent_item is not None:
+            try:
+                self._idle_parent_item.set_label(
+                    f"Idle timeout: {_idle_step_label(self._idle_effective_step())}")
+            except Exception:
+                pass
+
+    def _restore_from_idle(self) -> None:
+        """Restore saved backlight if currently idle-dimmed."""
+        if not self._idle_dimmed:
+            return
+        self._idle_dimmed = False
+        dev = self._get_keyboard()
+        if dev is not None and self._current_brightness != 0:
+            try:
+                set_static(dev, self._current_colour,
+                           self._current_brightness, self._profile)
+            except Exception:
+                pass
+
+    def _on_idle_step_changed(self, item: Gtk.RadioMenuItem, step: int) -> None:
         if not item.get_active() or self._building:
             return
-        self._idle_timeout = clamp_timeout(timeout)
-        self._idle_dimmed = False
+        if step == IDLE_STEP_OFF:
+            # Off = do nothing: disable monitoring, keep stored timeout.
+            self._idle_enabled = False
+            self._restore_from_idle()
+        else:
+            self._idle_enabled = True
+            self._idle_timeout = clamp_timeout(step)
+            self._idle_dimmed = False
         self._save_config()
+        self._update_idle_parent_label()
         self._init_idle()
 
     def _append_idle_section(self) -> None:
-        """Add idle auto-off toggle + timeout radios (RGB menus only)."""
+        """Add idle auto-off submenu (Off/10s/30s/1m/2m, RGB menus only)."""
         if self._profile is None or not self._profile.has_rgb:
             return
         header = Gtk.MenuItem(label="Backlight idle off")
         header.set_sensitive(False)
         self._menu.append(header)
 
-        self._idle_enable_item = Gtk.CheckMenuItem(
-            label="Turn off backlight when idle")
-        self._idle_enable_item.set_active(self._idle_enabled)
-        self._idle_enable_item.connect("toggled", self._on_idle_enabled_toggled)
-        self._menu.append(self._idle_enable_item)
+        self._idle_parent_item = Gtk.MenuItem(
+            label=f"Idle timeout: {_idle_step_label(self._idle_effective_step())}")
+        submenu = Gtk.Menu()
+        self._idle_parent_item.set_submenu(submenu)
+        self._menu.append(self._idle_parent_item)
 
         group = None
         self._idle_timeout_items = {}
-        for timeout, label in IDLE_TIMEOUT_OPTIONS:
+        effective = self._idle_effective_step()
+        for step, label in IDLE_TIMEOUT_STEPS:
             item = Gtk.RadioMenuItem(group=group, label=label)
             if group is None:
                 group = item
-            if timeout == self._idle_timeout:
+            if step == effective:
                 item.set_active(True)
-            item.connect("toggled", self._on_idle_timeout_changed, timeout)
-            self._menu.append(item)
-            self._idle_timeout_items[timeout] = item
+            item.connect("toggled", self._on_idle_step_changed, step)
+            submenu.append(item)
+            self._idle_timeout_items[step] = item
 
     # ────────────────────────────────────────────
     # Menu building
@@ -1003,7 +1040,7 @@ class GigaMateTrayApp:
         self._profile_items = {}
         self._status_items = []
         self._idle_timeout_items = {}
-        self._idle_enable_item = None
+        self._idle_parent_item = None
 
     def _rebuild_menu(self) -> None:
         """Clear and rebuild the entire menu."""

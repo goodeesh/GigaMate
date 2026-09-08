@@ -55,9 +55,19 @@ def test_idle_roundtrip(isolated_config):
 
 
 def test_idle_timeout_clamped(isolated_config):
+    config_module.save({"idle_timeout_sec": 10})
+    assert config_module.load()["idle_timeout_sec"] == 10
     config_module.save({"idle_timeout_sec": 5})
-    assert config_module.load()["idle_timeout_sec"] == 15
+    assert config_module.load()["idle_timeout_sec"] == 10
     config_module.save({"idle_timeout_sec": 99999})
     assert config_module.load()["idle_timeout_sec"] == 1800
     config_module.save({"idle_timeout_sec": "bogus"})
     assert config_module.load()["idle_timeout_sec"] == 60
+
+
+def test_idle_off_preserves_timeout(isolated_config):
+    """Off flips the boolean; the stored timeout survives re-enable."""
+    config_module.save({"idle_off_enabled": False, "idle_timeout_sec": 30})
+    loaded = config_module.load()
+    assert loaded["idle_off_enabled"] is False
+    assert loaded["idle_timeout_sec"] == 30

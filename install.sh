@@ -232,8 +232,23 @@ install_python_pkg() {
 
     info "Installing gigamate with pip..."
     if command -v pipx &>/dev/null; then
-        pipx install "$script_dir" --force
-        info "Installed via pipx"
+        # The tray needs system packages (PyGObject/gi), which are not
+        # installable into an isolated venv. Recreate the venv with
+        # system site packages when it lacks them (pipx cannot retrofit
+        # the flag onto an existing venv — it must be recreated).
+        local venv_cfg="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/pyvenv.cfg"
+        if [ -f "$venv_cfg" ] && ! grep -q "system-site-packages = true" "$venv_cfg"; then
+            info "Recreating pipx venv with system site packages (for PyGObject)..."
+            pipx uninstall gigamate 2>/dev/null || true
+        fi
+        if pipx install "$script_dir" --force --system-site-packages; then
+            info "Installed via pipx (with system site packages)"
+        else
+            warn "pipx install failed — falling back to pip --user"
+            pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
+            pip install --user "$script_dir"
+            info "Installed via pip --user"
+        fi
     else
         pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
         pip install --user "$script_dir"

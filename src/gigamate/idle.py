@@ -43,7 +43,9 @@ except Exception:
     _HAS_EVDEV = False
 
 # Idle timeout bounds (seconds). Prevents 0s flicker and absurd values.
-MIN_TIMEOUT_SEC = 15
+# Note: 0 is reserved as the "off" sentinel in the tray UI (stored as
+# idle_off_enabled=False, never passed here).
+MIN_TIMEOUT_SEC = 10
 MAX_TIMEOUT_SEC = 1800
 DEFAULT_TIMEOUT_SEC = 60
 
