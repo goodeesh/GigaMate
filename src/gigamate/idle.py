@@ -66,6 +66,38 @@ def clamp_timeout(val) -> int:
     return max(MIN_TIMEOUT_SEC, min(MAX_TIMEOUT_SEC, v))
 
 
+# Selectable idle-timeout steps for the tray UI. IDLE_STEP_OFF disables
+# monitoring ("do nothing") and is stored as idle_off_enabled=False,
+# never passed to clamp_timeout/IdleMonitor.
+IDLE_STEP_OFF = 0
+IDLE_TIMEOUT_STEPS = [
+    (IDLE_STEP_OFF, "Off"),
+    (10, "10 seconds"),
+    (30, "30 seconds"),
+    (60, "1 minute"),
+    (120, "2 minutes"),
+]
+
+
+def idle_step_label(step: int) -> str:
+    """Human label for a timeout step (kept here, gi-free, for tests)."""
+    for secs, label in IDLE_TIMEOUT_STEPS:
+        if secs == step:
+            return label
+    return f"{step} seconds"
+
+
+def nearest_idle_step(timeout: int) -> int:
+    """Map an arbitrary stored timeout to the closest selectable step."""
+    best = IDLE_TIMEOUT_STEPS[1][0]
+    best_diff = abs(timeout - best)
+    for secs, _label in IDLE_TIMEOUT_STEPS[1:]:
+        diff = abs(timeout - secs)
+        if diff < best_diff:
+            best, best_diff = secs, diff
+    return best
+
+
 # Substrings (lowercase) of device names that never represent user
 # activity: lid/power/sleep buttons, video bus, speakers, audio, cameras.
 _NON_INPUT_NAME_HINTS = (

@@ -2,18 +2,18 @@
 
 import time
 
-import pytest
-
 from gigamate import idle as idle_module
 from gigamate.idle import (
+    IDLE_STEP_OFF,
+    IDLE_TIMEOUT_STEPS,
     IdleMonitor,
     clamp_timeout,
+    idle_step_label,
+    nearest_idle_step,
     DEFAULT_TIMEOUT_SEC,
     MAX_TIMEOUT_SEC,
     MIN_TIMEOUT_SEC,
 )
-
-tray = pytest.importorskip("gigamate.tray")
 
 
 def test_clamp_timeout_bounds():
@@ -88,19 +88,19 @@ def test_set_timeout_clamps_and_resets_idle():
 
 
 def test_idle_step_values():
-    assert [s for s, _ in tray.IDLE_TIMEOUT_STEPS] == [0, 10, 30, 60, 120]
-    assert tray.IDLE_STEP_OFF == 0
-    assert tray._idle_step_label(0) == "Off"
-    assert tray._idle_step_label(10) == "10 seconds"
-    assert tray._idle_step_label(60) == "1 minute"
+    assert [s for s, _ in IDLE_TIMEOUT_STEPS] == [0, 10, 30, 60, 120]
+    assert IDLE_STEP_OFF == 0
+    assert idle_step_label(0) == "Off"
+    assert idle_step_label(10) == "10 seconds"
+    assert idle_step_label(60) == "1 minute"
 
 
 def test_nearest_idle_step():
-    assert tray._nearest_idle_step(10) == 10
-    assert tray._nearest_idle_step(30) == 30
-    assert tray._nearest_idle_step(300) == 120  # legacy 5m maps to nearest
-    assert tray._nearest_idle_step(45) == 30  # tie prefers smaller
-    assert tray._nearest_idle_step(50) == 60
+    assert nearest_idle_step(10) == 10
+    assert nearest_idle_step(30) == 30
+    assert nearest_idle_step(300) == 120  # legacy 5m maps to nearest
+    assert nearest_idle_step(45) == 30  # tie prefers smaller
+    assert nearest_idle_step(50) == 60
 
 
 def test_device_filter_denylist(tmp_path, monkeypatch):

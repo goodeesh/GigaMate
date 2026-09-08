@@ -165,6 +165,24 @@ def gpu_short_status_text(state: GpuState) -> str:
     return {"suspended": "Asleep", "active": "Awake"}.get(state.status or "", "Unknown")
 
 
+# Tray icon keys per (vendor, awake). Distinct files (not runtime rewrites)
+# so indicator hosts refresh reliably. Unknown vendors fall back to plain.
+GPU_ICON_KEYS = {
+    ("nvidia", True): "gigamate-nvidia",
+    ("amd", True): "gigamate-amd",
+}
+
+
+def gpu_icon_key(state: GpuState) -> str:
+    """Map a GpuState to a tray icon key (plain when not awake/absent)."""
+    try:
+        if not state.present or state.status != "active" or not state.vendor:
+            return "gigamate"
+        return GPU_ICON_KEYS.get((state.vendor, True), "gigamate")
+    except Exception:
+        return "gigamate"
+
+
 def get_gpu_state() -> GpuState:
     """Read the current discrete GPU power state (sysfs only, never wakes it)."""
     return _monitor.read_state()

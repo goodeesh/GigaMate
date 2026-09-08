@@ -30,11 +30,17 @@ from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
 from .hotkeys import HotkeyListener
+from .gpu import gpu_icon_key
+from .paths import ICON_PATHS
 from .idle import (
     DEFAULT_TIMEOUT_SEC,
+    IDLE_STEP_OFF,
+    IDLE_TIMEOUT_STEPS,
     IdleMonitor,
     clamp_timeout,
     fallback_idle_ms,
+    idle_step_label as _idle_step_label,
+    nearest_idle_step as _nearest_idle_step,
 )
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
@@ -45,68 +51,13 @@ APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
-IDLE_STEP_OFF = 0  # sentinel: feature disabled ("do nothing")
-IDLE_TIMEOUT_STEPS = [
-    (IDLE_STEP_OFF, "Off"),
-    (10, "10 seconds"),
-    (30, "30 seconds"),
-    (60, "1 minute"),
-    (120, "2 minutes"),
-]
-
-
-def _idle_step_label(step: int) -> str:
-    for secs, label in IDLE_TIMEOUT_STEPS:
-        if secs == step:
-            return label
-    return f"{step} seconds"
-
-
-def _nearest_idle_step(timeout: int) -> int:
-    """Map an arbitrary stored timeout to the closest selectable step."""
-    best = IDLE_TIMEOUT_STEPS[1][0]
-    best_diff = abs(timeout - best)
-    for secs, _label in IDLE_TIMEOUT_STEPS[1:]:
-        diff = abs(timeout - secs)
-        if diff < best_diff:
-            best, best_diff = secs, diff
-    return best
+APP_ICON_PATHS = ICON_PATHS
 
 # Icon variants: plain + dGPU-awake dots (green NVIDIA, red AMD discrete).
 # Distinct files (not runtime rewrites) so indicator hosts refresh reliably.
-_ICON_NAMES = ("gigamate", "gigamate-nvidia", "gigamate-amd")
-
-
-def _resolve_icon(name: str) -> str:
-    """Resolve an icon name to a file path, falling back to theme name."""
-    candidates = [
-        Path(__file__).parent.parent.parent / "data" / f"{name}.svg",
-        Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / f"{name}.svg",
-        Path(f"/usr/share/icons/hicolor/scalable/apps/{name}.svg"),
-    ]
-    for _p in candidates:
-        if _p.exists():
-            return str(_p)
-    return name
-
-
-APP_ICON_PATH = _resolve_icon("gigamate")
-APP_ICON_PATHS = {name: _resolve_icon(name) for name in _ICON_NAMES}
-
-# Maps (gpu vendor, awake) -> icon key. Unknown vendors fall back to plain.
-GPU_ICON_KEYS = {
-    ("nvidia", True): "gigamate-nvidia",
-    ("amd", True): "gigamate-amd",
-}
-
-
-def gpu_icon_key(gpu) -> str:
-    """Map a GpuState to an icon key (plain when not awake/absent)."""
-    try:
-        awake = gpu.present and gpu.status == "active"
-        return GPU_ICON_KEYS.get((gpu.vendor, awake), "gigamate")
-    except Exception:
-        return "gigamate"
+# Resolution lives in paths.py (gi-free, testable); tray aliases the names.
+APP_ICON_PATH = ICON_PATHS["gigamate"]
+APP_ICON_PATHS = ICON_PATHS
 
 
 class GigaMateTrayApp:

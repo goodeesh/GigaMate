@@ -198,27 +198,27 @@ class TestAmdDiscreteGpu:
 
 class TestGpuIconKey:
     def test_mapping(self):
-        from gigamate import tray as tray_module
-        assert tray_module.gpu_icon_key(GpuState(present=False)) == "gigamate"
-        assert tray_module.gpu_icon_key(
+        from gigamate.gpu import gpu_icon_key
+        assert gpu_icon_key(GpuState(present=False)) == "gigamate"
+        assert gpu_icon_key(
             GpuState(present=True, status="suspended", vendor="nvidia")) == "gigamate"
-        assert tray_module.gpu_icon_key(
+        assert gpu_icon_key(
             GpuState(present=True, status="active", vendor="nvidia")) == "gigamate-nvidia"
-        assert tray_module.gpu_icon_key(
+        assert gpu_icon_key(
             GpuState(present=True, status="active", vendor="amd")) == "gigamate-amd"
-        assert tray_module.gpu_icon_key(
+        assert gpu_icon_key(
             GpuState(present=True, status="active", vendor="intel")) == "gigamate"
-        assert tray_module.gpu_icon_key(
+        assert gpu_icon_key(
             GpuState(present=True, vendor="nvidia")) == "gigamate"
 
     def test_icon_paths_resolve(self):
-        from gigamate import tray as tray_module
-        for key, path in tray_module.APP_ICON_PATHS.items():
+        from gigamate.paths import ICON_PATHS
+        for key, path in ICON_PATHS.items():
             assert path, f"empty path for {key}"
             if key == "gigamate":
                 continue
             # Variants must resolve to distinct files so hosts refresh.
-            assert path != tray_module.APP_ICON_PATHS["gigamate"]
+            assert path != ICON_PATHS["gigamate"]
 
 
 class TestGpuStatusText:
