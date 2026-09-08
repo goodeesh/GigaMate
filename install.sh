@@ -242,7 +242,21 @@ install_python_pkg() {
             pipx uninstall gigamate 2>/dev/null || true
         fi
         if pipx install "$script_dir" --force --system-site-packages; then
-            info "Installed via pipx (with system site packages)"
+            # pipx can report success yet produce a venv that cannot run
+            # the tray (e.g. isolated from system PyGObject). Verify the
+            # venv interpreter imports the system-bound modules before
+            # trusting it; otherwise fall back to pip --user.
+            local venv_py="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python"
+            if [ -x "$venv_py" ] && "$venv_py" -c \
+                "import gi, usb; import gigamate.tray, gigamate.idle" 2>/dev/null; then
+                info "Installed via pipx (verified: gi + tray imports OK)"
+            else
+                warn "pipx venv verification failed (gi/tray import) — falling back to pip --user"
+                pipx uninstall gigamate 2>/dev/null || true
+                pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
+                pip install --user "$script_dir"
+                info "Installed via pip --user"
+            fi
         else
             warn "pipx install failed — falling back to pip --user"
             pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
