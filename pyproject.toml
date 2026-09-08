@@ -26,6 +26,7 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "pyusb>=1.2",
+    "evdev>=2.0",
 ]
 
 [project.scripts]

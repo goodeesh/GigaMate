@@ -24,6 +24,8 @@ DEFAULT_CONFIG = {
     "brightness": 2,
     "startup_apply": True,
     "profile_id": [0x0414, 0x8105],
+    "idle_off_enabled": True,
+    "idle_timeout_sec": 60,
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -84,6 +86,14 @@ def _migrate_profile_id(data):
                               int(pid) if isinstance(pid, int) else int(pid, 16)]
 
 
+def _migrate_idle_timeout(val):
+    from .idle import clamp_timeout, DEFAULT_TIMEOUT_SEC
+    try:
+        return clamp_timeout(int(val))
+    except (ValueError, TypeError):
+        return DEFAULT_TIMEOUT_SEC
+
+
 def load():
     # Migrate from old config path if needed
     _migrate_old_config()
@@ -97,6 +107,10 @@ def load():
                 data["brightness"] = _migrate_brightness(data["brightness"])
             if "colour" in data:
                 data["colour"] = _migrate_colour(data["colour"])
+            if "idle_timeout_sec" in data:
+                data["idle_timeout_sec"] = _migrate_idle_timeout(data["idle_timeout_sec"])
+            if "idle_off_enabled" in data:
+                data["idle_off_enabled"] = bool(data["idle_off_enabled"])
             config.update(data)
         except (json.JSONDecodeError, OSError):
             pass
@@ -114,6 +128,9 @@ def save(config):
         "brightness": int(config.get("brightness", 2)),
         "startup_apply": bool(config.get("startup_apply", True)),
         "profile_id": list(config.get("profile_id", DEFAULT_CONFIG["profile_id"])),
+        "idle_off_enabled": bool(config.get("idle_off_enabled", True)),
+        "idle_timeout_sec": _migrate_idle_timeout(
+            config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:

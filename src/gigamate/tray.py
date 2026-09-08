@@ -30,6 +30,12 @@ from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
 from .hotkeys import HotkeyListener
+from .idle import (
+    DEFAULT_TIMEOUT_SEC,
+    IdleMonitor,
+    clamp_timeout,
+    fallback_idle_ms,
+)
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
@@ -38,6 +44,13 @@ APP_ID = "gigamate"
 APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
+IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
+IDLE_TIMEOUT_OPTIONS = [
+    (30, "30 seconds"),
+    (60, "1 minute"),
+    (120, "2 minutes"),
+    (300, "5 minutes"),
+]
 
 # Find icon: prefer local path, fall back to theme name
 _icon_paths = [
@@ -88,6 +101,16 @@ class GigaMateTrayApp:
         # Hotkey listener state
         self._hotkey_listener: Optional[HotkeyListener] = None
 
+        # Keyboard idle auto-off state
+        self._idle_enabled = bool(self._config.get("idle_off_enabled", True))
+        self._idle_timeout = clamp_timeout(
+            self._config.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC))
+        self._idle_dimmed = False
+        self._idle_monitor: Optional[IdleMonitor] = None
+        self._idle_fallback_timer_id: Optional[int] = None
+        self._idle_enable_item: Optional[Gtk.CheckMenuItem] = None
+        self._idle_timeout_items: Dict[int, Gtk.RadioMenuItem] = {}
+
         # Menu item references (for updating)
         self._reload_item: Optional[Gtk.MenuItem] = None
 
@@ -98,6 +121,7 @@ class GigaMateTrayApp:
         self._build_menu()
         self._building = False
         self._apply_on_startup()
+        self._init_idle()
         self._start_status_polling()
 
     # ────────────────────────────────────────────
@@ -150,6 +174,149 @@ class GigaMateTrayApp:
             pid=pid,
         )
         self._hotkey_listener.start()
+
+    # ────────────────────────────────────────────
+    # Keyboard idle auto-off
+    # ────────────────────────────────────────────
+
+    def _init_idle(self) -> None:
+        """Start event-driven idle monitoring (evdev) or D-Bus fallback."""
+        self._stop_idle()
+        self._idle_dimmed = False
+        if not self._idle_enabled:
+            return
+        if self._no_keyboard and self._profile is None:
+            # No backlight to manage; polling fallback is pointless.
+            return
+        monitor = IdleMonitor(
+            on_idle=self._on_idle_fired,
+            on_active=self._on_idle_active,
+            timeout_sec=self._idle_timeout,
+            enabled=True,
+        )
+        if monitor.start():
+            self._idle_monitor = monitor
+            return
+        # evdev unavailable (missing dep or permissions) → poll a
+        # platform idle query if one exists (Mutter/ScreenSaver/X11).
+        ms, _name = fallback_idle_ms()
+        if ms is not None:
+            self._idle_fallback_timer_id = GLib.timeout_add(
+                IDLE_FALLBACK_POLL_MS, self._fallback_idle_poll
+            )
+
+    def _stop_idle(self) -> None:
+        if self._idle_monitor is not None:
+            try:
+                self._idle_monitor.stop()
+            except Exception:
+                pass
+            self._idle_monitor = None
+        if self._idle_fallback_timer_id is not None:
+            try:
+                GLib.source_remove(self._idle_fallback_timer_id)
+            except Exception:
+                pass
+            self._idle_fallback_timer_id = None
+
+    def _on_idle_fired(self) -> None:
+        """Backlight off after timeout (no config write — transient)."""
+        if not self._idle_enabled or self._idle_dimmed:
+            return
+        if self._current_brightness == 0:
+            return  # user already wants it off
+        dev = self._get_keyboard()
+        if dev is None:
+            return
+        try:
+            set_off(dev, self._profile)
+            self._idle_dimmed = True
+        except Exception:
+            pass
+
+    def _on_idle_active(self) -> None:
+        """Restore saved backlight on first input after idle."""
+        if not self._idle_dimmed:
+            return
+        self._idle_dimmed = False
+        if self._current_brightness == 0:
+            return
+        dev = self._get_keyboard()
+        if dev is None:
+            return
+        try:
+            set_static(dev, self._current_colour,
+                       self._current_brightness, self._profile)
+        except Exception:
+            pass
+
+    def _fallback_idle_poll(self) -> bool:
+        """Polling fallback when evdev is unavailable. True = keep timer."""
+        if not self._idle_enabled or self._idle_monitor is not None:
+            return False
+        try:
+            ms, _name = fallback_idle_ms()
+        except Exception:
+            return True
+        if ms is None:
+            return True  # keep waiting; backend may appear later
+        if ms >= self._idle_timeout * 1000:
+            self._on_idle_fired()
+        else:
+            self._on_idle_active()
+        return True
+
+    def _on_idle_enabled_toggled(self, item: Gtk.CheckMenuItem) -> None:
+        if self._building:
+            return
+        self._idle_enabled = item.get_active()
+        if not self._idle_enabled and self._idle_dimmed:
+            # Re-enable path: restore immediately when turning the
+            # feature off while dimmed.
+            self._idle_dimmed = False
+            dev = self._get_keyboard()
+            if dev is not None and self._current_brightness != 0:
+                try:
+                    set_static(dev, self._current_colour,
+                               self._current_brightness, self._profile)
+                except Exception:
+                    pass
+        self._save_config()
+        self._init_idle()
+
+    def _on_idle_timeout_changed(self, item: Gtk.RadioMenuItem, timeout: int) -> None:
+        if not item.get_active() or self._building:
+            return
+        self._idle_timeout = clamp_timeout(timeout)
+        self._idle_dimmed = False
+        self._save_config()
+        self._init_idle()
+
+    def _append_idle_section(self) -> None:
+        """Add idle auto-off toggle + timeout radios (RGB menus only)."""
+        if self._profile is None or not self._profile.has_rgb:
+            return
+        header = Gtk.MenuItem(label="Backlight idle off")
+        header.set_sensitive(False)
+        self._menu.append(header)
+
+        self._idle_enable_item = Gtk.CheckMenuItem(
+            label="Turn off backlight when idle")
+        self._idle_enable_item.set_active(self._idle_enabled)
+        self._idle_enable_item.connect("toggled", self._on_idle_enabled_toggled)
+        self._menu.append(self._idle_enable_item)
+
+        group = None
+        self._idle_timeout_items = {}
+        for timeout, label in IDLE_TIMEOUT_OPTIONS:
+            item = Gtk.RadioMenuItem(group=group, label=label)
+            if group is None:
+                group = item
+            if timeout == self._idle_timeout:
+                item.set_active(True)
+            item.connect("toggled", self._on_idle_timeout_changed, timeout)
+            self._menu.append(item)
+            self._idle_timeout_items[timeout] = item
 
     # ────────────────────────────────────────────
     # Menu building
@@ -271,6 +438,9 @@ class GigaMateTrayApp:
                 self._brightness_items[level] = item
 
             self._menu.append(Gtk.SeparatorMenuItem())
+
+        # ── Keyboard idle auto-off section ──
+        self._append_idle_section()
 
         # ── Settings items ──
         self._append_settings_items()
@@ -477,9 +647,15 @@ class GigaMateTrayApp:
                 self._init_hotkeys()
                 self._rebuild_menu()
                 self._apply_on_startup()
+                self._init_idle()
         return False
 
     def _apply_colour(self) -> None:
+        # While idle-dimmed the hardware stays off; only persist the
+        # user's choice — it is applied on the next wake.
+        if self._idle_dimmed:
+            self._save_config()
+            return
         dev = self._get_keyboard()
         if dev is None:
             return
@@ -681,6 +857,7 @@ class GigaMateTrayApp:
                 self._indicator.set_label("", APP_ID)
             except Exception:
                 pass
+            self._init_idle()
         elif self._unsupported:
             # Re-init ACPI anyway (may work without profile)
             if self._acpi_controller is None:
@@ -750,8 +927,18 @@ class GigaMateTrayApp:
         dlg.destroy()
 
     def _on_quit(self, *args) -> None:
-        """Save config and quit."""
+        """Save config and quit (restore backlight if idle-dimmed)."""
+        if self._idle_dimmed:
+            self._idle_dimmed = False
+            try:
+                dev = self._get_keyboard()
+                if dev is not None and self._current_brightness != 0:
+                    set_static(dev, self._current_colour,
+                               self._current_brightness, self._profile)
+            except Exception:
+                pass
         self._save_config()
+        self._stop_idle()
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
             self._hotkey_listener = None
@@ -770,6 +957,8 @@ class GigaMateTrayApp:
         self._config["brightness"] = self._current_brightness
         self._config["startup_apply"] = self._startup_apply
         self._config["sync_system_power"] = self._sync_system_power
+        self._config["idle_off_enabled"] = self._idle_enabled
+        self._config["idle_timeout_sec"] = self._idle_timeout
         if self._current_acpi_profile is not None:
             self._config["acpi_profile"] = self._current_acpi_profile
         save_config(self._config)
@@ -813,6 +1002,8 @@ class GigaMateTrayApp:
         self._brightness_items = {}
         self._profile_items = {}
         self._status_items = []
+        self._idle_timeout_items = {}
+        self._idle_enable_item = None
 
     def _rebuild_menu(self) -> None:
         """Clear and rebuild the entire menu."""

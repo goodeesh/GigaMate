@@ -58,8 +58,8 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms"
-            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms
+            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev"
+            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
                 local headers_pkg
                 headers_pkg="$(arch_headers_pkg)"
@@ -71,21 +71,21 @@ install_system_deps() {
             fi
             ;;
         debian|ubuntu|pop|mint)
-            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms"
+            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev"
             sudo apt update
-            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms
+            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev
             info "Installing kernel headers..."
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms"
-            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev"
+            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev
             info "Installing kernel headers..."
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         suse|opensuse|sles)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms"
-            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev"
+            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev
             info "Installing kernel headers..."
             sudo zypper install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
@@ -93,6 +93,7 @@ install_system_deps() {
             warn "Unsupported distro: $distro"
             warn "You must manually install:"
             warn "  - pyusb (Python USB library)"
+            warn "  - evdev (Python input monitoring, for keyboard idle auto-off)"
             warn "  - PyGObject + Gtk 3.0 + AppIndicator3"
             warn "  - Linux kernel headers (for ACPI kernel module)"
             warn "  - Python 3.8+"

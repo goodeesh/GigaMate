@@ -39,3 +39,25 @@ def test_save_ignores_invalid_acpi_profile(isolated_config):
     config_module.save({"acpi_profile": "gaming"})
     data = json.loads(isolated_config.read_text())
     assert "acpi_profile" not in data
+
+
+def test_idle_defaults(isolated_config):
+    loaded = config_module.load()
+    assert loaded["idle_off_enabled"] is True
+    assert loaded["idle_timeout_sec"] == 60
+
+
+def test_idle_roundtrip(isolated_config):
+    config_module.save({"idle_off_enabled": False, "idle_timeout_sec": 120})
+    loaded = config_module.load()
+    assert loaded["idle_off_enabled"] is False
+    assert loaded["idle_timeout_sec"] == 120
+
+
+def test_idle_timeout_clamped(isolated_config):
+    config_module.save({"idle_timeout_sec": 5})
+    assert config_module.load()["idle_timeout_sec"] == 15
+    config_module.save({"idle_timeout_sec": 99999})
+    assert config_module.load()["idle_timeout_sec"] == 1800
+    config_module.save({"idle_timeout_sec": "bogus"})
+    assert config_module.load()["idle_timeout_sec"] == 60
