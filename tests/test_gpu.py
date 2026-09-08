@@ -40,6 +40,20 @@ def _nvidia_gpu(tmp_path, status="suspended", power_state="D3cold"):
     })
 
 
+def _amd_tree(tmp_path, boot_vga="0", status="active", power_state="D0",
+              bdf="0000:65:00.0", cls="0x030000\n", extra=None):
+    files = {
+        "vendor": "0x1002\n",
+        "class": cls,
+        "boot_vga": f"{boot_vga}\n",
+        "power/runtime_status": f"{status}\n",
+        "power_state": f"{power_state}\n",
+    }
+    if extra:
+        files.update(extra)
+    return _build_pci_tree(tmp_path, {bdf: files})
+
+
 class TestNvidiaGpuMonitor:
     def test_detect_nvidia(self, tmp_path):
         root = _nvidia_gpu(tmp_path)
@@ -102,6 +116,109 @@ class TestNvidiaGpuMonitor:
     def test_nonexistent_sysfs(self, tmp_path):
         mon = NvidiaGpuMonitor(pci_sysfs=tmp_path / "nope")
         assert mon.is_available is False
+
+
+class TestAmdDiscreteGpu:
+    def test_detect_amd_dgpu(self, tmp_path):
+        root = _amd_tree(tmp_path)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is True
+        state = mon.read_state()
+        assert state.present is True
+        assert state.vendor == "amd"
+        assert state.status == "active"
+
+    def test_amd_dgpu_suspended(self, tmp_path):
+        root = _amd_tree(tmp_path, status="suspended", power_state="D3cold")
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        state = mon.read_state()
+        assert (state.present, state.vendor, state.status) == (True, "amd", "suspended")
+
+    def test_amd_igpu_ignored(self, tmp_path):
+        # Boot display (integrated graphics) must never count as dGPU.
+        root = _amd_tree(tmp_path, boot_vga="1")
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is False
+        assert mon.read_state().present is False
+
+    def test_amd_missing_boot_vga_conservative(self, tmp_path):
+        # No boot_vga flag -> do not claim (avoids false red dot).
+        root = _build_pci_tree(tmp_path, {
+            "0000:65:00.0": {"vendor": "0x1002\n", "class": "0x030000\n"},
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is False
+
+    def test_mixed_igpu_picks_dgpu(self, tmp_path):
+        root = _build_pci_tree(tmp_path, {
+            "0000:65:00.0": {"vendor": "0x1002\n", "class": "0x030000\n",
+                             "boot_vga": "1\n",
+                             "power/runtime_status": "active\n"},
+            "0000:66:00.0": {"vendor": "0x1002\n", "class": "0x030000\n",
+                             "boot_vga": "0\n",
+                             "power/runtime_status": "suspended\n",
+                             "power_state": "D3cold\n"},
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        state = mon.read_state()
+        assert state.present is True
+        assert state.vendor == "amd"
+        assert state.status == "suspended"
+        assert mon._device is not None
+        assert mon._device.name == "0000:66:00.0"
+
+    def test_nvidia_wins_over_amd_igpu(self, tmp_path):
+        root = _build_pci_tree(tmp_path, {
+            "0000:64:00.0": {"vendor": "0x10de\n", "class": "0x030000\n",
+                             "power/runtime_status": "active\n",
+                             "power_state": "D0\n"},
+            "0000:65:00.0": {"vendor": "0x1002\n", "class": "0x038000\n",
+                             "boot_vga": "1\n"},
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        state = mon.read_state()
+        assert (state.present, state.vendor) == (True, "nvidia")
+
+    def test_amd_audio_skipped(self, tmp_path):
+        root = _build_pci_tree(tmp_path, {
+            "0000:65:00.0": {"vendor": "0x1002\n", "class": "0x030000\n",
+                             "boot_vga": "0\n"},
+            "0000:65:00.1": {"vendor": "0x1002\n", "class": "0x040300\n"},
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is True
+        assert mon._device is not None
+        assert mon._device.name == "0000:65:00.0"
+
+    def test_nvidia_state_has_vendor(self, tmp_path):
+        root = _nvidia_gpu(tmp_path, status="active", power_state="D0")
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.read_state().vendor == "nvidia"
+
+
+class TestGpuIconKey:
+    def test_mapping(self):
+        from gigamate import tray as tray_module
+        assert tray_module.gpu_icon_key(GpuState(present=False)) == "gigamate"
+        assert tray_module.gpu_icon_key(
+            GpuState(present=True, status="suspended", vendor="nvidia")) == "gigamate"
+        assert tray_module.gpu_icon_key(
+            GpuState(present=True, status="active", vendor="nvidia")) == "gigamate-nvidia"
+        assert tray_module.gpu_icon_key(
+            GpuState(present=True, status="active", vendor="amd")) == "gigamate-amd"
+        assert tray_module.gpu_icon_key(
+            GpuState(present=True, status="active", vendor="intel")) == "gigamate"
+        assert tray_module.gpu_icon_key(
+            GpuState(present=True, vendor="nvidia")) == "gigamate"
+
+    def test_icon_paths_resolve(self):
+        from gigamate import tray as tray_module
+        for key, path in tray_module.APP_ICON_PATHS.items():
+            assert path, f"empty path for {key}"
+            if key == "gigamate":
+                continue
+            # Variants must resolve to distinct files so hosts refresh.
+            assert path != tray_module.APP_ICON_PATHS["gigamate"]
 
 
 class TestGpuStatusText:

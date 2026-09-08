@@ -72,17 +72,41 @@ def _nearest_idle_step(timeout: int) -> int:
             best, best_diff = secs, diff
     return best
 
-# Find icon: prefer local path, fall back to theme name
-_icon_paths = [
-    Path(__file__).parent.parent.parent / "data" / "gigamate.svg",
-    Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "gigamate.svg",
-    Path("/usr/share/icons/hicolor/scalable/apps/gigamate.svg"),
-]
-APP_ICON_PATH = APP_ICON
-for _p in _icon_paths:
-    if _p.exists():
-        APP_ICON_PATH = str(_p)
-        break
+# Icon variants: plain + dGPU-awake dots (green NVIDIA, red AMD discrete).
+# Distinct files (not runtime rewrites) so indicator hosts refresh reliably.
+_ICON_NAMES = ("gigamate", "gigamate-nvidia", "gigamate-amd")
+
+
+def _resolve_icon(name: str) -> str:
+    """Resolve an icon name to a file path, falling back to theme name."""
+    candidates = [
+        Path(__file__).parent.parent.parent / "data" / f"{name}.svg",
+        Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / f"{name}.svg",
+        Path(f"/usr/share/icons/hicolor/scalable/apps/{name}.svg"),
+    ]
+    for _p in candidates:
+        if _p.exists():
+            return str(_p)
+    return name
+
+
+APP_ICON_PATH = _resolve_icon("gigamate")
+APP_ICON_PATHS = {name: _resolve_icon(name) for name in _ICON_NAMES}
+
+# Maps (gpu vendor, awake) -> icon key. Unknown vendors fall back to plain.
+GPU_ICON_KEYS = {
+    ("nvidia", True): "gigamate-nvidia",
+    ("amd", True): "gigamate-amd",
+}
+
+
+def gpu_icon_key(gpu) -> str:
+    """Map a GpuState to an icon key (plain when not awake/absent)."""
+    try:
+        awake = gpu.present and gpu.status == "active"
+        return GPU_ICON_KEYS.get((gpu.vendor, awake), "gigamate")
+    except Exception:
+        return "gigamate"
 
 
 class GigaMateTrayApp:
@@ -92,6 +116,7 @@ class GigaMateTrayApp:
         self._config = load_config()
         self._indicator: Optional[AppIndicator3.Indicator] = None
         self._menu: Optional[Gtk.Menu] = None
+        self._icon_key = "gigamate"
 
         # Keyboard state
         self._profile: Optional[DeviceProfile] = None
@@ -581,8 +606,23 @@ class GigaMateTrayApp:
                 STATUS_POLL_INTERVAL_MS, self._update_status
             )
 
+    def _update_gpu_icon(self) -> None:
+        """Switch tray icon dot to match dGPU awake state (change-only)."""
+        key = gpu_icon_key(get_gpu_state())
+        if key == self._icon_key:
+            return
+        self._icon_key = key
+        if self._indicator is None:
+            return
+        try:
+            self._indicator.set_icon_full(
+                APP_ICON_PATHS.get(key, APP_ICON_PATH), f"dGPU {key}")
+        except Exception:
+            pass
+
     def _update_status(self) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
+        self._update_gpu_icon()
         if not self._status_items:
             return False
 

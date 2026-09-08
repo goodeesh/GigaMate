@@ -314,7 +314,6 @@ install_desktop_entry() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local desktop_src="$script_dir/data/gigamate.desktop"
-    local icon_src="$script_dir/data/gigamate.svg"
 
     header "Installing desktop entry and icon"
 
@@ -327,10 +326,10 @@ install_desktop_entry() {
     # Remove old desktop entry
     rm -f "$apps_dir/gigabyte-keyboard-rgb-tray.desktop" 2>/dev/null || true
 
-    # Icon
+    # Icons (base + dGPU status dot variants)
     local icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
     mkdir -p "$icon_dir"
-    cp "$icon_src" "$icon_dir/gigamate.svg"
+    cp "$script_dir"/data/gigamate*.svg "$icon_dir/"
     rm -f "$icon_dir/gigabyte-keyboard-rgb.svg" 2>/dev/null || true
 
     # Refresh caches

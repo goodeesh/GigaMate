@@ -303,6 +303,7 @@ def cmd_gpu_status(args) -> None:
         return
     print("GigaMate — Discrete GPU")
     print()
+    print(f"  dGPU vendor:  {gpu.vendor or 'unknown'}")
     print(f"  dGPU state:   {gpu_status_text(gpu)}")
     print(f"  Runtime PM:   {gpu.status or 'unknown'}")
     print(f"  Power state:  {gpu.power_state or 'unknown'}")
