@@ -26,6 +26,9 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "pyusb>=1.2",
+    # evdev 2.x needs Python >=3.11; 1.9.x covers 3.8+ (idle.py only
+    # needs it optionally, so any 1.9+ API is fine).
+    "evdev>=1.9",
 ]
 
 [project.scripts]

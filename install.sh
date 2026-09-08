@@ -58,8 +58,8 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms"
-            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms
+            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev"
+            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
                 local headers_pkg
                 headers_pkg="$(arch_headers_pkg)"
@@ -71,21 +71,21 @@ install_system_deps() {
             fi
             ;;
         debian|ubuntu|pop|mint)
-            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms"
+            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev"
             sudo apt update
-            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms
+            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev
             info "Installing kernel headers..."
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms"
-            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev"
+            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev
             info "Installing kernel headers..."
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         suse|opensuse|sles)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms"
-            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms
+            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev"
+            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev
             info "Installing kernel headers..."
             sudo zypper install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
@@ -93,6 +93,7 @@ install_system_deps() {
             warn "Unsupported distro: $distro"
             warn "You must manually install:"
             warn "  - pyusb (Python USB library)"
+            warn "  - evdev (Python input monitoring, for keyboard idle auto-off)"
             warn "  - PyGObject + Gtk 3.0 + AppIndicator3"
             warn "  - Linux kernel headers (for ACPI kernel module)"
             warn "  - Python 3.8+"
@@ -231,8 +232,37 @@ install_python_pkg() {
 
     info "Installing gigamate with pip..."
     if command -v pipx &>/dev/null; then
-        pipx install "$script_dir" --force
-        info "Installed via pipx"
+        # The tray needs system packages (PyGObject/gi), which are not
+        # installable into an isolated venv. Recreate the venv with
+        # system site packages when it lacks them (pipx cannot retrofit
+        # the flag onto an existing venv — it must be recreated).
+        local venv_cfg="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/pyvenv.cfg"
+        if [ -f "$venv_cfg" ] && ! grep -q "system-site-packages = true" "$venv_cfg"; then
+            info "Recreating pipx venv with system site packages (for PyGObject)..."
+            pipx uninstall gigamate 2>/dev/null || true
+        fi
+        if pipx install "$script_dir" --force --system-site-packages; then
+            # pipx can report success yet produce a venv that cannot run
+            # the tray (e.g. isolated from system PyGObject). Verify the
+            # venv interpreter imports the system-bound modules before
+            # trusting it; otherwise fall back to pip --user.
+            local venv_py="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python"
+            if [ -x "$venv_py" ] && "$venv_py" -c \
+                "import gi, usb; import gigamate.tray, gigamate.idle" 2>/dev/null; then
+                info "Installed via pipx (verified: gi + tray imports OK)"
+            else
+                warn "pipx venv verification failed (gi/tray import) — falling back to pip --user"
+                pipx uninstall gigamate 2>/dev/null || true
+                pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
+                pip install --user "$script_dir"
+                info "Installed via pip --user"
+            fi
+        else
+            warn "pipx install failed — falling back to pip --user"
+            pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
+            pip install --user "$script_dir"
+            info "Installed via pip --user"
+        fi
     else
         pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
         pip install --user "$script_dir"
@@ -298,7 +328,6 @@ install_desktop_entry() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local desktop_src="$script_dir/data/gigamate.desktop"
-    local icon_src="$script_dir/data/gigamate.svg"
 
     header "Installing desktop entry and icon"
 
@@ -311,10 +340,10 @@ install_desktop_entry() {
     # Remove old desktop entry
     rm -f "$apps_dir/gigabyte-keyboard-rgb-tray.desktop" 2>/dev/null || true
 
-    # Icon
+    # Icons (base + dGPU status dot variants)
     local icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
     mkdir -p "$icon_dir"
-    cp "$icon_src" "$icon_dir/gigamate.svg"
+    cp "$script_dir"/data/gigamate*.svg "$icon_dir/"
     rm -f "$icon_dir/gigabyte-keyboard-rgb.svg" 2>/dev/null || true
 
     # Refresh caches

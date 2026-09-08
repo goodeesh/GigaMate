@@ -25,6 +25,10 @@ PCI_SYSFS = Path("/sys/bus/pci/devices")
 # NVIDIA vendor id as printed in /sys/bus/pci/devices/*/vendor
 NVIDIA_VENDOR = "0x10de"
 
+# AMD vendor id. Only *discrete* AMD GPUs count: the integrated GPU shares
+# this vendor id but is always awake, so it must be excluded via boot_vga.
+AMD_VENDOR = "0x1002"
+
 
 @dataclass
 class GpuState:
@@ -37,6 +41,7 @@ class GpuState:
     present: bool = False
     status: Optional[str] = None  # "active" or "suspended"
     power_state: Optional[str] = None  # "D0", "D3hot", "D3cold", ...
+    vendor: Optional[str] = None  # "nvidia", "amd", or None when absent
 
 
 class NvidiaGpuMonitor:
@@ -50,18 +55,19 @@ class NvidiaGpuMonitor:
 
         Args:
             pci_sysfs: Override the PCI sysfs root (mainly for tests).
-                       If None, the module-level ``PCI_SYSFS`` is used.
+                        If None, the module-level ``PCI_SYSFS`` is used.
         """
         self._pci_sysfs: Optional[Path] = pci_sysfs
         self._device: Optional[Path] = None
+        self._vendor: Optional[str] = None
 
     @property
     def _sysfs_root(self) -> Path:
         return self._pci_sysfs or PCI_SYSFS
 
     def detect(self) -> bool:
-        """Find the NVIDIA display device. Returns True if found."""
-        self._device = self._find_device()
+        """Find the discrete GPU device. Returns True if found."""
+        self._device, self._vendor = self._find_device()
         return self._device is not None
 
     @property
@@ -76,18 +82,27 @@ class NvidiaGpuMonitor:
         if not self.is_available:
             return GpuState(present=False)
 
-        state = GpuState(present=True)
+        state = GpuState(present=True, vendor=self._vendor)
         assert self._device is not None  # guaranteed by is_available
         state.status = self._read_text(self._device / "power" / "runtime_status")
         state.power_state = self._read_text(self._device / "power_state")
         return state
 
-    def _find_device(self) -> Optional[Path]:
-        """Scan the PCI sysfs root for the NVIDIA display controller."""
+    def _find_device(self) -> tuple:
+        """Scan the PCI sysfs root for a discrete GPU.
+
+        Returns (device_path_or_None, vendor_or_None). NVIDIA matches take
+        priority. AMD matches must not be the boot display (boot_vga=1),
+        which excludes integrated graphics. A missing boot_vga file is
+        treated conservatively as "not a dGPU" to avoid a permanently
+        lit indicator on iGPU-only machines.
+        """
+        nvidia: Optional[Path] = None
+        amd: Optional[Path] = None
         try:
             root = self._sysfs_root
             if not root.is_dir():
-                return None
+                return None, None
             for entry in root.iterdir():
                 if not entry.is_dir():
                     continue
@@ -96,11 +111,24 @@ class NvidiaGpuMonitor:
                     cls = (entry / "class").read_text().strip()
                 except OSError:
                     continue
-                if vendor == NVIDIA_VENDOR and cls.startswith("0x03"):
-                    return entry
+                if not cls.startswith("0x03"):
+                    continue
+                if vendor == NVIDIA_VENDOR and nvidia is None:
+                    nvidia = entry
+                elif vendor == AMD_VENDOR and amd is None:
+                    # Only accept AMD devices explicitly flagged as
+                    # non-boot (boot_vga=0). This excludes integrated
+                    # graphics (boot_vga=1); a missing flag is treated
+                    # conservatively as "not a dGPU".
+                    if self._read_text(entry / "boot_vga") == "0":
+                        amd = entry
         except OSError:
-            return None
-        return None
+            pass
+        if nvidia is not None:
+            return nvidia, "nvidia"
+        if amd is not None:
+            return amd, "amd"
+        return None, None
 
     def _read_text(self, path: Path) -> Optional[str]:
         """Read a sysfs text file, returning None on any failure."""
@@ -135,6 +163,24 @@ def gpu_short_status_text(state: GpuState) -> str:
     if not state.present:
         return "Not present"
     return {"suspended": "Asleep", "active": "Awake"}.get(state.status or "", "Unknown")
+
+
+# Tray icon keys per (vendor, awake). Distinct files (not runtime rewrites)
+# so indicator hosts refresh reliably. Unknown vendors fall back to plain.
+GPU_ICON_KEYS = {
+    ("nvidia", True): "gigamate-nvidia",
+    ("amd", True): "gigamate-amd",
+}
+
+
+def gpu_icon_key(state: GpuState) -> str:
+    """Map a GpuState to a tray icon key (plain when not awake/absent)."""
+    try:
+        if not state.present or state.status != "active" or not state.vendor:
+            return "gigamate"
+        return GPU_ICON_KEYS.get((state.vendor, True), "gigamate")
+    except Exception:
+        return "gigamate"
 
 
 def get_gpu_state() -> GpuState:
