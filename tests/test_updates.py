@@ -196,3 +196,22 @@ class TestBuildCommand:
         cmd = build_update_command()
         assert "--update" in cmd[-1] and "--yes" in cmd[-1]
         assert "install.sh" in cmd[-1]
+
+
+class TestEndpointUrls:
+    def test_github_api_urls_hit_repos_namespace(self):
+        # Regression: missing /repos/ made every check 404 (mocks hid it).
+        assert updates.RELEASE_LATEST_URL.startswith(
+            "https://api.github.com/repos/goodeesh/GigaMate/")
+        assert updates.TAGS_URL.startswith(
+            "https://api.github.com/repos/goodeesh/GigaMate/")
+
+    def test_fetch_uses_repos_url(self):
+        seen = []
+
+        def fake(url_or_req, timeout=None):
+            seen.append(getattr(url_or_req, "full_url", str(url_or_req)))
+            return _Resp({"tag_name": "v2.0.1"})
+
+        assert fetch_latest_version(urlopen=fake) == "v2.0.1"
+        assert seen and all("/repos/" in u for u in seen)
