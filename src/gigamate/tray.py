@@ -614,19 +614,47 @@ class GigaMateTrayApp:
         )
         dlg.format_secondary_text(
             "GigaMate will update in the background (re-runs install.sh "
-            "for the latest tagged release, including drivers and tray).\n\n"
+            "for the latest tagged release, including drivers and tray).\n"
+            "The driver steps need administrator rights — your system "
+            "may ask for your password.\n\n"
             "Update now?")
         response = dlg.run()
         dlg.destroy()
         if response != Gtk.ResponseType.YES:
             return
+        # No admin rights → the privileged steps would fail: abort now
+        # with instructions instead of a doomed background run.
+        try:
+            admin = update_checker.admin_status()
+        except Exception:
+            admin = "password"
+        if admin in ("denied", "no-sudo"):
+            noadmin = Gtk.MessageDialog(
+                transient_for=None,
+                flags=0,
+                message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK,
+                text="Administrator rights required",
+            )
+            noadmin.format_secondary_text(
+                "Updating drivers needs sudo, which is not available "
+                f"for your user (status: {admin}).\n\n"
+                f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
+            noadmin.run()
+            noadmin.destroy()
+            return
         if self._latest_version:
             update_checker.dismiss_version(self._latest_version)
         try:
-            GLib.spawn_async(update_checker.build_update_command(),
-                             flags=GLib.SpawnFlags.SEARCH_PATH)
+            pid, _, _, _ = GLib.spawn_async(
+                update_checker.build_update_command(),
+                flags=(GLib.SpawnFlags.SEARCH_PATH
+                       | GLib.SpawnFlags.DO_NOT_REAP_CHILD))
+            GLib.child_watch_add(pid, self._on_update_done)
         except Exception:
-            pass
+            update_checker.undismiss()
+            self._show_update_failed("Could not start the updater.")
+            return
         info = Gtk.MessageDialog(
             transient_for=None,
             flags=0,
@@ -636,9 +664,31 @@ class GigaMateTrayApp:
         )
         info.format_secondary_text(
             "The update is running. The tray will restart automatically "
-            "when install.sh finishes (systemd service restart).")
+            "when install.sh finishes (systemd service restart).\n"
+            f"Progress log: {update_checker.UPDATE_LOG_FILE}")
         info.run()
         info.destroy()
+
+    def _on_update_done(self, pid: int, status: int) -> None:
+        """Updater child exited: report failures, revive badge if needed."""
+        if status == 0:
+            return  # service restart (inside install.sh) takes it from here
+        update_checker.undismiss()  # show the badge again, not silent
+        self._show_update_failed(f"Updater exited with status {status}.")
+
+    def _show_update_failed(self, detail: str) -> None:
+        dlg = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text="Update failed",
+        )
+        dlg.format_secondary_text(
+            f"{detail}\n\nLog: {update_checker.UPDATE_LOG_FILE}\n\n"
+            f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
+        dlg.run()
+        dlg.destroy()
 
     def _on_check_updates_clicked(self, *args) -> None:
         """Manual 'Check for updates' — forced network check + result dialog."""

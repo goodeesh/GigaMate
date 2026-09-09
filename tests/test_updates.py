@@ -197,6 +197,52 @@ class TestBuildCommand:
         assert "--update" in cmd[-1] and "--yes" in cmd[-1]
         assert "install.sh" in cmd[-1]
 
+    def test_update_command_logs_to_file(self, tmp_path):
+        log = tmp_path / "update.log"
+        cmd = updates.build_update_command(log_file=log)
+        assert str(log) in cmd[-1] and "2>&1" in cmd[-1]
+
+
+class TestAdminStatus:
+    def _proc(self, rc, err=b""):
+        class P:
+            returncode = rc
+            stderr = err
+        return P()
+
+    def test_ok_passwordless(self):
+        assert updates.admin_status(
+            run=lambda *a, **k: self._proc(0)) == "ok"
+
+    def test_password_required(self):
+        assert updates.admin_status(
+            run=lambda *a, **k: self._proc(
+                1, b"sudo: a password is required")) == "password"
+
+    def test_denied_not_in_sudoers(self):
+        assert updates.admin_status(
+            run=lambda *a, **k: self._proc(
+                1, b"adriansc is not in the sudoers file.")) == "denied"
+
+    def test_no_sudo_binary(self):
+        def boom(*a, **k):
+            raise FileNotFoundError("sudo")
+        assert updates.admin_status(run=boom) == "no-sudo"
+
+
+class TestUndismiss:
+    def test_undismiss_restores_badge(self, tmp_path, monkeypatch):
+        state = tmp_path / "update_state.json"
+        monkeypatch.setattr(updates, "get_installed_version", lambda: "2.0.0")
+        fn = _urlopen_factory({"tag_name": "v2.0.1"})
+        check_for_updates(force=True, now_ts=5000.0,
+                          state_file=state, urlopen=fn)
+        dismiss_version("v2.0.1", state_file=state)
+        updates.undismiss(state_file=state)
+        res = check_for_updates(force=False, now_ts=5001.0,
+                                state_file=state, urlopen=_failing_urlopen)
+        assert res["update_available"] is True
+
 
 class TestEndpointUrls:
     def test_github_api_urls_hit_repos_namespace(self):
