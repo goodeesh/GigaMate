@@ -612,11 +612,11 @@ class GigaMateTrayApp:
         if admin in ("denied", "no-sudo"):
             self._show_no_admin_dialog(admin)
             return
-        try:
-            graphical = update_checker.graphical_elevate_available()
-        except Exception:
-            graphical = False
-        use_terminal = admin == "password" and not graphical
+        # Password needed → always use the user's own terminal: sudo
+        # prompts in-band there. Background runs are only for passwordless
+        # sudo, where no prompt can appear. (Detached background sudo
+        # fails on stock systems: no tty and no askpass wired in.)
+        use_terminal = admin == "password"
 
         current = update_checker.get_installed_version()
         latest = self._latest_version or "latest"
@@ -631,8 +631,7 @@ class GigaMateTrayApp:
             secondary = (
                 "GigaMate will update in the background (re-runs install.sh "
                 "for the latest tagged release, including drivers and tray).\n"
-                "The driver steps need administrator rights — your system "
-                "may ask for your password.\n\n"
+                "No password prompt is expected (passwordless sudo).\n\n"
                 "Update now?")
         dlg = Gtk.MessageDialog(
             transient_for=None,

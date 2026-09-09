@@ -244,60 +244,106 @@ class TestUndismiss:
         assert res["update_available"] is True
 
 
-class TestGraphicalElevate:
-    def test_no_display_means_no_prompt(self, tmp_path):
-        env = {"SUDO_ASKPASS": "/usr/bin/ssh-askpass"}
-        assert updates.graphical_elevate_available(
-            env=env, sudo_conf=tmp_path / "none") is False
+class TestDetectDefaultTerminal:
+    def _run(self, outputs):
+        class P:
+            def __init__(self, out):
+                self.returncode = 0
+                self.stdout = out
+        def fake(argv, **kwargs):
+            key = " ".join(argv[:2]) if len(argv) > 1 else argv[0]
+            if key in outputs:
+                return P(outputs[key])
+            raise FileNotFoundError(argv[0])
+        return fake
 
-    def test_stock_desktop_has_no_askpass(self, tmp_path):
-        env = {"WAYLAND_DISPLAY": "wayland-0"}
-        assert updates.graphical_elevate_available(
-            env=env, sudo_conf=tmp_path / "none") is False
+    def _appdir(self, tmp_path, name="ghostty.desktop", body=None):
+        d = tmp_path / "apps"
+        d.mkdir(exist_ok=True)
+        (d / name).write_text(body or (
+            "[Desktop Entry]\nName=Ghostty\nType=Application\n"
+            "TryExec=ghostty\nExec=ghostty\nX-TerminalArgExec=-e\n"))
+        return d
 
-    def test_custom_askpass_counts(self, tmp_path):
-        ask = tmp_path / "sudo-askpass"
-        ask.write_text("#!/bin/sh\n")
-        ask.chmod(0o755)
-        env = {"DISPLAY": ":1", "SUDO_ASKPASS": str(ask)}
-        assert updates.graphical_elevate_available(
-            env=env, sudo_conf=tmp_path / "none") is True
+    def test_kde_setting(self, tmp_path):
+        run = self._run({"kreadconfig6 --file": "ghostty\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "KDE", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/ghostty",
+            app_dirs=[self._appdir(tmp_path)])
+        assert got == ("/usr/bin/ghostty", "-e")
 
-    def test_non_executable_askpass_ignored(self, tmp_path):
-        ask = tmp_path / "sudo-askpass"
-        ask.write_text("#!/bin/sh\n")
-        ask.chmod(0o644)
-        env = {"DISPLAY": ":1", "SUDO_ASKPASS": str(ask)}
-        assert updates.graphical_elevate_available(
-            env=env, sudo_conf=tmp_path / "none") is False
+    def test_gnome_setting(self, tmp_path):
+        run = self._run({"gsettings get": "'ptyxis'\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "GNOME", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/ptyxis",
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/ptyxis", "-e")
 
-    def test_sudo_conf_askpass_counts(self, tmp_path):
-        conf = tmp_path / "sudo.conf"
-        conf.write_text("# comment\nPath askpass /usr/bin/ssh-askpass\n")
-        env = {"DISPLAY": ":0"}
-        assert updates.graphical_elevate_available(
-            env=env, sudo_conf=conf) is True
+    def test_terminal_env(self, tmp_path):
+        got = updates.detect_default_terminal(
+            env={"TERMINAL": "kitty", "HOME": "x"},
+            run=self._run({}), which=lambda n: "/usr/bin/kitty",
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/kitty", "-e")
+
+    def test_alternatives(self, tmp_path):
+        run = self._run({"update-alternatives --query":
+                         "Name: x-terminal-emulator\nValue: /usr/bin/xterm\n"})
+        got = updates.detect_default_terminal(
+            env={"HOME": "x"}, run=run,
+            which=lambda n: "/usr/bin/xterm" if n == "xterm" else None,
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/xterm", "-e")
+
+    def test_nothing_detected(self, tmp_path):
+        got = updates.detect_default_terminal(
+            env={"HOME": "x"}, run=self._run({}),
+            which=lambda n: None, app_dirs=[tmp_path])
+        assert got is None
+
+    def test_exec_arg_defaults_to_dash_e(self, tmp_path):
+        d = tmp_path / "apps"
+        d.mkdir(exist_ok=True)
+        (d / "myterm.desktop").write_text(
+            "[Desktop Entry]\nName=MyTerm\nExec=myterm\n")
+        run = self._run({"kreadconfig6 --file": "myterm\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "KDE", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/myterm",
+            app_dirs=[d])
+        assert got == ("/usr/bin/myterm", "-e")
 
 
 class TestTerminalCommand:
-    def test_prefers_desktop_terminal(self):
-        fake_which = lambda name: f"/usr/bin/{name}"
+    def test_prefers_detected_default(self):
         argv = updates.build_terminal_update_command(
-            desktop="KDE", which=fake_which)
+            desktop="KDE",
+            which=lambda n: "/usr/bin/konsole",
+            detect=lambda: ("/usr/bin/ghostty", "-e"))
         assert argv is not None
-        assert argv[0] == "konsole"
+        assert argv[0] == "/usr/bin/ghostty"
         assert "--update" in argv[-1] and "--yes" in argv[-1]
 
-    def test_falls_back_to_any_available(self):
+    def test_dashdash_family_separator(self):
+        argv = updates.build_terminal_update_command(
+            which=lambda n: None,
+            detect=lambda: ("/usr/bin/gnome-terminal", "--"))
+        assert argv is not None
+        assert argv[:2] == ["/usr/bin/gnome-terminal", "--"]
+
+    def test_falls_back_to_scan(self):
         fake_which = lambda name: "/usr/bin/xterm" if name == "xterm" else None
         argv = updates.build_terminal_update_command(
-            desktop="KDE", which=fake_which)
+            desktop="KDE", which=fake_which, detect=lambda: None)
         assert argv is not None
-        assert argv[0] == "xterm"
+        assert argv[0] == "/usr/bin/xterm"
 
     def test_none_when_no_terminal(self):
         assert updates.build_terminal_update_command(
-            desktop="", which=lambda name: None) is None
+            desktop="", which=lambda name: None,
+            detect=lambda: None) is None
 
 
 class TestEndpointUrls:
