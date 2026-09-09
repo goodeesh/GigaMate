@@ -13,6 +13,7 @@ Usage:
     gigamate detect [--acpi]                   Detect hardware
     gigamate calibrate [rgb|acpi|--all]        Run calibration
     gigamate version                           Show version
+    gigamate update [--check] [--yes]          Check for / install updates
 
 Legacy (still works):
     gigabyte-rgb static purple                 Same as `gigamate rgb static purple`
@@ -665,6 +666,54 @@ def cmd_version(args) -> None:
     print()
 
 
+def cmd_update(args) -> None:
+    """Check for updates or self-update to the latest tagged release."""
+    import subprocess
+    from . import updates as update_checker
+
+    check_only = bool(getattr(args, "check", False))
+    assume_yes = bool(getattr(args, "yes", False))
+
+    if check_only:
+        result = update_checker.check_for_updates(force=True)
+        print(f"Installed: {result['current']}")
+        print(f"Latest:    {result['latest'] or 'unknown'}")
+        if result["update_available"]:
+            print(f"Update available: {result['latest']}")
+        elif result["latest"]:
+            print("Up to date.")
+        elif result.get("reachable"):
+            print("No releases published yet (maintainer hasn't tagged one).")
+        else:
+            print("Could not reach github.com.")
+        return
+
+    result = update_checker.check_for_updates(force=True)
+    current = result["current"]
+    latest = result["latest"]
+    if not latest:
+        print(f"Installed: {current}")
+        if result.get("reachable"):
+            print("No releases published yet (maintainer hasn't tagged one).")
+        else:
+            print("Could not reach github.com — try again later.")
+        sys.exit(1)
+    if not result["update_available"]:
+        print(f"GigaMate {current} is up to date (latest {latest}).")
+        return
+    print(f"Update available: {current} → {latest}")
+    if not assume_yes:
+        ans = input("Update now? [Y/n] ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("Cancelled.")
+            return
+    cmd = update_checker.build_update_command()
+    print("Running background update (install.sh --update)...")
+    print(f"  {' '.join(cmd)}")
+    rc = subprocess.call(cmd)
+    sys.exit(rc)
+
+
 def cmd_legacy(args) -> None:
     """Handle legacy flat-command syntax (gigabyte-rgb <effect> ...)."""
     _print_deprecation()
@@ -893,6 +942,13 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     # --- version subcommand ---
     sub.add_parser("version", help="Show version")
 
+    # --- update subcommand ---
+    update_parser = sub.add_parser("update", help="Check for / install updates")
+    update_parser.add_argument("--check", action="store_true",
+                               help="Only check, do not install")
+    update_parser.add_argument("--yes", "-y", action="store_true",
+                               help="Non-interactive (assume yes)")
+
     # --- gpu subcommand ---
     gpu_parser = sub.add_parser("gpu", help="Discrete GPU power state")
     gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
@@ -917,6 +973,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         _dispatch_calibrate(args)
     elif args.command == "version":
         cmd_version(args)
+    elif args.command == "update":
+        cmd_update(args)
     elif args.command == "gpu":
         if args.gpu_action in ("status", None):
             cmd_gpu_status(args)
