@@ -11,6 +11,8 @@ The primary user interface for GigaMate. Provides:
 import sys
 import os
 import signal
+import threading
+import random
 from typing import Optional, Dict, List
 
 import gi
@@ -45,12 +47,14 @@ from .idle import (
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
+from . import updates as update_checker
 
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
+UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000  # daily; one tiny HTTPS req/day
 APP_ICON_PATHS = ICON_PATHS
 
 # Icon variants: plain + dGPU-awake dots (green NVIDIA, red AMD discrete).
@@ -110,6 +114,11 @@ class GigaMateTrayApp:
         # Menu item references (for updating)
         self._reload_item: Optional[Gtk.MenuItem] = None
 
+        # Update state (battery-efficient daily check, maintainer tags only)
+        self._update_available = False
+        self._latest_version: Optional[str] = None
+        self._update_timer_id: Optional[int] = None
+
         self._building = True
         self._detect_on_startup()
         self._init_acpi()
@@ -119,6 +128,7 @@ class GigaMateTrayApp:
         self._apply_on_startup()
         self._init_idle()
         self._start_status_polling()
+        self._init_update_check()
 
     # ────────────────────────────────────────────
     # Initialisation
@@ -339,6 +349,8 @@ class GigaMateTrayApp:
         """Build or rebuild the entire tray menu."""
         self._menu = Gtk.Menu()
 
+        self._append_update_section()
+
         if self._no_keyboard and self._acpi_controller is None:
             self._build_no_hardware_menu()
         elif self._no_keyboard and self._acpi_controller is not None:
@@ -532,6 +544,10 @@ class GigaMateTrayApp:
         reload_item.connect("activate", self._on_reload)
         self._menu.append(reload_item)
 
+        check_item = Gtk.MenuItem(label="Check for updates")
+        check_item.connect("activate", self._on_check_updates_clicked)
+        self._menu.append(check_item)
+
     def _append_about(self) -> None:
         about_item = Gtk.MenuItem(label="About")
         about_item.connect("activate", self._on_about)
@@ -542,6 +558,128 @@ class GigaMateTrayApp:
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", self._on_quit)
         self._menu.append(quit_item)
+
+    # ────────────────────────────────────────────
+    # Updates (battery-efficient daily check)
+    # ────────────────────────────────────────────
+
+    def _append_update_section(self) -> None:
+        """Prepend 'Update available' item when a newer maintainer tag exists."""
+        if not self._update_available:
+            return
+        label = f"Update available ({self._latest_version})"
+        item = Gtk.MenuItem(label=label)
+        item.connect("activate", self._on_update_clicked)
+        self._menu.append(item)
+        self._menu.append(Gtk.SeparatorMenuItem())
+
+    def _init_update_check(self) -> None:
+        """Startup check (cached) + daily re-check with jitter."""
+        self._run_update_check_async(force=False)
+        jitter_ms = random.randint(0, 30 * 60 * 1000)
+        self._update_timer_id = GLib.timeout_add(
+            UPDATE_CHECK_INTERVAL_MS + jitter_ms, self._update_timer_tick)
+
+    def _update_timer_tick(self) -> bool:
+        self._run_update_check_async(force=False)
+        return True  # keep daily timer alive
+
+    def _run_update_check_async(self, force: bool = False) -> None:
+        t = threading.Thread(target=self._check_updates_bg,
+                             args=(force,), daemon=True)
+        t.start()
+
+    def _check_updates_bg(self, force: bool) -> None:
+        try:
+            result = update_checker.check_for_updates(force=force)
+        except Exception:
+            return
+        try:
+            GLib.idle_add(self._on_update_result, result)
+        except Exception:
+            pass
+
+    def _on_update_result(self, result: dict) -> bool:
+        changed = (result.get("update_available") != self._update_available
+                   or result.get("latest") != self._latest_version)
+        self._update_available = bool(result.get("update_available"))
+        self._latest_version = result.get("latest")
+        self._refresh_tray_icon()
+        if changed:
+            self._rebuild_menu()
+        return False  # single-shot idle callback
+
+    def _on_update_clicked(self, *args) -> None:
+        """Confirm dialog, then background self-update on approval."""
+        current = update_checker.get_installed_version()
+        latest = self._latest_version or "latest"
+        dlg = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f"Update available ({current} → {latest})",
+        )
+        dlg.format_secondary_text(
+            "GigaMate will update in the background (re-runs install.sh "
+            "for the latest tagged release, including drivers and tray).\n\n"
+            "Update now?")
+        response = dlg.run()
+        dlg.destroy()
+        if response != Gtk.ResponseType.YES:
+            return
+        if self._latest_version:
+            update_checker.dismiss_version(self._latest_version)
+        try:
+            GLib.spawn_async(update_checker.build_update_command(),
+                             flags=GLib.SpawnFlags.SEARCH_PATH)
+        except Exception:
+            pass
+        info = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Updating in background",
+        )
+        info.format_secondary_text(
+            "The update is running. The tray will restart automatically "
+            "when install.sh finishes (systemd service restart).")
+        info.run()
+        info.destroy()
+
+    def _on_check_updates_clicked(self, *args) -> None:
+        """Manual 'Check for updates' — forced network check + result dialog."""
+        try:
+            result = update_checker.check_for_updates(force=True)
+        except Exception:
+            result = {"current": "?", "latest": None,
+                      "update_available": False}
+        # Feed through the normal path so icon + menu refresh.
+        try:
+            self._on_update_result(result)
+        except Exception:
+            pass
+        if result.get("update_available"):
+            self._on_update_clicked()
+            return
+        dlg = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="GigaMate is up to date"
+            if result.get("latest") else "Update check failed",
+        )
+        detail = (f"Installed: {result.get('current')}  |  "
+                  f"Latest: {result.get('latest')}"
+                  if result.get("latest")
+                  else ("No releases published yet."
+                        if result.get("reachable")
+                        else "Could not reach github.com. Will retry tomorrow."))
+        dlg.format_secondary_text(detail)
+        dlg.run()
+        dlg.destroy()
 
     # ────────────────────────────────────────────
     # Status polling
@@ -558,8 +696,19 @@ class GigaMateTrayApp:
             )
 
     def _update_gpu_icon(self) -> None:
-        """Switch tray icon dot to match dGPU awake state (change-only)."""
-        key = gpu_icon_key(get_gpu_state())
+        """Legacy alias: refresh combined dGPU + update badge icon."""
+        self._refresh_tray_icon()
+
+    def _tray_icon_key(self) -> str:
+        """Combine dGPU state with update badge into one of 6 icon keys."""
+        base = gpu_icon_key(get_gpu_state())
+        if self._update_available:
+            return f"{base}-update" if base != "gigamate" else "gigamate-update"
+        return base
+
+    def _refresh_tray_icon(self) -> None:
+        """Switch tray icon to match dGPU + update state (change-only)."""
+        key = self._tray_icon_key()
         if key == self._icon_key:
             return
         self._icon_key = key
@@ -567,13 +716,13 @@ class GigaMateTrayApp:
             return
         try:
             self._indicator.set_icon_full(
-                APP_ICON_PATHS.get(key, APP_ICON_PATH), f"dGPU {key}")
+                APP_ICON_PATHS.get(key, APP_ICON_PATH), f"GigaMate {key}")
         except Exception:
             pass
 
     def _update_status(self) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
-        self._update_gpu_icon()
+        self._refresh_tray_icon()
         if not self._status_items:
             return False
 
@@ -973,6 +1122,12 @@ class GigaMateTrayApp:
         if self._status_timer_id is not None:
             GLib.source_remove(self._status_timer_id)
             self._status_timer_id = None
+        if self._update_timer_id is not None:
+            try:
+                GLib.source_remove(self._update_timer_id)
+            except Exception:
+                pass
+            self._update_timer_id = None
         Gtk.main_quit()
 
     # ────────────────────────────────────────────

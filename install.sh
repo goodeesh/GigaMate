@@ -3,6 +3,13 @@ set -euo pipefail
 
 NAME="gigamate"
 DESCRIPTION="GigaMate — Gigabyte laptop management for Linux"
+REPO="goodeesh/GigaMate"
+INSTALL_URL="https://raw.githubusercontent.com/${REPO}/main/install.sh"
+
+DO_UPDATE=false
+ASSUME_YES=false
+REQUESTED_TAG=""
+DO_CHECK=false
 
 COLOUR_GREEN='\033[0;32m'
 COLOUR_YELLOW='\033[1;33m'
@@ -14,6 +21,114 @@ info() { echo -e "${COLOUR_GREEN}[INFO]${COLOUR_RESET} $*"; }
 warn() { echo -e "${COLOUR_YELLOW}[WARN]${COLOUR_RESET} $*"; }
 error() { echo -e "${COLOUR_RED}[ERROR]${COLOUR_RESET} $*"; }
 header() { echo -e "\n${COLOUR_BOLD}--- $* ---${COLOUR_RESET}\n"; }
+
+usage() {
+    echo "Usage: install.sh [--update] [--yes] [--tag vX.Y.Z] [--check]"
+    echo "  --update   Re-install latest tagged release (preserves ~/.config/gigamate)"
+    echo "  --yes      Non-interactive (assume yes, for background updates)"
+    echo "  --tag TAG  Install a specific tag (default: latest release tag)"
+    echo "  --check    Print installed vs latest version and exit"
+    echo "Env: GIGAMATE_REF=vX.Y.Z forces a ref (tag or branch)."
+}
+
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --update) DO_UPDATE=true; shift ;;
+            --yes|-y) ASSUME_YES=true; shift ;;
+            --tag) REQUESTED_TAG="${2:-}"; shift 2 ;;
+            --tag=*) REQUESTED_TAG="${1#--tag=}"; shift ;;
+            --check) DO_CHECK=true; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) shift ;;
+        esac
+    done
+}
+
+latest_github_tag() {
+    local tag=""
+    if command -v curl &>/dev/null; then
+        tag="$(curl -sSL --max-time 10 "https://api.github.com/repos/${REPO}/tags?per_page=1" \
+            | grep -o '"name": *"v[0-9][^"]*"' | head -1 | cut -d'"' -f4 || true)"
+    elif command -v python3 &>/dev/null; then
+        tag="$(python3 -c "
+import json, urllib.request
+try:
+    r = urllib.request.urlopen('https://api.github.com/repos/${REPO}/tags?per_page=1', timeout=10)
+    tags = json.load(r)
+    print(tags[0]['name'] if tags else '')
+except Exception:
+    print('')" 2>/dev/null || true)"
+    fi
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$tag"
+    fi
+}
+
+installed_version() {
+    if command -v gigamate &>/dev/null; then
+        gigamate version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+    elif python3 -c "import gigamate" 2>/dev/null; then
+        python3 -c "import gigamate; print(gigamate.__version__)" 2>/dev/null || true
+    fi
+}
+
+do_check() {
+    local installed latest
+    installed="$(installed_version || true)"
+    latest="$(latest_github_tag || true)"
+    echo "Installed: ${installed:-unknown}"
+    echo "Latest:    ${latest:-unknown (offline?)}"
+}
+
+# When run via `curl .../install.sh | bash` there is no local checkout
+# (no src/, no data/). Fetch the requested tag tarball and re-exec from it
+# so pipe-install and self-update share one code path.
+ensure_checkout() {
+    local script_dir="$1"
+    if [ -f "$script_dir/src/gigamate_acpi/Makefile" ] && \
+       [ -f "$script_dir/data/gigamate.service" ]; then
+        return 0
+    fi
+    if [ "${GIGAMATE_BOOTSTRAPPED:-}" = "1" ]; then
+        error "Bootstrapped checkout still missing src/ and data/ — aborting."
+        exit 1
+    fi
+    local ref="${REQUESTED_TAG:-${GIGAMATE_REF:-}}"
+    if [ -z "$ref" ]; then
+        ref="$(latest_github_tag || true)"
+        [ -n "$ref" ] || ref="main"
+    fi
+    info "No local checkout detected (pipe mode) — fetching ${REPO} @ ${ref}..."
+    local tmpdir tarball top
+    tmpdir="$(mktemp -d)"
+    tarball="$tmpdir/gigamate.tar.gz"
+    local url
+    if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        url="https://codeload.github.com/${REPO}/tar.gz/refs/tags/${ref}"
+    else
+        url="https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}"
+        if ! curl -sSL --max-time 60 -o "$tarball" "$url"; then
+            url="https://github.com/${REPO}/archive/refs/heads/${ref}.tar.gz"
+        fi
+    fi
+    curl -sSL --max-time 60 -o "$tarball" "$url" || {
+        error "Download failed: $url"; exit 1; }
+    tar -xzf "$tarball" -C "$tmpdir" || { error "Extract failed"; exit 1; }
+    top="$(find "$tmpdir" -maxdepth 1 -name 'GigaMate-*' | head -1)"
+    if [ -z "$top" ] || [ ! -f "$top/install.sh" ]; then
+        error "Fetched archive has no install.sh — aborting."
+        exit 1
+    fi
+    info "Re-executing from $top ..."
+    local args=()
+    $DO_UPDATE && args+=(--update)
+    $ASSUME_YES && args+=(--yes)
+    [ -n "$REQUESTED_TAG" ] && args+=(--tag "$REQUESTED_TAG")
+    $DO_CHECK && args+=(--check)
+    export GIGAMATE_BOOTSTRAPPED=1
+    exec bash "$top/install.sh" "${args[@]}"
+}
 
 # --- Detect distro ---
 detect_distro() {
@@ -98,6 +213,10 @@ install_system_deps() {
             warn "  - Linux kernel headers (for ACPI kernel module)"
             warn "  - Python 3.8+"
             echo
+            if [ "$ASSUME_YES" = true ]; then
+                info "--yes given, continuing non-interactively."
+                return 0
+            fi
             read -rp "Continue with pip install anyway? [y/N] " ans
             if [[ ! "$ans" =~ ^[yY] ]]; then
                 exit 1
@@ -318,8 +437,12 @@ install_service() {
     cp "$service_src" "$service_dst"
 
     systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user enable --now gigamate.service 2>/dev/null || true
-    info "systemd user service installed and started."
+    systemctl --user enable gigamate.service 2>/dev/null || true
+    # restart (not enable --now): also restarts a stale already-running tray
+    # so re-installs can never leave old code in memory. restart starts an
+    # inactive service too, so first-time installs are unaffected.
+    systemctl --user restart gigamate.service 2>/dev/null || true
+    info "systemd user service installed and (re)started."
     info "  Status: systemctl --user status gigamate.service"
 }
 
@@ -340,7 +463,7 @@ install_desktop_entry() {
     # Remove old desktop entry
     rm -f "$apps_dir/gigabyte-keyboard-rgb-tray.desktop" 2>/dev/null || true
 
-    # Icons (base + dGPU status dot variants)
+    # Icons (base + dGPU dot + update badge variants: gigamate*.svg)
     local icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
     mkdir -p "$icon_dir"
     cp "$script_dir"/data/gigamate*.svg "$icon_dir/"
@@ -377,10 +500,30 @@ migrate_config() {
 }
 
 main() {
-    echo "============================================"
-    echo "  $DESCRIPTION"
-    echo "============================================"
-    echo
+    parse_args "$@"
+
+    if [ "$DO_CHECK" = true ]; then
+        do_check
+        exit 0
+    fi
+
+    # Pipe mode (curl | bash) has no checkout - fetch tag tarball first.
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || pwd)"
+    ensure_checkout "$script_dir"
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [ "$DO_UPDATE" = true ]; then
+        echo "============================================"
+        echo "  $DESCRIPTION - Update"
+        echo "============================================"
+        echo
+    else
+        echo "============================================"
+        echo "  $DESCRIPTION"
+        echo "============================================"
+        echo
+    fi
 
     if ! command -v python3 &>/dev/null; then
         error "Python 3 is required but not found."
@@ -395,9 +538,20 @@ main() {
     install_desktop_entry
     migrate_config
 
+    if [ "$DO_UPDATE" = true ]; then
+        # install_service already restarted the tray; just drop the cached
+        # update state so the new version re-checks fresh tomorrow.
+        rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/gigamate/update_state.json" 2>/dev/null || true
+        info "Cleared cached update state."
+    fi
+
     echo
     echo "============================================"
+    if [ "$DO_UPDATE" = true ]; then
+        echo -e "${COLOUR_GREEN}  Updated successfully!${COLOUR_RESET}"
+    else
     echo -e "${COLOUR_GREEN}  ✅ GigaMate installed successfully!${COLOUR_RESET}"
+    fi
     echo "============================================"
     echo
 

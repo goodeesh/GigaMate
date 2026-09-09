@@ -24,7 +24,10 @@ def resolve_icon(name: str) -> str:
     return name
 
 
-# Tray icon variants: plain + dGPU-awake dots (green NVIDIA, red AMD).
-ICON_NAMES = ("gigamate", "gigamate-nvidia", "gigamate-amd")
+# Tray icon variants: plain + dGPU-awake dots (green NVIDIA, red AMD),
+# each with and without an orange update badge (bottom-right).
+ICON_NAMES = ("gigamate", "gigamate-nvidia", "gigamate-amd",
+              "gigamate-update", "gigamate-nvidia-update",
+              "gigamate-amd-update")
 ICON_PATHS = {name: resolve_icon(name) for name in ICON_NAMES}
 
