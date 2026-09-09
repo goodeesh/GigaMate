@@ -1,4 +1,4 @@
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 """GigaMate — Gigabyte laptop management for Linux.
 
 Bringing gimate (Windows) features to Linux: keyboard RGB,
