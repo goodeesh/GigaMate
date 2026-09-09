@@ -25,9 +25,9 @@ from typing import Callable, Dict, Optional, Tuple
 from .paths import CONFIG_DIR
 
 REPO = "goodeesh/GigaMate"
-RELEASE_LATEST_URL = f"https://api.github.com/{REPO}/releases/latest"
+RELEASE_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 # Fallback when no GitHub Release exists yet (only tags pushed).
-TAGS_URL = f"https://api.github.com/{REPO}/tags?per_page=1"
+TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=1"
 RAW_VERSION_URL = (
     f"https://raw.githubusercontent.com/{REPO}/main/pyproject.toml"
 )
