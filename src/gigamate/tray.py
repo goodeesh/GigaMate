@@ -602,9 +602,37 @@ class GigaMateTrayApp:
         return False  # single-shot idle callback
 
     def _on_update_clicked(self, *args) -> None:
-        """Confirm dialog, then background self-update on approval."""
+        """Confirm dialog, then update via background or terminal path."""
+        # Fast, non-interactive probes first so the dialog states the
+        # actual path. sudo -n never prompts and changes nothing.
+        try:
+            admin = update_checker.admin_status()
+        except Exception:
+            admin = "password"
+        if admin in ("denied", "no-sudo"):
+            self._show_no_admin_dialog(admin)
+            return
+        # Password needed → always use the user's own terminal: sudo
+        # prompts in-band there. Background runs are only for passwordless
+        # sudo, where no prompt can appear. (Detached background sudo
+        # fails on stock systems: no tty and no askpass wired in.)
+        use_terminal = admin == "password"
+
         current = update_checker.get_installed_version()
         latest = self._latest_version or "latest"
+        if use_terminal:
+            secondary = (
+                "A terminal window will open and run the update there "
+                "(re-runs install.sh for the latest tagged release, "
+                "including drivers and tray). Enter your password in "
+                "the terminal when asked.\n\n"
+                "Update now?")
+        else:
+            secondary = (
+                "GigaMate will update in the background (re-runs install.sh "
+                "for the latest tagged release, including drivers and tray).\n"
+                "No password prompt is expected (passwordless sudo).\n\n"
+                "Update now?")
         dlg = Gtk.MessageDialog(
             transient_for=None,
             flags=0,
@@ -612,37 +640,63 @@ class GigaMateTrayApp:
             buttons=Gtk.ButtonsType.YES_NO,
             text=f"Update available ({current} → {latest})",
         )
-        dlg.format_secondary_text(
-            "GigaMate will update in the background (re-runs install.sh "
-            "for the latest tagged release, including drivers and tray).\n"
-            "The driver steps need administrator rights — your system "
-            "may ask for your password.\n\n"
-            "Update now?")
+        dlg.format_secondary_text(secondary)
         response = dlg.run()
         dlg.destroy()
         if response != Gtk.ResponseType.YES:
             return
+        if use_terminal:
+            self._run_update_in_terminal()
+        else:
+            self._run_update_in_background()
+
+    def _show_no_admin_dialog(self, admin: str) -> None:
         # No admin rights → the privileged steps would fail: abort now
         # with instructions instead of a doomed background run.
-        try:
-            admin = update_checker.admin_status()
-        except Exception:
-            admin = "password"
-        if admin in ("denied", "no-sudo"):
-            noadmin = Gtk.MessageDialog(
-                transient_for=None,
-                flags=0,
-                message_type=Gtk.MessageType.WARNING,
-                buttons=Gtk.ButtonsType.OK,
-                text="Administrator rights required",
-            )
-            noadmin.format_secondary_text(
-                "Updating drivers needs sudo, which is not available "
-                f"for your user (status: {admin}).\n\n"
-                f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
-            noadmin.run()
-            noadmin.destroy()
+        noadmin = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK,
+            text="Administrator rights required",
+        )
+        noadmin.format_secondary_text(
+            "Updating drivers needs sudo, which is not available "
+            f"for your user (status: {admin}).\n\n"
+            f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
+        noadmin.run()
+        noadmin.destroy()
+
+    def _run_update_in_terminal(self) -> None:
+        """Stock-system path: normal terminal runs the curl update."""
+        argv = update_checker.build_terminal_update_command(
+            desktop=os.environ.get("XDG_CURRENT_DESKTOP", ""))
+        if argv is None:
+            self._show_no_admin_dialog("no-terminal")
             return
+        # No dismiss here: if the user closes the terminal without
+        # updating, the badge must stay. install.sh --update clears the
+        # state file on success.
+        try:
+            GLib.spawn_async(argv, flags=GLib.SpawnFlags.SEARCH_PATH)
+        except Exception:
+            self._show_update_failed("Could not open a terminal.")
+            return
+        info = Gtk.MessageDialog(
+            transient_for=None,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text="Updating in terminal",
+        )
+        info.format_secondary_text(
+            "The update is running in the terminal window.\n"
+            "Enter your password there when asked.")
+        info.run()
+        info.destroy()
+
+    def _run_update_in_background(self) -> None:
+        """Askpass-wired path: detached updater with log + child watch."""
         if self._latest_version:
             update_checker.dismiss_version(self._latest_version)
         try:

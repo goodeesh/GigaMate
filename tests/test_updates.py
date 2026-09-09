@@ -244,6 +244,108 @@ class TestUndismiss:
         assert res["update_available"] is True
 
 
+class TestDetectDefaultTerminal:
+    def _run(self, outputs):
+        class P:
+            def __init__(self, out):
+                self.returncode = 0
+                self.stdout = out
+        def fake(argv, **kwargs):
+            key = " ".join(argv[:2]) if len(argv) > 1 else argv[0]
+            if key in outputs:
+                return P(outputs[key])
+            raise FileNotFoundError(argv[0])
+        return fake
+
+    def _appdir(self, tmp_path, name="ghostty.desktop", body=None):
+        d = tmp_path / "apps"
+        d.mkdir(exist_ok=True)
+        (d / name).write_text(body or (
+            "[Desktop Entry]\nName=Ghostty\nType=Application\n"
+            "TryExec=ghostty\nExec=ghostty\nX-TerminalArgExec=-e\n"))
+        return d
+
+    def test_kde_setting(self, tmp_path):
+        run = self._run({"kreadconfig6 --file": "ghostty\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "KDE", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/ghostty",
+            app_dirs=[self._appdir(tmp_path)])
+        assert got == ("/usr/bin/ghostty", "-e")
+
+    def test_gnome_setting(self, tmp_path):
+        run = self._run({"gsettings get": "'ptyxis'\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "GNOME", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/ptyxis",
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/ptyxis", "-e")
+
+    def test_terminal_env(self, tmp_path):
+        got = updates.detect_default_terminal(
+            env={"TERMINAL": "kitty", "HOME": "x"},
+            run=self._run({}), which=lambda n: "/usr/bin/kitty",
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/kitty", "-e")
+
+    def test_alternatives(self, tmp_path):
+        run = self._run({"update-alternatives --query":
+                         "Name: x-terminal-emulator\nValue: /usr/bin/xterm\n"})
+        got = updates.detect_default_terminal(
+            env={"HOME": "x"}, run=run,
+            which=lambda n: "/usr/bin/xterm" if n == "xterm" else None,
+            app_dirs=[tmp_path])
+        assert got == ("/usr/bin/xterm", "-e")
+
+    def test_nothing_detected(self, tmp_path):
+        got = updates.detect_default_terminal(
+            env={"HOME": "x"}, run=self._run({}),
+            which=lambda n: None, app_dirs=[tmp_path])
+        assert got is None
+
+    def test_exec_arg_defaults_to_dash_e(self, tmp_path):
+        d = tmp_path / "apps"
+        d.mkdir(exist_ok=True)
+        (d / "myterm.desktop").write_text(
+            "[Desktop Entry]\nName=MyTerm\nExec=myterm\n")
+        run = self._run({"kreadconfig6 --file": "myterm\n"})
+        got = updates.detect_default_terminal(
+            env={"XDG_CURRENT_DESKTOP": "KDE", "HOME": "x"},
+            run=run, which=lambda n: "/usr/bin/myterm",
+            app_dirs=[d])
+        assert got == ("/usr/bin/myterm", "-e")
+
+
+class TestTerminalCommand:
+    def test_prefers_detected_default(self):
+        argv = updates.build_terminal_update_command(
+            desktop="KDE",
+            which=lambda n: "/usr/bin/konsole",
+            detect=lambda: ("/usr/bin/ghostty", "-e"))
+        assert argv is not None
+        assert argv[0] == "/usr/bin/ghostty"
+        assert "--update" in argv[-1] and "--yes" in argv[-1]
+
+    def test_dashdash_family_separator(self):
+        argv = updates.build_terminal_update_command(
+            which=lambda n: None,
+            detect=lambda: ("/usr/bin/gnome-terminal", "--"))
+        assert argv is not None
+        assert argv[:2] == ["/usr/bin/gnome-terminal", "--"]
+
+    def test_falls_back_to_scan(self):
+        fake_which = lambda name: "/usr/bin/xterm" if name == "xterm" else None
+        argv = updates.build_terminal_update_command(
+            desktop="KDE", which=fake_which, detect=lambda: None)
+        assert argv is not None
+        assert argv[0] == "/usr/bin/xterm"
+
+    def test_none_when_no_terminal(self):
+        assert updates.build_terminal_update_command(
+            desktop="", which=lambda name: None,
+            detect=lambda: None) is None
+
+
 class TestEndpointUrls:
     def test_github_api_urls_hit_repos_namespace(self):
         # Regression: missing /repos/ made every check 404 (mocks hid it).

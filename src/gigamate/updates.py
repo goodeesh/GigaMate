@@ -15,14 +15,16 @@ Stdlib only (urllib + json), gi-free so tests run without PyGObject.
 """
 
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Mapping, Optional, Tuple
 
 from .paths import CONFIG_DIR
 
@@ -255,6 +257,198 @@ MANUAL_UPDATE_INSTRUCTIONS = (
     "Ask an administrator to run this in a terminal:\n"
     f"  curl -sSL {INSTALL_URL} | bash -s -- --update"
 )
+
+
+def _capture_stdout(argv: list, timeout: int = 10,
+                    run: Callable = subprocess.run) -> Optional[str]:
+    """Run argv, return stripped stdout on exit 0, else None. Never raises."""
+    try:
+        proc = run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                   timeout=timeout, text=True)
+    except Exception:
+        return None
+    try:
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout.strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _desktop_exec_arg(app_dirs: list, name: str) -> Optional[str]:
+    """Read X-TerminalArgExec for a terminal from .desktop files."""
+    name = (name or "").lower()
+    if not name:
+        return None
+    for app_dir in app_dirs:
+        try:
+            files = sorted(Path(app_dir).glob("*.desktop"))
+        except OSError:
+            continue
+        for entry in files:
+            try:
+                text = entry.read_text()
+            except OSError:
+                continue
+            keys: Dict[str, str] = {}
+            for line in text.splitlines():
+                if not line or line[0] in ("[", "#", " ", "\t"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                keys[key.strip()] = val.strip().strip('"')
+            candidates = set()
+            for raw in (keys.get("TryExec", ""), keys.get("Exec", "")):
+                if not raw:
+                    continue
+                try:
+                    first = shlex.split(raw)[0]
+                except Exception:
+                    first = raw.split()[0] if raw.split() else ""
+                if first:
+                    candidates.add(os.path.basename(first).lower())
+            stem = entry.stem.lower()
+            if name in candidates or name in stem or stem in name:
+                return keys.get("X-TerminalArgExec", "-e") or "-e"
+    return None
+
+
+def detect_default_terminal(
+        env: Optional[Mapping[str, str]] = None,
+        run: Callable = subprocess.run,
+        which: Callable[[str], Optional[str]] = shutil.which,
+        app_dirs: Optional[list] = None) -> Optional[Tuple[str, str]]:
+    """Detect the user's default terminal → (binary, exec_arg) or None.
+
+    Order: KDE setting → GNOME setting → $TERMINAL → Debian
+    alternatives. The exec flag comes from the terminal's own .desktop
+    entry (X-TerminalArgExec), defaulting to ``-e``. gi-free; everything
+    injectable for tests. Never raises.
+    """
+    env = os.environ if env is None else env
+    if app_dirs is None:
+        home = env.get("HOME", str(Path.home()))
+        app_dirs = [Path(home) / ".local" / "share" / "applications",
+                    Path("/usr/share/applications")]
+    desktop = (env.get("XDG_CURRENT_DESKTOP", "") or "").lower()
+    name: Optional[str] = None
+
+    try:
+        if "kde" in desktop or "plasma" in desktop:
+            out = _capture_stdout(
+                ["kreadconfig6", "--file", "kdeglobals",
+                 "--group", "General", "--key", "TerminalApplication"],
+                run=run)
+            if out:
+                name = out.split()[0]
+        elif "gnome" in desktop or "unity" in desktop or "cinnamon" in desktop:
+            out = _capture_stdout(
+                ["gsettings", "get",
+                 "org.gnome.desktop.default-applications.terminal", "exec"],
+                run=run)
+            if out:
+                name = out.strip().strip("'\"").split()[0]
+    except Exception:
+        pass
+    if not name and env.get("TERMINAL"):
+        name = env["TERMINAL"].split()[0]
+    if not name:
+        out = _capture_stdout(
+            ["update-alternatives", "--query", "x-terminal-emulator"],
+            run=run)
+        if out:
+            for line in out.splitlines():
+                if line.startswith("Value:"):
+                    name = line.split(":", 1)[1].strip().split()[0]
+                    break
+    if not name:
+        return None
+    binary = which(name) or (name if "/" in name else None)
+    if not binary:
+        return None
+    short = os.path.basename(binary).lower()
+    exec_arg = _desktop_exec_arg(app_dirs, short) or "-e"
+    return binary, exec_arg
+
+
+# Terminals needing `--` before the command (gnome-terminal family).
+_DASHDASH_TERMINALS = frozenset({"gnome-terminal", "mate-terminal", "ptyxis"})
+
+
+def _terminal_argv(binary: str, exec_arg: str, inner: str) -> list:
+    """Build [terminal … bash -c inner], honouring `--` families."""
+    if os.path.basename(binary).lower() in _DASHDASH_TERMINALS:
+        return [binary, "--", "bash", "-c", inner]
+    return [binary, exec_arg, "bash", "-c", inner]
+
+
+def _default_detect(env: Optional[Mapping[str, str]],
+                    which: Callable[[str], Optional[str]]
+                    ) -> Optional[Tuple[str, str]]:
+    return detect_default_terminal(env=env, which=which)
+
+
+def build_terminal_update_command(
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which,
+        detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
+        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+    """Argv opening the user's terminal running the update, else None.
+
+    Prefers the desktop's configured default terminal (KDE/GNOME/$TERMINAL/
+    alternatives + its own X-TerminalArgExec flag), then scans common
+    emulators. The update runs inside with the shell kept afterwards so
+    output stays visible.
+    """
+    inner = (f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes;"
+             f" exec bash")
+    detect_fn = detect if detect is not None else (
+        lambda: _default_detect(env, which))
+    try:
+        found = detect_fn()
+    except Exception:
+        found = None
+    if found:
+        binary, exec_arg = found
+        return _terminal_argv(binary, exec_arg, inner)
+    candidates = [
+        ("ghostty", "-e"),
+        ("kitty", "-e"),
+        ("alacritty", "-e"),
+        ("ptyxis", "--"),
+        ("kgx", "-e"),
+        ("konsole", "-e"),
+        ("gnome-terminal", "--"),
+        ("xfce4-terminal", "-e"),
+        ("wezterm", "-e"),
+        ("foot", None),  # positional command, no flag
+        ("qterminal", "-e"),
+        ("mate-terminal", "--"),
+        ("lxterminal", "-e"),
+        ("x-terminal-emulator", "-e"),
+        ("xterm", "-e"),
+    ]
+    desktop = (desktop or "").lower()
+    desktop_terminal = {
+        "gnome": "gnome-terminal",
+        "kde": "konsole",
+        "plasma": "konsole",
+        "xfce": "xfce4-terminal",
+        "lxde": "lxterminal",
+        "lxqt": "lxterminal",
+    }
+    preferred = desktop_terminal.get(desktop)
+    ordered = sorted(candidates,
+                     key=lambda c: (c[0] != preferred, c[0] not in desktop))
+    for term, flag in ordered:
+        binary = which(term)
+        if not binary:
+            continue
+        if flag is None:
+            return [binary, "bash", "-c", inner]
+        return _terminal_argv(binary, flag, inner)
+    return None
 
 
 def menu_item_label(update_available: bool) -> str:
