@@ -707,6 +707,15 @@ def cmd_update(args) -> None:
         if ans not in ("", "y", "yes"):
             print("Cancelled.")
             return
+    try:
+        admin = update_checker.admin_status()
+    except Exception:
+        admin = "password"
+    if admin in ("denied", "no-sudo"):
+        print(f"Administrator rights required (status: {admin}).")
+        print("The driver steps need sudo, which is not available for you.")
+        print(update_checker.MANUAL_UPDATE_INSTRUCTIONS)
+        sys.exit(1)
     cmd = update_checker.build_update_command()
     print("Running background update (install.sh --update)...")
     print(f"  {' '.join(cmd)}")

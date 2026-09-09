@@ -16,6 +16,8 @@ Stdlib only (urllib + json), gi-free so tests run without PyGObject.
 
 import json
 import re
+import shlex
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -208,6 +210,53 @@ def dismiss_version(tag: str, state_file: Path = STATE_FILE) -> None:
     save_state(state, state_file)
 
 
+def undismiss(state_file: Path = STATE_FILE) -> None:
+    """Clear a dismissal (e.g. after a failed update) so the badge returns."""
+    state = load_state(state_file)
+    if "dismissed_version" in state:
+        del state["dismissed_version"]
+        save_state(state, state_file)
+
+
+def admin_status(run: Callable = subprocess.run) -> str:
+    """Check administrator rights for the driver parts of an update.
+
+    Returns one of:
+      "ok"       passwordless sudo (or cached) — no prompt will appear
+      "password" user has sudo but must enter a password (system will prompt)
+      "denied"   user is not in sudoers — privileged steps will fail
+      "no-sudo"  sudo binary not present at all
+
+    gi-free; ``run`` injectable for tests.
+    """
+    try:
+        proc = run(["sudo", "-n", "true"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                   timeout=10)
+    except FileNotFoundError:
+        return "no-sudo"
+    except Exception:
+        return "denied"
+    if proc.returncode == 0:
+        return "ok"
+    err = ""
+    try:
+        err = (proc.stderr or b"").decode("utf-8", "replace").lower()
+    except Exception:
+        pass
+    if "sudoers" in err or "not allowed" in err or "unknown user" in err:
+        return "denied"
+    return "password"
+
+
+UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
+
+MANUAL_UPDATE_INSTRUCTIONS = (
+    "Ask an administrator to run this in a terminal:\n"
+    f"  curl -sSL {INSTALL_URL} | bash -s -- --update"
+)
+
+
 def menu_item_label(update_available: bool) -> str:
     """Label for the single update menu entry.
 
@@ -218,9 +267,14 @@ def menu_item_label(update_available: bool) -> str:
     return "Update available" if update_available else "Check for updates"
 
 
-def build_update_command() -> list:
-    """Argv the tray spawns in background to self-update non-interactively."""
+def build_update_command(log_file: Path = UPDATE_LOG_FILE) -> list:
+    """Argv the tray spawns in background to self-update non-interactively.
+
+    Output goes to ``log_file`` so silent background failures stay
+    diagnosable (the tray shows the path when the updater exits non-zero).
+    """
     # Piped through bash -s -- so it works without a local checkout;
     # install.sh bootstraps the latest tag itself (see --update).
     return ["bash", "-c",
-            f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes"]
+            f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes"
+            f" >{shlex.quote(str(log_file))} 2>&1"]
