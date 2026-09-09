@@ -349,8 +349,6 @@ class GigaMateTrayApp:
         """Build or rebuild the entire tray menu."""
         self._menu = Gtk.Menu()
 
-        self._append_update_section()
-
         if self._no_keyboard and self._acpi_controller is None:
             self._build_no_hardware_menu()
         elif self._no_keyboard and self._acpi_controller is not None:
@@ -544,8 +542,12 @@ class GigaMateTrayApp:
         reload_item.connect("activate", self._on_reload)
         self._menu.append(reload_item)
 
-        check_item = Gtk.MenuItem(label="Check for updates")
-        check_item.connect("activate", self._on_check_updates_clicked)
+        check_item = Gtk.MenuItem(
+            label=update_checker.menu_item_label(self._update_available))
+        if self._update_available and self._latest_version:
+            check_item.connect("activate", self._on_update_clicked)
+        else:
+            check_item.connect("activate", self._on_check_updates_clicked)
         self._menu.append(check_item)
 
     def _append_about(self) -> None:
@@ -562,16 +564,6 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
     # Updates (battery-efficient daily check)
     # ────────────────────────────────────────────
-
-    def _append_update_section(self) -> None:
-        """Prepend 'Update available' item when a newer maintainer tag exists."""
-        if not self._update_available:
-            return
-        label = f"Update available ({self._latest_version})"
-        item = Gtk.MenuItem(label=label)
-        item.connect("activate", self._on_update_clicked)
-        self._menu.append(item)
-        self._menu.append(Gtk.SeparatorMenuItem())
 
     def _init_update_check(self) -> None:
         """Startup check (cached) + daily re-check with jitter."""

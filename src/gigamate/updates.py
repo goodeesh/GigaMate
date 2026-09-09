@@ -208,6 +208,16 @@ def dismiss_version(tag: str, state_file: Path = STATE_FILE) -> None:
     save_state(state, state_file)
 
 
+def menu_item_label(update_available: bool) -> str:
+    """Label for the single update menu entry.
+
+    Morphs between idle and available states so there is exactly one
+    entry point. Kept version-free on purpose; the confirm dialog shows
+    the exact versions.
+    """
+    return "Update available" if update_available else "Check for updates"
+
+
 def build_update_command() -> list:
     """Argv the tray spawns in background to self-update non-interactively."""
     # Piped through bash -s -- so it works without a local checkout;

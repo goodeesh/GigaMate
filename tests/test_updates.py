@@ -215,3 +215,11 @@ class TestEndpointUrls:
 
         assert fetch_latest_version(urlopen=fake) == "v2.0.1"
         assert seen and all("/repos/" in u for u in seen)
+
+
+class TestMenuItemLabel:
+    def test_idle(self):
+        assert updates.menu_item_label(False) == "Check for updates"
+
+    def test_available_has_no_version(self):
+        assert updates.menu_item_label(True) == "Update available"
