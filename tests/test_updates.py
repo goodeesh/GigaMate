@@ -244,6 +244,62 @@ class TestUndismiss:
         assert res["update_available"] is True
 
 
+class TestGraphicalElevate:
+    def test_no_display_means_no_prompt(self, tmp_path):
+        env = {"SUDO_ASKPASS": "/usr/bin/ssh-askpass"}
+        assert updates.graphical_elevate_available(
+            env=env, sudo_conf=tmp_path / "none") is False
+
+    def test_stock_desktop_has_no_askpass(self, tmp_path):
+        env = {"WAYLAND_DISPLAY": "wayland-0"}
+        assert updates.graphical_elevate_available(
+            env=env, sudo_conf=tmp_path / "none") is False
+
+    def test_custom_askpass_counts(self, tmp_path):
+        ask = tmp_path / "sudo-askpass"
+        ask.write_text("#!/bin/sh\n")
+        ask.chmod(0o755)
+        env = {"DISPLAY": ":1", "SUDO_ASKPASS": str(ask)}
+        assert updates.graphical_elevate_available(
+            env=env, sudo_conf=tmp_path / "none") is True
+
+    def test_non_executable_askpass_ignored(self, tmp_path):
+        ask = tmp_path / "sudo-askpass"
+        ask.write_text("#!/bin/sh\n")
+        ask.chmod(0o644)
+        env = {"DISPLAY": ":1", "SUDO_ASKPASS": str(ask)}
+        assert updates.graphical_elevate_available(
+            env=env, sudo_conf=tmp_path / "none") is False
+
+    def test_sudo_conf_askpass_counts(self, tmp_path):
+        conf = tmp_path / "sudo.conf"
+        conf.write_text("# comment\nPath askpass /usr/bin/ssh-askpass\n")
+        env = {"DISPLAY": ":0"}
+        assert updates.graphical_elevate_available(
+            env=env, sudo_conf=conf) is True
+
+
+class TestTerminalCommand:
+    def test_prefers_desktop_terminal(self):
+        fake_which = lambda name: f"/usr/bin/{name}"
+        argv = updates.build_terminal_update_command(
+            desktop="KDE", which=fake_which)
+        assert argv is not None
+        assert argv[0] == "konsole"
+        assert "--update" in argv[-1] and "--yes" in argv[-1]
+
+    def test_falls_back_to_any_available(self):
+        fake_which = lambda name: "/usr/bin/xterm" if name == "xterm" else None
+        argv = updates.build_terminal_update_command(
+            desktop="KDE", which=fake_which)
+        assert argv is not None
+        assert argv[0] == "xterm"
+
+    def test_none_when_no_terminal(self):
+        assert updates.build_terminal_update_command(
+            desktop="", which=lambda name: None) is None
+
+
 class TestEndpointUrls:
     def test_github_api_urls_hit_repos_namespace(self):
         # Regression: missing /repos/ made every check 404 (mocks hid it).

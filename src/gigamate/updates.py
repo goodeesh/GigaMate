@@ -15,14 +15,16 @@ Stdlib only (urllib + json), gi-free so tests run without PyGObject.
 """
 
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Mapping, Optional, Tuple
 
 from .paths import CONFIG_DIR
 
@@ -255,6 +257,79 @@ MANUAL_UPDATE_INSTRUCTIONS = (
     "Ask an administrator to run this in a terminal:\n"
     f"  curl -sSL {INSTALL_URL} | bash -s -- --update"
 )
+
+
+def graphical_elevate_available(env: Optional[Mapping[str, str]] = None,
+                                sudo_conf: Path = Path("/etc/sudo.conf")) -> bool:
+    """True if a background sudo could prompt graphically.
+
+    Stock systems have no askpass wired to sudo, so a detached updater
+    would fail with 'no tty present'. Only returns True when a display
+    session exists AND an askpass path exists (SUDO_ASKPASS executable
+    or ``Path askpass`` in sudo.conf). gi-free; injectable for tests.
+    """
+    env = os.environ if env is None else env
+    if not (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")):
+        return False
+    askpass = env.get("SUDO_ASKPASS", "")
+    if askpass:
+        p = Path(askpass)
+        try:
+            if p.is_file() and os.access(p, os.X_OK):
+                return True
+        except OSError:
+            pass
+    try:
+        for line in sudo_conf.read_text().splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) >= 3 and parts[0] == "Path" and parts[1] == "askpass":
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def build_terminal_update_command(
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which) -> Optional[list]:
+    """Argv opening a normal terminal that runs the update, else None.
+
+    Returned argv launches the first available emulator (preferring the
+    current desktop's) with the curl|bash update inside, keeping the
+    shell afterwards so output stays visible.
+    """
+    inner = (f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes;"
+             f" exec bash")
+    candidates = [
+        ("gnome-terminal", ["gnome-terminal", "--", "bash", "-c", inner]),
+        ("konsole", ["konsole", "-e", "bash", "-c", inner]),
+        ("xfce4-terminal", ["xfce4-terminal", "-e", "bash", "-c", inner]),
+        ("lxterminal", ["lxterminal", "-e", "bash", "-c", inner]),
+        ("x-terminal-emulator",
+         ["x-terminal-emulator", "-e", "bash", "-c", inner]),
+        ("xterm", ["xterm", "-e", "bash", "-c", inner]),
+    ]
+    desktop = (desktop or "").lower()
+    # XDG desktop names rarely contain the terminal name (e.g. KDE →
+    # konsole), so map the common ones explicitly first.
+    desktop_terminal = {
+        "gnome": "gnome-terminal",
+        "kde": "konsole",
+        "plasma": "konsole",
+        "xfce": "xfce4-terminal",
+        "lxde": "lxterminal",
+        "lxqt": "lxterminal",
+    }
+    preferred = desktop_terminal.get(desktop)
+    ordered = sorted(candidates,
+                     key=lambda c: (c[0] != preferred, c[0] not in desktop))
+    for term, argv in ordered:
+        if which(term):
+            return argv
+    return None
 
 
 def menu_item_label(update_available: bool) -> str:
