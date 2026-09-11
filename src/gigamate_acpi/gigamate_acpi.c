@@ -195,7 +195,6 @@ static ssize_t profile_store(struct device *dev,
 	current_profile = (int)val;
 	return count;
 }
-static DEVICE_ATTR_RW(profile);
 /* Make profile world-writable so non-root users can change it */
 static struct device_attribute dev_attr_profile_writable = {
 	.attr = { .name = "profile", .mode = 0666 },
@@ -206,6 +205,17 @@ static struct device_attribute dev_attr_profile_writable = {
 /* ────────────────────────────────────────────
  * File operations: create/remove attributes on probe/remove
  * ──────────────────────────────────────────── */
+
+static const char * const amw0_paths[] = {
+	"\\_SB.PC00.AMW0",       /* Intel 12th/13th/14th/15th Gen (Alder/Raptor/Meteor Lake, e.g. A16, AORUS 17X) */
+	"\\_SB.PCI0.AMW0",       /* AMD Ryzen & older Intel platforms (e.g. Aero X16, Aero 15) */
+	"\\_SB.AMW0",            /* Root-level ACPI device */
+	"\\_SB.PC00.LPCB.AMW0",  /* Intel via LPC bus */
+	"\\_SB.PCI0.LPCB.AMW0",  /* AMD/Intel via LPC bus */
+	"\\_SB.PC00.LPC0.AMW0",  /* Alternative LPC naming */
+	"\\_SB.PCI0.LPC0.AMW0",  /* Alternative LPC naming */
+	NULL
+};
 
 static const struct device_attribute *gigamate_acpi_dev_attrs[] = {
 	&dev_attr_temp1_input,
@@ -221,13 +231,20 @@ static const struct device_attribute *gigamate_acpi_dev_attrs[] = {
 
 static int gigamate_acpi_probe(struct platform_device *pdev)
 {
-	acpi_status status;
 	const struct device_attribute **attr;
-	int ret;
+	int ret, i;
 
-	status = acpi_get_handle(NULL, "\\_SB.PCI0.AMW0", &amw0_handle);
-	if (ACPI_FAILURE(status)) {
-		pr_err(DRIVER_NAME ": AMW0 device not found\n");
+	amw0_handle = NULL;
+	for (i = 0; amw0_paths[i]; i++) {
+		acpi_status status = acpi_get_handle(NULL, (char *)amw0_paths[i], &amw0_handle);
+		if (ACPI_SUCCESS(status)) {
+			pr_info(DRIVER_NAME ": AMW0 found at %s\n", amw0_paths[i]);
+			break;
+		}
+	}
+
+	if (!amw0_handle) {
+		pr_err(DRIVER_NAME ": AMW0 device not found in any known ACPI path\n");
 		return -ENODEV;
 	}
 
@@ -244,7 +261,7 @@ static int gigamate_acpi_probe(struct platform_device *pdev)
 		}
 	}
 
-	pr_info(DRIVER_NAME ": AMW0 found, interface ready\n");
+	pr_info(DRIVER_NAME ": AMW0 interface ready\n");
 	return 0;
 }
 
@@ -285,6 +302,14 @@ static int __init gigamate_acpi_init(void)
 	if (IS_ERR(gigamate_pdev)) {
 		platform_driver_unregister(&gigamate_acpi_driver);
 		return PTR_ERR(gigamate_pdev);
+	}
+
+	/* If probe failed (e.g. AMW0 device not found), driver is not bound */
+	if (!gigamate_pdev->dev.driver) {
+		platform_device_unregister(gigamate_pdev);
+		platform_driver_unregister(&gigamate_acpi_driver);
+		pr_err(DRIVER_NAME ": hardware probe failed, unloading\n");
+		return -ENODEV;
 	}
 
 	pr_info(DRIVER_NAME ": loaded (version %s)\n", DRIVER_VERSION);

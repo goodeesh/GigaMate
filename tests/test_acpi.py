@@ -250,6 +250,39 @@ class TestAcpiCallBackendDetection:
         assert ctrl.available is False
         assert ctrl.capabilities.backend == "none"
 
+    def test_module_backend_empty_sysfs_dir_returns_none(self, monkeypatch, tmp_path):
+        """When platform device directory exists but no sensors were created (failed probe)."""
+        sysfs_dir = tmp_path / "gigamate_acpi"
+        sysfs_dir.mkdir()
+        monkeypatch.setattr(acpi_module, "GIGAMATE_ACPI_SYSFS", sysfs_dir)
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "nonexistent-call")
+        monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
+
+        backend = ModuleBackend()
+        caps = backend.detect()
+        assert caps.backend == "none"
+        assert caps.has_temperature is False
+        assert caps.has_power_profiles is False
+
+        ctrl = AcpiController()
+        assert ctrl.available is False
+
+    def test_module_backend_populated_sysfs_dir(self, monkeypatch, tmp_path):
+        """When platform device directory has attributes created by successful probe."""
+        sysfs_dir = tmp_path / "gigamate_acpi"
+        sysfs_dir.mkdir()
+        (sysfs_dir / "temp1_input").write_text("55\n")
+        (sysfs_dir / "fan1_input").write_text("3000\n")
+        (sysfs_dir / "profile").write_text("1\n")
+        monkeypatch.setattr(acpi_module, "GIGAMATE_ACPI_SYSFS", sysfs_dir)
+
+        backend = ModuleBackend()
+        caps = backend.detect()
+        assert caps.backend == "module"
+        assert caps.has_temperature is True
+        assert caps.has_fan_rpm is True
+        assert caps.has_power_profiles is True
+
 
 class TestProbeAcpiCapabilities:
     def test_probe_with_mock(self):
