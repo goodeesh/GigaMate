@@ -181,7 +181,7 @@ def detect_device() -> Optional[Tuple[int, int]]:
             try:
                 vid = dev.idVendor
                 pid = dev.idProduct
-            except (AttributeError, usb.core.USBError):
+            except (AttributeError, usb.core.USBError, ValueError):
                 continue
             if vid in GIGABYTE_VIDS:
                 return (vid, pid)
@@ -192,9 +192,9 @@ def detect_device() -> Optional[Tuple[int, int]]:
                 mfr = (dev.manufacturer or "").upper()
                 if "GIGABYTE" in mfr:
                     return (dev.idVendor, dev.idProduct)
-            except (AttributeError, usb.core.USBError):
+            except Exception:
                 continue
-    except usb.core.USBError:
+    except Exception:
         pass
     return None
 
