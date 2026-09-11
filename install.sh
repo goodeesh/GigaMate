@@ -154,12 +154,13 @@ arch_headers_pkg() {
     local kr
     kr="$(uname -r)"
     case "$kr" in
-        *cachyos-lts*) echo "linux-cachyos-lts-headers" ;;
-        *cachyos*)     echo "linux-cachyos-headers" ;;
-        *zen*)         echo "linux-zen-headers" ;;
-        *hardened*)    echo "linux-hardened-headers" ;;
-        *lts*)         echo "linux-lts-headers" ;;
-        *)             echo "linux-headers" ;;
+        *cachyos-lts*)  echo "linux-cachyos-lts-headers" ;;
+        *cachyos-bore*) echo "linux-cachyos-bore-headers" ;;
+        *cachyos*)      echo "linux-cachyos-headers" ;;
+        *zen*)          echo "linux-zen-headers" ;;
+        *hardened*)     echo "linux-hardened-headers" ;;
+        *lts*)          echo "linux-lts-headers" ;;
+        *)              echo "linux-headers" ;;
     esac
 }
 
@@ -310,19 +311,31 @@ build_kernel_module() {
     fi
 
     info "Loading module..."
-    sudo modprobe gigamate_acpi 2>/dev/null || warn "Module load failed — is this a Gigabyte laptop with AMW0 ACPI?"
+    sudo modprobe -r gigamate_acpi 2>/dev/null || true
+    if ! sudo modprobe gigamate_acpi 2>/dev/null; then
+        warn "Module load failed — is this a Gigabyte laptop with AMW0 ACPI?"
+    fi
 
-    # Verify the sysfs interface actually appeared
-    if [ -d /sys/devices/platform/gigamate_acpi ]; then
+    # Verify the sysfs interface actually appeared with control files
+    if [ -f /sys/devices/platform/gigamate_acpi/profile ] || [ -f /sys/devices/platform/gigamate_acpi/fan1_input ]; then
         info "Module loaded, sysfs interface ready: /sys/devices/platform/gigamate_acpi"
-    else
-        warn "Module loaded but no sysfs interface appeared."
+    elif [ -d /sys/devices/platform/gigamate_acpi ]; then
+        warn "Module loaded but sysfs control files not found."
         warn "Your laptop may not expose the AMW0 ACPI device — fan/power features will not work."
+    else
+        warn "Module failed to bind to an AMW0 ACPI device — fan/power features will not work."
     fi
 
     # Secure Boot: DKMS signs the module with its own key, which must be
     # enrolled once or the module will not load after a reboot.
-    if [ -d /sys/firmware/efi ] && { ! command -v mokutil &>/dev/null || mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; }; then
+    local sb_enabled=false
+    if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+        sb_enabled=true
+    elif [ -f /sys/kernel/security/lockdown ] && grep -q '\[\(integrity\|confidentiality\)\]' /sys/kernel/security/lockdown 2>/dev/null; then
+        sb_enabled=true
+    fi
+
+    if [ "$sb_enabled" = true ]; then
         warn "Secure Boot appears to be enabled."
         warn "Enroll the DKMS signing key once so the module survives reboot:"
         warn "  sudo mokutil --import /var/lib/dkms/mok.pub"
@@ -558,7 +571,7 @@ main() {
     # Check what features are available
     local has_module=false
     local has_acpi_call=false
-    if lsmod 2>/dev/null | grep -q gigamate_acpi; then
+    if [ -f /sys/devices/platform/gigamate_acpi/profile ] || [ -f /sys/devices/platform/gigamate_acpi/fan1_input ]; then
         has_module=true
         echo "  ✅ Keyboard RGB     — gigamate rgb"
         echo "  ✅ Fan & Power      — gigamate status, gigamate profile"

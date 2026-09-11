@@ -153,14 +153,11 @@ class GigaMateTrayApp:
             self._unsupported = True
 
     def _init_acpi(self) -> None:
-        """Initialise ACPI controller from the loaded profile."""
-        if self._profile is not None and self._profile.has_acpi:
-            self._acpi_controller = AcpiController()
-            if self._acpi_controller.available:
-                self._acpi_caps = self._acpi_controller.capabilities
-            else:
-                self._acpi_controller = None
-                self._acpi_caps = None
+        """Initialise ACPI controller (from profile, or auto-detected)."""
+        ctrl = AcpiController()
+        if ctrl.available:
+            self._acpi_controller = ctrl
+            self._acpi_caps = ctrl.capabilities
         else:
             self._acpi_controller = None
             self._acpi_caps = None

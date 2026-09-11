@@ -259,9 +259,10 @@ class ModuleBackend(AcpiBackend):
     """
 
     def detect(self) -> AcpiCapabilities:
-        caps = AcpiCapabilities(backend="module")
         if not GIGAMATE_ACPI_SYSFS.is_dir():
             return AcpiCapabilities(backend="none")
+
+        caps = AcpiCapabilities(backend="module")
 
         # Check which sysfs files exist
         if (GIGAMATE_ACPI_SYSFS / "temp1_input").exists():
@@ -276,6 +277,9 @@ class ModuleBackend(AcpiBackend):
             caps.has_fan_duty = True
         if (GIGAMATE_ACPI_SYSFS / "profile").exists():
             caps.has_power_profiles = True
+
+        if not (caps.has_temperature or caps.has_fan_rpm or caps.has_fan_duty or caps.has_power_profiles):
+            return AcpiCapabilities(backend="none")
 
         return caps
 
