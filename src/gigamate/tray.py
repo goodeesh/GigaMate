@@ -26,6 +26,7 @@ from pathlib import Path
 from .protocol import set_static, set_off, get_keyboard
 from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
+    get_dmi_product_name,
 )
 from .config import load as load_config, save as save_config
 from .acpi import (
@@ -379,6 +380,12 @@ class GigaMateTrayApp:
 
     def _build_acpi_only_menu(self) -> None:
         """Menu when ACPI is available but keyboard is not found."""
+        dmi_model = get_dmi_product_name()
+        if dmi_model:
+            header = Gtk.MenuItem(label=dmi_model)
+            header.set_sensitive(False)
+            self._menu.append(header)
+
         self._append_status_section()
         self._append_power_profile_section()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -391,8 +398,10 @@ class GigaMateTrayApp:
         """Menu when keyboard is found but not in the profile database."""
         vid = self._detected_vid or 0
         pid = self._detected_pid or 0
+        dmi_model = get_dmi_product_name()
+        label = f"{dmi_model} ({vid:04X}:{pid:04X})" if dmi_model else f"Unknown model ({vid:04X}:{pid:04X})"
 
-        header = Gtk.MenuItem(label=f"Unknown model ({vid:04X}:{pid:04X})")
+        header = Gtk.MenuItem(label=label)
         header.set_sensitive(False)
         self._menu.append(header)
 
@@ -1161,6 +1170,8 @@ class GigaMateTrayApp:
         """Show the About dialog."""
         version = __import__('gigamate', fromlist=['']).__version__
 
+        dmi_model = get_dmi_product_name()
+
         if self._profile is not None:
             secondary = (
                 f"Version {version}\n\n"
@@ -1169,11 +1180,22 @@ class GigaMateTrayApp:
                 "Keyboard RGB, fan monitoring, power profiles.\n\n"
                 "MIT License - use at your own risk."
             )
+        elif self._acpi_controller is not None and self._acpi_controller.available:
+            model_name = dmi_model or "Gigabyte Laptop"
+            secondary = (
+                f"Version {version}\n\n"
+                f"Model: {model_name} (ACPI)\n\n"
+                "GigaMate — Gigabyte laptop management for Linux.\n"
+                "Fan monitoring, power profiles, and GPU management.\n\n"
+                "MIT License - use at your own risk."
+            )
         elif self._unsupported:
             vid = self._detected_vid or 0
             pid = self._detected_pid or 0
+            model_str = f"{dmi_model}\n" if dmi_model else ""
             secondary = (
                 f"Version {version}\n\n"
+                f"{model_str}"
                 f"Your keyboard (VID={vid:04X} PID={pid:04X})\n"
                 "isn't in our profile database yet.\n\n"
                 "Run Calibrate... to add support."

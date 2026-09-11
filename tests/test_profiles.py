@@ -285,3 +285,92 @@ class TestDetectDevice:
         detected = detect_device()
         assert detected is None
 
+
+class TestGetDmiProductName:
+    def test_dmi_product_name_valid(self, tmp_path, monkeypatch):
+        from gigamate import profiles
+        from pathlib import Path
+
+        dmi_dir = tmp_path / "dmi" / "id"
+        dmi_dir.mkdir(parents=True)
+        (dmi_dir / "product_name").write_text("GIGABYTE Gaming A16\n")
+
+        # Monkeypatch Path in profiles or monkeypatch the path directly
+        orig_get_dmi = profiles.get_dmi_product_name
+        monkeypatch.setattr(
+            profiles,
+            "get_dmi_product_name",
+            lambda: (dmi_dir / "product_name").read_text().strip(),
+        )
+        assert profiles.get_dmi_product_name() == "GIGABYTE Gaming A16"
+
+    def test_dmi_product_name_empty_or_generic(self, tmp_path, monkeypatch):
+        from gigamate.profiles import get_dmi_product_name
+
+        # Test real function with monkeypatched dmi path
+        fake_dmi = tmp_path / "sys" / "class" / "dmi" / "id"
+        fake_dmi.mkdir(parents=True)
+        (fake_dmi / "product_name").write_text("Default string\n")
+
+        import gigamate.profiles as prof_mod
+        orig_path = prof_mod.Path
+
+        def mock_path(p):
+            if str(p) == "/sys/class/dmi/id":
+                return fake_dmi
+            return orig_path(p)
+
+        monkeypatch.setattr(prof_mod, "Path", mock_path)
+        assert get_dmi_product_name() is None
+
+    def test_dmi_product_name_real_path(self, tmp_path, monkeypatch):
+        from gigamate.profiles import get_dmi_product_name
+        import gigamate.profiles as prof_mod
+
+        fake_dmi = tmp_path / "sys" / "class" / "dmi" / "id"
+        fake_dmi.mkdir(parents=True)
+        (fake_dmi / "product_name").write_text("GIGABYTE AERO X16\n")
+
+        orig_path = prof_mod.Path
+
+        def mock_path(p):
+            if str(p) == "/sys/class/dmi/id":
+                return fake_dmi
+            return orig_path(p)
+
+        monkeypatch.setattr(prof_mod, "Path", mock_path)
+        assert get_dmi_product_name() == "GIGABYTE AERO X16"
+
+    def test_cmd_status_dmi_fallback(self, monkeypatch, capsys):
+        import argparse
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "detect_device", lambda: None)
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "GIGABYTE Gaming A16")
+
+        args = argparse.Namespace(vid=None, pid=None)
+        cli.cmd_status(args)
+        captured = capsys.readouterr().out
+        assert "Model: GIGABYTE Gaming A16" in captured
+        assert "Keyboard: Not detected (no USB RGB)" in captured
+
+    def test_cmd_contribute_acpi_only(self, monkeypatch, capsys):
+        import argparse
+        from gigamate import cli
+        from gigamate.acpi import AcpiController
+
+        monkeypatch.setattr(cli, "detect_device", lambda: None)
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "GIGABYTE Gaming A16")
+        monkeypatch.setattr(AcpiController, "available", property(lambda self: True))
+
+        args = argparse.Namespace(vid=None, pid=None)
+        cli.cmd_profile_contribute(args)
+        captured = capsys.readouterr().out
+        assert "Model: GIGABYTE Gaming A16" in captured
+        assert "Your laptop uses direct ACPI hardware control" in captured
+        assert "No custom device profile is needed" in captured
+
+
+

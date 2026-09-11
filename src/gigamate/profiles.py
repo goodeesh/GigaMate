@@ -199,6 +199,20 @@ def detect_device() -> Optional[Tuple[int, int]]:
     return None
 
 
+def get_dmi_product_name() -> Optional[str]:
+    """Read laptop model name from sysfs DMI tables if available."""
+    dmi_path = Path("/sys/class/dmi/id")
+    try:
+        product_file = dmi_path / "product_name"
+        if product_file.is_file():
+            name = product_file.read_text().strip()
+            if name and name.lower() not in ("", "none", "to be filled by o.e.m.", "default string"):
+                return name
+    except (OSError, IOError, PermissionError):
+        pass
+    return None
+
+
 def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[DeviceProfile]:
     if vid is None or pid is None:
         detected = detect_device()
