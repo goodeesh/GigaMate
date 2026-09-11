@@ -121,3 +121,19 @@ def test_set_static_custom_profile_unknown_colour():
     dev = FakeDev()
     assert set_static(dev, "blue", 2, profile=custom) is False
     assert dev.last_cmd is None
+
+
+def test_detect_keyboards_with_broken_descriptor(monkeypatch):
+    from gigamate.protocol import detect_keyboards
+
+    class BrokenDevice:
+        idVendor = 0x1234
+        idProduct = 0x5678
+        bDeviceClass = 0
+
+        @property
+        def manufacturer(self):
+            raise ValueError("The device has no langid")
+
+    monkeypatch.setattr("usb.core.find", lambda find_all=True: [BrokenDevice()])
+    assert detect_keyboards() == []

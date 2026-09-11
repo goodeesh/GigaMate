@@ -245,3 +245,43 @@ class TestValidateProfile:
         errors = validate_profile(profile)
         backends = [e for e in errors if "backend" in e]
         assert len(backends) >= 1
+
+
+class TestDetectDevice:
+    def test_detect_device_with_no_langid_value_error(self, monkeypatch):
+        """Devices raising ValueError on string descriptors (e.g. no langid) shouldn't crash detection."""
+        from gigamate.profiles import detect_device
+
+        class BrokenDescriptorDevice:
+            idVendor = 0x1234
+            idProduct = 0x5678
+
+            @property
+            def manufacturer(self):
+                raise ValueError("The device has no langid (permission issue, no string descriptors supported or device error)")
+
+        class ValidGigabyteDevice:
+            idVendor = 0x0414
+            idProduct = 0x8105
+            manufacturer = "GIGABYTE"
+
+        monkeypatch.setattr("usb.core.find", lambda find_all=True: [BrokenDescriptorDevice(), ValidGigabyteDevice()])
+        detected = detect_device()
+        assert detected == (0x0414, 0x8105)
+
+    def test_detect_device_no_match_with_broken_descriptor(self, monkeypatch):
+        """When no Gigabyte device exists and a device raises ValueError, returns None without error."""
+        from gigamate.profiles import detect_device
+
+        class BrokenDescriptorDevice:
+            idVendor = 0x1234
+            idProduct = 0x5678
+
+            @property
+            def manufacturer(self):
+                raise ValueError("The device has no langid")
+
+        monkeypatch.setattr("usb.core.find", lambda find_all=True: [BrokenDescriptorDevice()])
+        detected = detect_device()
+        assert detected is None
+

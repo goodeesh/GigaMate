@@ -123,26 +123,29 @@ def set_off(dev, profile=None, interface=INTERFACE):
 
 def detect_keyboards():
     keyboards = []
-    for cfg in usb.core.find(find_all=True):
-        if cfg is None:
-            continue
-        try:
-            vid = cfg.idVendor
-            pid = cfg.idProduct
-        except (AttributeError, usb.core.USBError):
-            continue
-        if vid == VID and pid not in keyboards:
-            keyboards.append((vid, pid, cfg.bDeviceClass))
-    if not keyboards:
-        for dev in usb.core.find(find_all=True):
-            if dev is None:
+    try:
+        for cfg in usb.core.find(find_all=True):
+            if cfg is None:
                 continue
             try:
-                mfr = (dev.manufacturer or "").upper()
-                if "GIGABYTE" in mfr:
-                    keyboards.append((dev.idVendor, dev.idProduct, dev.bDeviceClass))
-            except (AttributeError, usb.core.USBError):
-                pass
+                vid = cfg.idVendor
+                pid = cfg.idProduct
+            except (AttributeError, usb.core.USBError, ValueError):
+                continue
+            if vid == VID and pid not in keyboards:
+                keyboards.append((vid, pid, cfg.bDeviceClass))
+        if not keyboards:
+            for dev in usb.core.find(find_all=True):
+                if dev is None:
+                    continue
+                try:
+                    mfr = (dev.manufacturer or "").upper()
+                    if "GIGABYTE" in mfr:
+                        keyboards.append((dev.idVendor, dev.idProduct, dev.bDeviceClass))
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return keyboards
 
 
