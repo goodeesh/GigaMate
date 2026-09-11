@@ -42,6 +42,7 @@ from .profiles import (
     calibrate as run_calibrate,
     save_user_profile,
     DeviceProfile,
+    get_dmi_product_name,
 )
 from .config import load as load_config, save as save_config
 from .acpi import (
@@ -222,10 +223,14 @@ def cmd_status(args) -> None:
     print()
 
     # Model name
+    dmi_model = get_dmi_product_name()
     if profile is not None:
         print(f"  Model: {profile.name}  ({vid:04X}:{pid:04X})")
     elif detected:
-        print(f"  Model: Unknown  ({vid:04X}:{pid:04X})")
+        name = dmi_model or "Unknown"
+        print(f"  Model: {name}  ({vid:04X}:{pid:04X})")
+    elif dmi_model:
+        print(f"  Model: {dmi_model}")
     else:
         print(f"  Model: Not detected")
 
@@ -239,7 +244,7 @@ def cmd_status(args) -> None:
     elif detected:
         print(f"  Keyboard: Detected (run 'gigamate rgb calibrate')")
     else:
-        print(f"  Keyboard: Not found")
+        print(f"  Keyboard: Not detected (no USB RGB)")
 
     # ACPI info
     ctrl = AcpiController()
@@ -433,6 +438,9 @@ def cmd_profile_contribute(args) -> None:
     profile = resolve_profile(args.vid, args.pid)
     detected = detect_device()
 
+    ctrl = AcpiController()
+    dmi_model = get_dmi_product_name()
+
     if profile is not None:
         vid = profile.vid
         pid = profile.pid
@@ -440,6 +448,17 @@ def cmd_profile_contribute(args) -> None:
     elif detected is not None:
         vid, pid = detected
         name = f"{vid:04X}:{pid:04X}"
+    elif ctrl.available:
+        model = dmi_model or "Gigabyte Laptop"
+        print()
+        print(f"  Model: {model}")
+        print("  ACPI interface: Detected & Working")
+        print()
+        print("  Your laptop uses direct ACPI hardware control without a USB RGB keyboard.")
+        print("  Fan monitoring and power profiles are already fully supported out-of-the-box!")
+        print("  No custom device profile is needed.")
+        print()
+        return
     else:
         print("No Gigabyte hardware detected on this system.")
         print("This command should be run on the laptop you want to add support for.")
@@ -486,9 +505,16 @@ def cmd_detect(args) -> None:
     """Show all detected hardware (keyboard + ACPI)."""
     detected = detect_device()
     profile = resolve_profile(args.vid, args.pid)
+    dmi_model = get_dmi_product_name()
 
     print("GigaMate — Hardware Detection")
     print()
+
+    # Model
+    if profile is not None:
+        print(f"  Model:    {profile.name}")
+    elif dmi_model:
+        print(f"  Model:    {dmi_model}")
 
     # Keyboard
     if detected:
@@ -498,7 +524,7 @@ def cmd_detect(args) -> None:
         else:
             print(f"  Keyboard: Unknown model  ({vid:04X}:{pid:04X})")
     else:
-        print(f"  Keyboard: Not detected")
+        print(f"  Keyboard: Not detected (no USB RGB)")
     print()
 
     # ACPI probe (if --acpi flag, do detailed probe)
