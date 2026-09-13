@@ -23,6 +23,7 @@
 static acpi_handle amw0_handle;
 static struct platform_device *gigamate_pdev;
 static int current_profile = -1; /* unknown */
+static int current_charge_limit = -1; /* unknown */
 
 /* ────────────────────────────────────────────
  * ACPI helpers
@@ -203,6 +204,66 @@ static struct device_attribute dev_attr_profile_writable = {
 };
 
 /* ────────────────────────────────────────────
+ * Sysfs attribute — charge_limit (read-write)
+ * ──────────────────────────────────────────── */
+
+static ssize_t charge_limit_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	int val = acpi_wmbc_read(0x65);
+	if (val > 0 && val <= 100)
+		current_charge_limit = val;
+
+	if (current_charge_limit > 0 && current_charge_limit <= 100)
+		return sysfs_emit(buf, "%d\n", current_charge_limit);
+
+	return sysfs_emit(buf, "100\n"); /* safe default */
+}
+
+static ssize_t charge_limit_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	unsigned long val;
+	int ret;
+
+	ret = kstrtoul(buf, 10, &val);
+	if (ret)
+		return -EINVAL;
+
+	/* Accept 40..100 (0 or 100 sets standard 100% full charge) */
+	if (val == 0 || val == 100) {
+		/* Standard policy: 0x64 = 0 (Standard), 0x65 = 100 */
+		acpi_wmbd_write(0x64, 0);
+		acpi_wmbd_write(0x65, 100);
+		current_charge_limit = 100;
+		return count;
+	}
+
+	if (val < 40 || val > 100)
+		return -EINVAL;
+
+	/* Custom policy: 0x64 = 4 (Custom), 0x65 = target percentage */
+	ret = acpi_wmbd_write(0x64, 4);
+	if (ret < 0)
+		return ret;
+
+	ret = acpi_wmbd_write(0x65, val);
+	if (ret < 0)
+		return ret;
+
+	current_charge_limit = (int)val;
+	return count;
+}
+
+/* Make charge_limit world-writable so non-root users can change it */
+static struct device_attribute dev_attr_charge_limit_writable = {
+	.attr = { .name = "charge_limit", .mode = 0666 },
+	.show = charge_limit_show,
+	.store = charge_limit_store,
+};
+
+/* ────────────────────────────────────────────
  * File operations: create/remove attributes on probe/remove
  * ──────────────────────────────────────────── */
 
@@ -226,6 +287,7 @@ static const struct device_attribute *gigamate_acpi_dev_attrs[] = {
 	&dev_attr_pwm2,
 	&dev_attr_pwm1_total,
 	&dev_attr_profile_writable,
+	&dev_attr_charge_limit_writable,
 	NULL,
 };
 

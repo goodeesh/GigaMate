@@ -891,6 +891,98 @@ def _legacy_main() -> None:
     cmd_legacy(args)
 
 
+def cmd_center(args) -> None:
+    """Launch GigaMate Center GUI."""
+    try:
+        from .ui.main_window import run_gui
+        run_gui()
+    except ImportError as exc:
+        print(f"Error launching GigaMate Center: {exc}", file=sys.stderr)
+        print("Ensure PyQt6 is installed: sudo pacman -S python-pyqt6", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_battery(args) -> None:
+    """Show battery status or set charge limit."""
+    from .battery import get_battery_manager
+    mgr = get_battery_manager()
+    if not mgr.is_available:
+        print("No battery detected on this system.")
+        return
+
+    if getattr(args, "limit", None) is not None:
+        try:
+            val = int(args.limit)
+            if mgr.set_charge_limit(val):
+                cfg = load_config()
+                cfg["charge_limit"] = val
+                cfg["charge_limit_enabled"] = True
+                save_config(cfg)
+                print(f"Battery charge threshold set to {val}%.")
+            else:
+                print("Failed to set battery charge threshold (unsupported on this firmware).", file=sys.stderr)
+                sys.exit(1)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    info = mgr.get_battery_info()
+    print("Battery Information:")
+    print(f"  Device:         {info.name}")
+    print(f"  Capacity:       {info.capacity}%")
+    print(f"  Status:         {info.status}")
+    print(f"  Power Source:   {'AC Mains' if info.ac_online else 'Battery'}")
+    if info.health_percent is not None:
+        print(f"  Health:         {info.health_percent:.1f}%")
+    if info.cycle_count is not None:
+        print(f"  Cycle Count:    {info.cycle_count}")
+    if info.charge_limit_supported:
+        limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
+        print(f"  Charge Limit:   {limit_str} (Backend: {info.backend})")
+    else:
+        print("  Charge Limit:   Unsupported by current kernel/firmware")
+
+
+def cmd_gpu_guard(args) -> None:
+    """Inspect processes keeping discrete GPU awake or enforce sleep."""
+    from .gpu_guard import get_dgpu_guard
+    guard = get_dgpu_guard()
+
+    if getattr(args, "sleep", False) or getattr(args, "kill", False):
+        print("Enforcing dGPU sleep: terminating non-protected leech processes...")
+        results = guard.terminate_all_leeches(force=bool(getattr(args, "force", False)))
+        if not results:
+            print("No non-protected background leeches were active.")
+        else:
+            for pid, comm, success in results:
+                status_str = "terminated" if success else "failed"
+                print(f"  - [{comm}] PID {pid}: {status_str}")
+        guard.request_gpu_sleep()
+        print("Requested runtime suspend from kernel.")
+        return
+
+    status = guard.inspect(force_scan=True)
+    if not status.present:
+        print("No discrete GPU detected.")
+        return
+
+    state_str = f"Awake ({status.power_state or 'D0'})" if status.is_awake else f"Asleep ({status.power_state or 'D3cold'})"
+    print(f"dGPU Status:      {state_str}")
+    print(f"Active Processes: {len(status.processes)} ({status.leech_count} background leeches, {status.protected_count} protected)\n")
+
+    if not status.processes:
+        print("No processes currently hold open handles to the dGPU.")
+        return
+
+    print(f"{'PID':<8} {'TYPE':<22} {'PROCESS':<20} {'OPEN DEVICES'}")
+    print("-" * 75)
+    for p in status.processes:
+        cat = "Protected (Session)" if p.is_protected else ("Leech (Background)" if p.is_leech else "Client")
+        devs = ", ".join(p.open_devices)
+        print(f"{p.pid:<8} {cat:<22} {p.comm:<20} {devs}")
+
+
 def _subcommand_main() -> None:
     """New subcommand-based parser (gigamate <subcommand> ...)."""
     parser = argparse.ArgumentParser(
@@ -1003,6 +1095,26 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
     gpu_sub.add_parser("status", help="Show discrete GPU power state")
 
+    # --- battery subcommand ---
+    battery_parser = sub.add_parser("battery", help="Battery health and charge threshold limiter")
+    battery_parser.add_argument("--limit", "-l", type=int, default=None,
+                                help="Set max charge limit (40..100)")
+    battery_parser.add_argument("--status", action="store_true",
+                                help="Show detailed battery status")
+
+    # --- gpu-guard subcommand ---
+    guard_parser = sub.add_parser("gpu-guard", aliases=["guard"],
+                                  help="dGPU Sleep Guard and process inspector")
+    guard_parser.add_argument("--sleep", "-s", action="store_true",
+                              help="Enforce sleep by terminating background leeches")
+    guard_parser.add_argument("--kill", "-k", action="store_true",
+                              help="Alias for --sleep")
+    guard_parser.add_argument("--force", "-f", action="store_true",
+                              help="Force terminate (SIGKILL) instead of SIGTERM")
+
+    # --- center / gui subcommand ---
+    sub.add_parser("center", aliases=["gui"], help="Open GigaMate Center GUI")
+
     # Parse
     args = parser.parse_args()
 
@@ -1024,6 +1136,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         cmd_version(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "battery":
+        cmd_battery(args)
+    elif args.command in ("gpu-guard", "guard"):
+        cmd_gpu_guard(args)
+    elif args.command in ("center", "gui"):
+        cmd_center(args)
     elif args.command == "gpu":
         if args.gpu_action in ("status", None):
             cmd_gpu_status(args)

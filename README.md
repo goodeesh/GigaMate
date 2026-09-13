@@ -36,42 +36,51 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 
 ## Features
 
-- **Keyboard RGB** — Set colour and brightness from tray or CLI
-- **Temperature monitoring** — CPU and system temperatures
-- **Fan monitoring** — RPM and duty cycle readback
-- **Power profiles** — Switch between Quiet/Balanced/Performance/Gaming
-- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles
-- **On-Screen Display (OSD)** — Native KDE Plasma OSD overlay & universal desktop notifications
-- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon` (`power-saver`, `balanced`, `performance`)
-- **dGPU monitoring** — Discrete NVIDIA GPU asleep/awake state (read-only sysfs; never wakes the GPU)
-- **System tray app** — All controls in one place, live status updates
-- **Community model profiles** — Add your laptop model without coding
+- **🖥️ GigaMate Center** — Dedicated desktop control panel (PyQt6) engineered for KDE Plasma, GNOME, and Hyprland
+- **🔋 Battery Care & Limiter** — Set max 80% (or custom) charge limit to protect battery longevity; health & cycle monitoring
+- **⚡ Smart Power Automation** — Auto-switch profiles (Quiet on battery / Balanced on AC) and internal display refresh rate (165Hz ⇄ 60Hz)
+- **🛡️ dGPU Sleep Guard** — Zero-wake virtual RAM inspection of processes holding open discrete GPU devices; one-click sleep enforcement
+- **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile and state on resume
+- **⌨️ Keyboard RGB & Idle Sleep** — Set colours, brightness, and configurable idle auto-dimming from tray, GUI, or CLI
+- **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
+- **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
+- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles with native KDE Plasma OSD overlay
+- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
+- **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
 
 ---
 
 ## Usage
 
-### System tray app
+### GigaMate Center (GUI)
 
-The tray icon shows colour, brightness, power profile, and live status:
-
+Launch from your desktop application launcher or via command line:
+```sh
+gigamate center       # or click "GigaMate Center..." in the tray menu
 ```
-Colour → 11+ colours depending on your model
-Brightness → Off / Dim / Full
+
+### System Tray App
+
+The tray icon provides instant status and quick actions:
+```
+GigaMate Center...
+Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
-Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep
-Sync system power profile
-Apply on startup
-Reload profiles
+Battery: 85% (AC)  [x] Battery Care (Cap at 80%)
+dGPU: Asleep (D3cold)  /  Active (Enforce Sleep)
+Colour & Brightness
 ```
 
 ### CLI
 
 ```sh
+gigamate center                  # Launch modern GUI Control Panel
+gigamate battery                 # Show battery status, health, and limit
+gigamate battery --limit 80      # Set maximum battery charge limit to 80%
+gigamate gpu-guard               # Inspect processes keeping discrete GPU awake
+gigamate gpu-guard --sleep       # Terminate background leeches and sleep dGPU
 gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
-gigamate rgb detect              # Scan for keyboards
-gigamate rgb calibrate           # Interactive RGB calibration
 gigamate status                  # Full hardware status
 gigamate gpu status              # Show discrete GPU power state
 gigamate profile                 # Show current power profile

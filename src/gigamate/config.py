@@ -26,6 +26,14 @@ DEFAULT_CONFIG = {
     "profile_id": [0x0414, 0x8105],
     "idle_off_enabled": True,
     "idle_timeout_sec": 60,
+    "charge_limit": 80,
+    "charge_limit_enabled": True,
+    "power_automation_enabled": True,
+    "ac_profile": 1,  # Balanced
+    "battery_profile": 0,  # Quiet
+    "battery_rgb_dim": True,
+    "display_refresh_auto": True,
+    "battery_refresh_rate": 60,
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -131,6 +139,14 @@ def save(config):
         "idle_off_enabled": bool(config.get("idle_off_enabled", True)),
         "idle_timeout_sec": _migrate_idle_timeout(
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
+        "charge_limit": int(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
+        "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
+        "power_automation_enabled": bool(config.get("power_automation_enabled", DEFAULT_CONFIG["power_automation_enabled"])),
+        "ac_profile": int(config.get("ac_profile", DEFAULT_CONFIG["ac_profile"])),
+        "battery_profile": int(config.get("battery_profile", DEFAULT_CONFIG["battery_profile"])),
+        "battery_rgb_dim": bool(config.get("battery_rgb_dim", DEFAULT_CONFIG["battery_rgb_dim"])),
+        "display_refresh_auto": bool(config.get("display_refresh_auto", DEFAULT_CONFIG["display_refresh_auto"])),
+        "battery_refresh_rate": int(config.get("battery_refresh_rate", DEFAULT_CONFIG["battery_refresh_rate"])),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:

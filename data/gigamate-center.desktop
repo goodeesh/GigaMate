@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GigaMate Center
+GenericName=Laptop Control Center
+Comment=Gigabyte laptop management — Performance profiles, Battery care, dGPU sleep guard, RGB lighting
+Exec=gigamate center
+Icon=gigamate
+Terminal=false
+Categories=Settings;HardwareSettings;System;
+Keywords=gigabyte;aero;aorus;keyboard;rgb;fan;acpi;battery;gpu;sleep;power;
+StartupNotify=true

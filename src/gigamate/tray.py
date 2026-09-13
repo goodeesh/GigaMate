@@ -48,6 +48,11 @@ from .idle import (
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
+import subprocess
+from .battery import get_battery_manager
+from .gpu_guard import get_dgpu_guard
+from .power_automation import get_power_automation_engine
+from .sleep_handler import get_sleep_handler
 from . import updates as update_checker
 
 APP_ID = "gigamate"
@@ -128,6 +133,7 @@ class GigaMateTrayApp:
         self._building = False
         self._apply_on_startup()
         self._init_idle()
+        self._init_sleep_handler()
         self._start_status_polling()
         self._init_update_check()
 
@@ -368,10 +374,91 @@ class GigaMateTrayApp:
             self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self._indicator.set_menu(self._menu)
 
+    def _init_sleep_handler(self) -> None:
+        """Initialize clean state handling before suspend and after wake."""
+        try:
+            handler = get_sleep_handler()
+            handler.start_listening()
+        except Exception:
+            pass
+
+    def _append_center_item(self) -> None:
+        """Add launcher item for GigaMate Center GUI."""
+        item = Gtk.MenuItem(label="GigaMate Center...")
+        item.connect("activate", self._on_open_center)
+        self._menu.append(item)
+        self._menu.append(Gtk.SeparatorMenuItem())
+
+    def _on_open_center(self, _widget) -> None:
+        try:
+            subprocess.Popen(["gigamate", "center"])
+        except Exception:
+            pass
+
+    def _append_battery_section(self) -> None:
+        """Add battery info and charge limit toggle."""
+        mgr = get_battery_manager()
+        if not mgr.is_available:
+            return
+
+        self._menu.append(Gtk.SeparatorMenuItem())
+        info = mgr.get_battery_info()
+        ac_str = "AC" if info.ac_online else "Battery"
+        bat_header = Gtk.MenuItem(label=f"Battery: {info.capacity}% ({ac_str})")
+        bat_header.set_sensitive(False)
+        self._menu.append(bat_header)
+
+        if mgr.is_charge_limit_supported():
+            limit = mgr.get_charge_limit() or self._config.get("charge_limit", 80)
+            chk_limit = Gtk.CheckMenuItem(label="Battery Care (Cap at 80%)")
+            chk_limit.set_active(limit == 80)
+            chk_limit.connect("toggled", self._on_toggle_battery_care)
+            self._menu.append(chk_limit)
+
+    def _on_toggle_battery_care(self, widget: Gtk.CheckMenuItem) -> None:
+        mgr = get_battery_manager()
+        new_limit = 80 if widget.get_active() else 100
+        try:
+            if mgr.set_charge_limit(new_limit):
+                self._config["charge_limit"] = new_limit
+                self._config["charge_limit_enabled"] = widget.get_active()
+                self._save_config()
+        except Exception:
+            pass
+
+    def _append_gpu_guard_section(self) -> None:
+        """Add dGPU Sleep Guard status and action."""
+        gpu = get_gpu_state()
+        if not gpu.present:
+            return
+
+        guard = get_dgpu_guard()
+        is_awake = (gpu.status == "active" or gpu.power_state in ("D0", "D1", "D2"))
+
+        self._menu.append(Gtk.SeparatorMenuItem())
+        if not is_awake:
+            item = Gtk.MenuItem(label=f"dGPU: Asleep ({gpu.power_state or 'D3cold'})")
+            item.set_sensitive(False)
+            self._menu.append(item)
+        else:
+            item = Gtk.MenuItem(label=f"dGPU: Active ({gpu.power_state or 'D0'}) — Enforce Sleep")
+            item.connect("activate", self._on_enforce_gpu_sleep)
+            self._menu.append(item)
+
+    def _on_enforce_gpu_sleep(self, _widget) -> None:
+        guard = get_dgpu_guard()
+        guard.terminate_all_leeches()
+        guard.request_gpu_sleep()
+        self._update_status()
+
     def _build_no_hardware_menu(self) -> None:
         """Menu when no Gigabyte hardware is detected at all."""
+        self._append_center_item()
         item = Gtk.MenuItem(label="No Gigabyte hardware detected")
         item.set_sensitive(False)
+        self._menu.append(item)
+        self._append_battery_section()
+        self._append_gpu_guard_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -380,6 +467,7 @@ class GigaMateTrayApp:
 
     def _build_acpi_only_menu(self) -> None:
         """Menu when ACPI is available but keyboard is not found."""
+        self._append_center_item()
         dmi_model = get_dmi_product_name()
         if dmi_model:
             header = Gtk.MenuItem(label=dmi_model)
@@ -388,6 +476,8 @@ class GigaMateTrayApp:
 
         self._append_status_section()
         self._append_power_profile_section()
+        self._append_battery_section()
+        self._append_gpu_guard_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -396,6 +486,7 @@ class GigaMateTrayApp:
 
     def _build_unsupported_menu(self) -> None:
         """Menu when keyboard is found but not in the profile database."""
+        self._append_center_item()
         vid = self._detected_vid or 0
         pid = self._detected_pid or 0
         dmi_model = get_dmi_product_name()
@@ -415,6 +506,8 @@ class GigaMateTrayApp:
         if self._acpi_controller is not None:
             self._append_power_profile_section()
             self._append_status_section()
+            self._append_battery_section()
+            self._append_gpu_guard_section()
 
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
@@ -424,11 +517,20 @@ class GigaMateTrayApp:
 
     def _build_supported_menu(self) -> None:
         """Full menu: Status on top, then Profiles, then Colours, Brightness."""
+        # ── Open GigaMate Center ──
+        self._append_center_item()
+
         # ── Live Status section (ACPI) — always on top ──
         self._append_status_section()
 
         # ── Power Profile section (ACPI) ──
         self._append_power_profile_section()
+
+        # ── Battery Care section ──
+        self._append_battery_section()
+
+        # ── dGPU Sleep Guard section ──
+        self._append_gpu_guard_section()
 
         # ── Keyboard RGB section ──
         if self._profile is not None and self._profile.has_rgb:
@@ -865,11 +967,33 @@ class GigaMateTrayApp:
         if gpu.present:
             parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
 
+        # Power Automation poll
+        try:
+            get_power_automation_engine().poll()
+        except Exception:
+            pass
+
+        # Battery status
+        try:
+            bat_info = get_battery_manager().get_battery_info()
+            if bat_info.present:
+                ac_str = "AC" if bat_info.ac_online else "Bat"
+                parts.append(f"Batt: {bat_info.capacity}% ({ac_str})")
+        except Exception:
+            pass
+
         text = "  |  ".join(parts) if parts else "Status: N/A"
 
         for item in self._status_items:
             try:
                 item.set_label(text)
+            except Exception:
+                pass
+
+        # Update rich tooltip on AppIndicator (StatusNotifierItem)
+        if self._indicator is not None:
+            try:
+                self._indicator.set_title(f"GigaMate 3.0\n{text}")
             except Exception:
                 pass
 
