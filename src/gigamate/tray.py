@@ -19,7 +19,7 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("AppIndicator3", "0.1")
-from gi.repository import Gtk, GLib, AppIndicator3
+from gi.repository import Gtk, GLib, Gio, AppIndicator3
 
 from pathlib import Path
 
@@ -28,7 +28,7 @@ from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
     get_dmi_product_name,
 )
-from .config import load as load_config, save as save_config
+from .config import CONFIG_FILE, load as load_config, save as save_config
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
@@ -133,6 +133,9 @@ class GigaMateTrayApp:
         self._apply_on_startup()
         self._init_idle()
         self._init_sleep_handler()
+        self._last_config_mtime = self._get_config_mtime()
+        self._config_monitor = None
+        self._init_config_monitor()
         self._start_status_polling()
         self._init_update_check()
 
@@ -183,6 +186,86 @@ class GigaMateTrayApp:
             pid=pid,
         )
         self._hotkey_listener.start()
+
+    def _get_config_mtime(self) -> float:
+        try:
+            return CONFIG_FILE.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _init_config_monitor(self) -> None:
+        """Watch config.json via Gio FileMonitor so changes from Center/CLI sync instantly."""
+        try:
+            gfile = Gio.File.new_for_path(str(CONFIG_FILE))
+            self._config_monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            self._config_monitor.connect("changed", self._on_config_file_event)
+        except Exception:
+            self._config_monitor = None
+
+    def _on_config_file_event(self, _monitor, _file, _other_file, event_type) -> None:
+        if event_type in (
+            Gio.FileMonitorEvent.CHANGED,
+            Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+            Gio.FileMonitorEvent.CREATED,
+        ):
+            self._sync_from_external_config()
+
+    def _sync_from_external_config(self) -> None:
+        """Reload configuration when changed externally by GigaMate Center or CLI."""
+        mtime = self._get_config_mtime()
+        if mtime <= getattr(self, "_last_config_mtime", 0.0):
+            return
+        self._last_config_mtime = mtime
+
+        new_cfg = load_config()
+        self._config = new_cfg
+
+        new_colour = new_cfg.get("colour")
+        new_bright = new_cfg.get("brightness")
+        new_profile = new_cfg.get("acpi_profile")
+        new_idle_off = new_cfg.get("idle_off_enabled", True)
+        new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
+        new_startup = new_cfg.get("startup_apply", True)
+        new_sync_power = new_cfg.get("sync_system_power", False)
+
+        old_building = self._building
+        self._building = True
+        try:
+            if new_colour and new_colour != self._current_colour:
+                self._current_colour = new_colour
+                if new_colour in self._colour_items:
+                    self._colour_items[new_colour].set_active(True)
+
+            if new_bright is not None and new_bright != self._current_brightness:
+                self._current_brightness = new_bright
+                if new_bright in self._brightness_items:
+                    self._brightness_items[new_bright].set_active(True)
+
+            if new_profile is not None and new_profile != self._current_acpi_profile:
+                self._current_acpi_profile = new_profile
+                if new_profile in self._profile_items:
+                    self._profile_items[new_profile].set_active(True)
+
+            if (new_idle_off != self._idle_enabled) or (new_idle_sec != self._idle_timeout):
+                self._idle_enabled = new_idle_off
+                self._idle_timeout = clamp_timeout(new_idle_sec)
+                self._update_idle_parent_label()
+                eff = self._idle_effective_step()
+                if eff in self._idle_timeout_items:
+                    self._idle_timeout_items[eff].set_active(True)
+                self._init_idle()
+
+            if new_startup != self._startup_apply:
+                self._startup_apply = new_startup
+                if self._startup_item is not None:
+                    self._startup_item.set_active(new_startup)
+
+            if new_sync_power != self._sync_system_power:
+                self._sync_system_power = new_sync_power
+                if self._sync_power_item is not None:
+                    self._sync_power_item.set_active(new_sync_power)
+        finally:
+            self._building = old_building
 
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
@@ -254,6 +337,7 @@ class GigaMateTrayApp:
         if dev is None:
             return
         try:
+            self._sync_from_external_config()
             set_static(dev, self._current_colour,
                        self._current_brightness, self._profile)
         except Exception:
@@ -925,6 +1009,7 @@ class GigaMateTrayApp:
 
     def _update_status(self) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
+        self._sync_from_external_config()
         self._refresh_tray_icon()
         if not self._status_items:
             return False
@@ -1369,6 +1454,7 @@ class GigaMateTrayApp:
 
     def _save_config(self) -> None:
         """Save current settings to config file."""
+        self._config = load_config()
         self._config["colour"] = self._current_colour
         self._config["brightness"] = self._current_brightness
         self._config["startup_apply"] = self._startup_apply
@@ -1378,6 +1464,7 @@ class GigaMateTrayApp:
         if self._current_acpi_profile is not None:
             self._config["acpi_profile"] = self._current_acpi_profile
         save_config(self._config)
+        self._last_config_mtime = self._get_config_mtime()
 
     def _apply_on_startup(self) -> None:
         """Apply saved settings on startup."""

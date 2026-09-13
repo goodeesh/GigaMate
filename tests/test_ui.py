@@ -113,3 +113,96 @@ def test_battery_page(qapp):
     assert page.limit_slider.value() == 80
     assert "Limit: 80%" in page.slider_label.text()
 
+
+def test_rgb_page_all_profile_colours(qapp):
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    rgb = win.page_rgb
+
+    # All profile colours must exist as interactive buttons
+    expected_colours = [
+        "red", "green", "yellow", "blue", "orange", "dark_yellow",
+        "purple", "light_purple", "white", "light_blue", "blush_pink"
+    ]
+    for col in expected_colours:
+        assert col in rgb.color_buttons, f"Colour {col} missing from RGB page!"
+
+    # Test selecting yellow (previously missing from Center)
+    rgb._set_colour("yellow")
+    assert "border: 2px solid #f6e05e" in rgb.color_buttons["yellow"].styleSheet()
+    assert "Active: Amber Yellow" in rgb.active_color_badge.text()
+
+    # Test selecting dark_yellow
+    rgb._set_colour("dark_yellow")
+    assert "border: 2px solid #ecc94b" in rgb.color_buttons["dark_yellow"].styleSheet()
+    assert "Active: Dark Yellow" in rgb.active_color_badge.text()
+
+
+def test_rgb_page_reload_from_config(qapp):
+    from gigamate.ui.main_window import MainWindow
+    from gigamate.config import load as load_config, save as save_config
+
+    win = MainWindow()
+    rgb = win.page_rgb
+
+    # External change to light_blue and dim brightness (1)
+    cfg = load_config()
+    cfg["colour"] = "light_blue"
+    cfg["brightness"] = 1
+    cfg["idle_timeout_sec"] = 300
+    save_config(cfg)
+
+    # Trigger reload
+    win.sync_all_from_config()
+
+    assert "Active: Ice Blue" in rgb.active_color_badge.text()
+    assert rgb.brightness_buttons[1].isChecked()
+    assert rgb.idle_combo.currentData() == 300
+
+
+def test_tray_sync_from_external_config():
+    from unittest.mock import MagicMock, patch
+    from gigamate.tray import GigaMateTrayApp
+
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._current_colour = "white"
+        tray._current_brightness = 2
+        tray._current_acpi_profile = 1
+        tray._idle_enabled = True
+        tray._idle_timeout = 60
+        tray._startup_apply = True
+        tray._sync_system_power = False
+        tray._building = False
+        tray._last_config_mtime = 0.0
+        tray._colour_items = {"red": MagicMock(), "white": MagicMock()}
+        tray._brightness_items = {1: MagicMock(), 2: MagicMock()}
+        tray._profile_items = {3: MagicMock()}
+        tray._idle_timeout_items = {}
+        tray._startup_item = MagicMock()
+        tray._sync_power_item = MagicMock()
+        tray._idle_parent_item = MagicMock()
+        tray._init_idle = MagicMock()
+
+        with patch("gigamate.tray.load_config", return_value={
+            "colour": "red",
+            "brightness": 1,
+            "acpi_profile": 3,
+            "idle_off_enabled": True,
+            "idle_timeout_sec": 60,
+            "startup_apply": False,
+            "sync_system_power": True,
+        }), patch.object(tray, "_get_config_mtime", return_value=12345.0):
+            tray._sync_from_external_config()
+
+            assert tray._current_colour == "red"
+            assert tray._current_brightness == 1
+            assert tray._current_acpi_profile == 3
+            assert tray._startup_apply is False
+            assert tray._sync_system_power is True
+            tray._colour_items["red"].set_active.assert_called_with(True)
+            tray._brightness_items[1].set_active.assert_called_with(True)
+            tray._profile_items[3].set_active.assert_called_with(True)
+
+

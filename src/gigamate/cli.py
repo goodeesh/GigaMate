@@ -123,6 +123,13 @@ def cmd_rgb_static(args) -> None:
     ok = set_static(dev, colour, level, profile, args.interface)
     label = BRIGHTNESS_LABELS.get(level, f"level-{level}")
     if ok:
+        try:
+            cfg = load_config()
+            cfg["colour"] = colour
+            cfg["brightness"] = level
+            save_config(cfg)
+        except Exception:
+            pass
         print(f"Set to {colour} ({label})")
     else:
         print("Failed to send command", file=sys.stderr)
@@ -137,6 +144,12 @@ def cmd_rgb_off(args) -> None:
         print("Keyboard not found")
         sys.exit(1)
     set_off(dev, profile)
+    try:
+        cfg = load_config()
+        cfg["brightness"] = 0
+        save_config(cfg)
+    except Exception:
+        pass
     print("Keyboard backlight turned off.")
 
 
@@ -373,6 +386,12 @@ def cmd_profile_set(args, name: str) -> None:
             fp = FanProfile(val)
             if ctrl.set_profile(fp):
                 sync_system_power(val)
+                try:
+                    cfg = load_config()
+                    cfg["acpi_profile"] = val
+                    save_config(cfg)
+                except Exception:
+                    pass
                 profile = resolve_profile(args.vid, args.pid)
                 pname = _profile_name(fp, profile)
                 print(f"Power profile set to: {pname}  ({val})")
@@ -388,6 +407,12 @@ def cmd_profile_set(args, name: str) -> None:
         fp = FanProfile.from_name(name)
         if ctrl.set_profile(fp):
             sync_system_power(fp.value)
+            try:
+                cfg = load_config()
+                cfg["acpi_profile"] = fp.value
+                save_config(cfg)
+            except Exception:
+                pass
             profile = resolve_profile(args.vid, args.pid)
             pname = _profile_name(fp, profile)
             print(f"Power profile set to: {pname}  ({fp.value})")
@@ -437,6 +462,12 @@ def cmd_profile_cycle(args) -> None:
 
     if ctrl.set_profile(fp):
         sync_system_power(next_profile_id)
+        try:
+            cfg = load_config()
+            cfg["acpi_profile"] = next_profile_id
+            save_config(cfg)
+        except Exception:
+            pass
         entry = p_data.get(str(next_profile_id), {})
         pname = entry.get("name", f"Profile {next_profile_id}")
         desc = entry.get("desc", "")

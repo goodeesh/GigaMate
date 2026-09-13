@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional
-from PyQt6.QtCore import QObject, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
@@ -24,6 +24,7 @@ from .pages.battery_page import BatteryPage
 from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .styles import DARK_THEME
+from ..config import CONFIG_FILE
 from ..paths import ICON_PATHS
 
 IPC_SOCKET_NAME = f"gigamate-center-{os.getuid()}"
@@ -55,6 +56,7 @@ class SingleInstanceServer(QObject):
 
     def activate_window(self) -> None:
         """Unminimize, raise, and bring the existing window to the front."""
+        self.window.sync_all_from_config()
         if self.window.isMinimized():
             self.window.showNormal()
         self.window.show()
@@ -76,6 +78,10 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self._init_ui()
+        self._last_config_mtime = self._get_config_mtime()
+        self.config_timer = QTimer(self)
+        self.config_timer.timeout.connect(self._check_config_mtime)
+        self.config_timer.start(1000)
 
     def _init_ui(self) -> None:
         central_widget = QWidget()
@@ -169,6 +175,32 @@ class MainWindow(QMainWindow):
         self.nav_group.addButton(btn)
         layout.addWidget(btn)
         return btn
+
+    def _get_config_mtime(self) -> float:
+        try:
+            return CONFIG_FILE.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _check_config_mtime(self) -> None:
+        mtime = self._get_config_mtime()
+        if mtime > getattr(self, "_last_config_mtime", 0.0):
+            self.sync_all_from_config()
+
+    def sync_all_from_config(self) -> None:
+        """Reload and update all pages from on-disk configuration."""
+        self._last_config_mtime = self._get_config_mtime()
+        if hasattr(self, "page_rgb"):
+            self.page_rgb.reload_from_config()
+        if hasattr(self, "page_dashboard"):
+            self.page_dashboard._refresh_telemetry()
+        if hasattr(self, "page_battery"):
+            self.page_battery._refresh_battery_data()
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self.sync_all_from_config()
+        super().changeEvent(event)
 
 
 def run_gui() -> None:

@@ -208,6 +208,9 @@ class DashboardPage(QWidget):
             self.boost_label.setText("")
 
         # Update profile buttons state
-        if current_prof_id is not None:
-            for prof, btn in self._profile_buttons.items():
-                btn.setChecked(current_prof_id == prof.value)
+        if current_prof_id is None:
+            cfg = load_config()
+            current_prof_id = cfg.get("acpi_profile", 1)
+
+        for prof, btn in self._profile_buttons.items():
+            btn.setChecked(current_prof_id == prof.value)

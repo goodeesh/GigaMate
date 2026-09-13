@@ -180,6 +180,28 @@ QPushButton.ProfileButton:checked {
     font-weight: 700;
 }
 
+QPushButton.SegmentButton {
+    background-color: #232a3b;
+    color: #cbd5e0;
+    border: 1px solid #364157;
+    border-radius: 8px;
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+QPushButton.SegmentButton:hover {
+    background-color: #2c364b;
+    color: #ffffff;
+}
+
+QPushButton.SegmentButton:checked {
+    background-color: #ff6b35;
+    color: #ffffff;
+    border: 2px solid #ffa066;
+    font-weight: 700;
+}
+
 QPushButton.ColorPaletteBtn {
     background-color: #202634;
     color: #f7fafc;

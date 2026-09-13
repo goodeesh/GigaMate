@@ -1,9 +1,11 @@
 """GigaMate Center — Keyboard RGB Lighting & Effects Page."""
 
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -15,7 +17,22 @@ from PyQt6.QtWidgets import (
 )
 
 from ...config import DEFAULT_CONFIG, load as load_config, resolve_active_profile, save as save_config
-from ...protocol import COLOUR_MAP, get_keyboard, set_off, set_static
+from ...protocol import get_keyboard, set_off, set_static
+
+# Complete display mappings for all profile colours
+COLOR_DISPLAY_METADATA: Dict[str, Tuple[str, str]] = {
+    "red": ("Crimson Red", "#fc8181"),
+    "green": ("Spring Green", "#68d391"),
+    "yellow": ("Amber Yellow", "#f6e05e"),
+    "blue": ("Sky Blue", "#63b3ed"),
+    "orange": ("Sunset Orange", "#f6ad55"),
+    "dark_yellow": ("Dark Yellow", "#ecc94b"),
+    "purple": ("Vibrant Purple", "#b794f4"),
+    "light_purple": ("Light Purple", "#d6bcfa"),
+    "white": ("Pure White", "#f7fafc"),
+    "light_blue": ("Ice Blue", "#90cdf4"),
+    "blush_pink": ("Blush Pink", "#f687b3"),
+}
 
 
 def make_color_swatch_icon(hex_color: str, size: int = 14) -> QIcon:
@@ -37,6 +54,9 @@ class RgbPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.cfg = load_config()
+        self._palette_info: Dict[str, Tuple[str, str]] = {}
+        self.color_buttons: Dict[str, QPushButton] = {}
+        self.brightness_buttons: Dict[int, QPushButton] = {}
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -65,23 +85,25 @@ class RgbPage(QWidget):
         c_header.addWidget(self.active_color_badge)
         c_layout.addLayout(c_header)
 
+        # Dynamically load all colours from active hardware profile (with fallback)
+        profile = resolve_active_profile()
+        if profile is not None and profile.colour_names:
+            colour_keys = profile.colour_names
+        else:
+            colour_keys = list(COLOR_DISPLAY_METADATA.keys())
+
         grid = QGridLayout()
         grid.setSpacing(10)
 
-        palette = [
-            ("Light Purple", "light_purple", "#b794f4"),
-            ("Blush Pink", "blush_pink", "#f687b3"),
-            ("Cyan", "cyan", "#4fd1c5"),
-            ("Sky Blue", "blue", "#63b3ed"),
-            ("Spring Green", "green", "#68d391"),
-            ("Sunset Orange", "orange", "#f6ad55"),
-            ("Crimson Red", "red", "#fc8181"),
-            ("Pure White", "white", "#f7fafc"),
-        ]
-
         self._palette_info = {}
         self.color_buttons = {}
-        for idx, (label, col_key, hex_color) in enumerate(palette):
+        for idx, col_key in enumerate(colour_keys):
+            if col_key in COLOR_DISPLAY_METADATA:
+                label, hex_color = COLOR_DISPLAY_METADATA[col_key]
+            else:
+                label = col_key.replace("_", " ").title()
+                hex_color = "#a0aec0"
+
             self._palette_info[col_key] = (label, hex_color)
             btn = QPushButton(f"  {label}")
             btn.setIcon(make_color_swatch_icon(hex_color, 14))
@@ -96,28 +118,33 @@ class RgbPage(QWidget):
         c_layout.addLayout(grid)
         layout.addWidget(colour_card)
 
-        # ── Brightness & Idle Sleep Card ──
+        # ── Brightness & Energy Saver Card ──
         opts_card = QFrame()
         opts_card.setProperty("class", "Card")
         o_layout = QVBoxLayout(opts_card)
-        o_layout.setSpacing(14)
+        o_layout.setSpacing(16)
 
         o_title = QLabel("Brightness & Energy Saver")
         o_title.setProperty("class", "CardTitle")
         o_layout.addWidget(o_title)
 
-        # Brightness buttons
+        # Brightness segmented buttons
         b_row = QHBoxLayout()
         b_label = QLabel("Backlight Brightness:")
         b_label.setStyleSheet("color: #cbd5e0; font-weight: 500; min-width: 160px;")
         b_row.addWidget(b_label)
 
-        self.btn_b_off = QPushButton("Off")
-        self.btn_b_dim = QPushButton("Dim (50%)")
-        self.btn_b_full = QPushButton("Full (100%)")
+        self.brightness_group = QButtonGroup(self)
+        self.brightness_group.setExclusive(True)
+        self.brightness_buttons = {}
 
-        for b_val, btn in enumerate((self.btn_b_off, self.btn_b_dim, self.btn_b_full)):
+        for b_val, label in enumerate(("Off", "Dim (50%)", "Full (100%)")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("class", "SegmentButton")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.brightness_group.addButton(btn, b_val)
+            self.brightness_buttons[b_val] = btn
             btn.clicked.connect(lambda _, v=b_val: self._set_brightness(v))
             b_row.addWidget(btn)
 
@@ -146,7 +173,6 @@ class RgbPage(QWidget):
         if not self.cfg.get("idle_off_enabled", True):
             current_timeout = 0
 
-        # Match combo
         for i, (_, sec) in enumerate(self.idle_options):
             if sec == current_timeout:
                 self.idle_combo.setCurrentIndex(i)
@@ -155,6 +181,12 @@ class RgbPage(QWidget):
         self.idle_combo.currentIndexChanged.connect(self._on_idle_changed)
         idle_row.addWidget(self.idle_combo)
         o_layout.addLayout(idle_row)
+
+        # Startup Integration Checkbox
+        self.chk_startup_apply = QCheckBox("Apply RGB and profile settings automatically on login / startup")
+        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
+        self.chk_startup_apply.toggled.connect(self._on_startup_apply_changed)
+        o_layout.addWidget(self.chk_startup_apply)
 
         layout.addWidget(opts_card)
         layout.addStretch()
@@ -182,6 +214,10 @@ class RgbPage(QWidget):
             self.cfg["idle_timeout_sec"] = sec
         save_config(self.cfg)
 
+    def _on_startup_apply_changed(self, checked: bool) -> None:
+        self.cfg["startup_apply"] = checked
+        save_config(self.cfg)
+
     def _apply_hardware(self) -> None:
         dev = get_keyboard()
         if dev is not None:
@@ -195,7 +231,9 @@ class RgbPage(QWidget):
 
     def _highlight_active(self) -> None:
         active_col = self.cfg.get("colour", "light_purple")
-        active_label, active_hex = self._palette_info.get(active_col, (active_col.capitalize(), "#b794f4"))
+        active_label, active_hex = self._palette_info.get(
+            active_col, (active_col.replace("_", " ").title(), "#b794f4")
+        )
 
         # Update Header Badge
         self.active_color_badge.setText(f"Active: {active_label}")
@@ -230,8 +268,34 @@ class RgbPage(QWidget):
                 )
 
         b_level = self.cfg.get("brightness", 2)
-        for idx, btn in enumerate((self.btn_b_off, self.btn_b_dim, self.btn_b_full)):
-            if idx == b_level:
-                btn.setStyleSheet("background-color: #ff6b35; color: #ffffff; font-weight: bold; border: 2px solid #ffa066;")
-            else:
-                btn.setStyleSheet("")
+        if b_level in self.brightness_buttons:
+            self.brightness_buttons[b_level].setChecked(True)
+
+    def reload_from_config(self) -> None:
+        """Synchronize UI with latest on-disk config without hardware writes."""
+        self.cfg = load_config()
+
+        # Update Colour buttons and header badge
+        self._highlight_active()
+
+        # Update Brightness buttons
+        b_level = self.cfg.get("brightness", 2)
+        if b_level in self.brightness_buttons:
+            self.brightness_buttons[b_level].setChecked(True)
+
+        # Update Idle Timeout without re-firing signal
+        current_timeout = self.cfg.get("idle_timeout_sec", 60)
+        if not self.cfg.get("idle_off_enabled", True):
+            current_timeout = 0
+
+        self.idle_combo.blockSignals(True)
+        for i, (_, sec) in enumerate(self.idle_options):
+            if sec == current_timeout:
+                self.idle_combo.setCurrentIndex(i)
+                break
+        self.idle_combo.blockSignals(False)
+
+        # Update Startup Apply
+        self.chk_startup_apply.blockSignals(True)
+        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
+        self.chk_startup_apply.blockSignals(False)
