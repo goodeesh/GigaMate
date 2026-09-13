@@ -33,7 +33,20 @@ Fan/temperature data lives in a **SystemMemory operation region** at `0xFC7E0800
 | `0xED` | `0` = Quiet | Lowest fan noise, capped GPU power (~45W) |
 | `0xED` | `1` = Balanced | Default profile |
 | `0xED` | `2` = Performance | Higher fan curve |
-| `0xED` | `3` = Gaming | Maximum GPU power (~70W), highest fan curve |
+| `0xED` | `3` = Gaming | Maximum GPU power (~80W+ with Dynamic Boost / SmartShift), highest fan curve |
+
+## Discrete GPU Dynamic Power Management
+
+Discrete mobile GPUs (NVIDIA RTX and AMD Radeon) scale their TGP dynamically:
+
+### NVIDIA Dynamic Boost
+- **Base TGP vs Boost**: The RTX mobile GPU has a default baseline ceiling (e.g. 50W). Dynamic Boost allows shifting up to 80W–85W depending on CPU load.
+- **Daemon Requirement**: Requires `nvidia-powerd.service` active and connected to D-Bus. Without it, the driver locks the GPU at its base power limit (50W).
+- **Automation**: GigaMate automatically verifies and starts `nvidia-powerd.service` when switching to Performance or Gaming profiles. Polkit rule `data/50-gigamate-powerd.rules` allows unprivileged management.
+
+### AMD SmartShift
+- **In-Kernel Architecture**: AMD SmartShift is handled directly in kernel space by `amdgpu` and platform firmware (SMU/PMFW). No userspace daemon is required.
+- **Sysfs Control**: The driver exposes `/sys/class/drm/card*/device/smartshift_bias` (-100 to +100). GigaMate adjusts this bias on profile switches (+100 for Gaming, -50 for Quiet) when writable.
 
 ## What Didn't Work
 

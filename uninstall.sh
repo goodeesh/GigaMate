@@ -92,6 +92,13 @@ if [ -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules ]; then
     info "Removed old udev rule (99-gigabyte-keyboard-rgb.rules)."
 fi
 
+# --- Remove polkit rule ---
+if [ -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules ]; then
+    info "Removing polkit rule (needs sudo)..."
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules
+    info "polkit rule removed."
+fi
+
 # --- Uninstall Python package ---
 header "Python package"
 

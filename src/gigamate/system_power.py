@@ -208,7 +208,13 @@ _manager = SystemPowerManager()
 
 def sync_system_power(fan_profile_id: int) -> bool:
     """Convenience function to sync system power profile from fan profile ID."""
-    return _manager.sync_from_fan_profile(fan_profile_id)
+    sys_ok = _manager.sync_from_fan_profile(fan_profile_id)
+    try:
+        from gigamate.gpu import sync_gpu_power
+        sync_gpu_power(fan_profile_id)
+    except Exception:
+        pass
+    return sys_ok
 
 
 def is_system_power_available() -> bool:

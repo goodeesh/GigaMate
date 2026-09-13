@@ -72,3 +72,10 @@ class TestSystemPowerManager:
         with patch.object(mgr, "set_system_profile") as mock_set:
             assert mgr.sync_from_fan_profile(99) is False
             mock_set.assert_not_called()
+
+    def test_sync_system_power_delegates_to_gpu(self):
+        with patch("gigamate.system_power._manager.sync_from_fan_profile", return_value=True), \
+             patch("gigamate.gpu.sync_gpu_power") as mock_gpu_sync:
+            res = sync_system_power(3)
+            assert res is True
+            mock_gpu_sync.assert_called_once_with(3)
