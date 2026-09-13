@@ -58,17 +58,17 @@ class DashboardPage(QWidget):
         self.prof_group.setExclusive(True)
 
         profiles = [
-            (FanProfile.QUIET, "Quiet", "Silent Acoustics"),
-            (FanProfile.BALANCED, "Balanced", "Daily Multi-tasking"),
-            (FanProfile.PERFORMANCE, "Performance", "High Power Cooling"),
-            (FanProfile.GAMING, "Gaming", "Maximum GPU Boost"),
+            (FanProfile.QUIET, "Quiet"),
+            (FanProfile.BALANCED, "Balanced"),
+            (FanProfile.PERFORMANCE, "Performance"),
+            (FanProfile.GAMING, "Gaming"),
         ]
 
-        for prof, name, desc in profiles:
-            btn = QPushButton(f"{name}\n{desc}")
+        for prof, name in profiles:
+            btn = QPushButton(name)
             btn.setProperty("class", "ProfileButton")
             btn.setCheckable(True)
-            btn.setMinimumHeight(66)
+            btn.setMinimumHeight(48)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, p=prof: self._select_profile(p))
             self._profile_buttons[prof] = btn
@@ -96,12 +96,12 @@ class DashboardPage(QWidget):
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(14)
 
-        # 3x2 Grid of Elevated Metric Tiles
+        # Row 0: Thermals & GPU (CPU Temp & Discrete GPU)
         grid.addWidget(self._make_stat_tile("CPU Temperature", "stat_cpu_temp", "🌡️", "stat_cpu_sub"), 0, 0)
-        grid.addWidget(self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub"), 0, 1)
-        grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 2)
+        grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 1, 1, 2)
 
-        grid.addWidget(self._make_stat_tile("Socket Temperature", "stat_socket_temp", "🌡️", "stat_socket_sub"), 1, 0)
+        # Row 1: Cooling Fans & Total Duty
+        grid.addWidget(self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub"), 1, 0)
         grid.addWidget(self._make_stat_tile("GPU Fan Speed", "stat_fan2_rpm", "🌀", "stat_fan2_sub"), 1, 1)
         grid.addWidget(self._make_stat_tile("Total Fan Duty", "stat_duty", "📊", "stat_duty_sub"), 1, 2)
 
@@ -185,19 +185,6 @@ class DashboardPage(QWidget):
                     if cpu_sub:
                         cpu_sub.setText("Monitoring")
 
-            # Socket Temp
-            sock_lbl = self.findChild(QLabel, "stat_socket_temp")
-            sock_sub = self.findChild(QLabel, "stat_socket_sub")
-            if sock_lbl:
-                if state.temp_socket is not None and state.temp_socket > 0:
-                    sock_lbl.setText(f"{state.temp_socket} °C")
-                    if sock_sub:
-                        sock_sub.setText("System Sensor")
-                else:
-                    sock_lbl.setText("--")
-                    if sock_sub:
-                        sock_sub.setText("Unpopulated")
-
             # Fans
             f1_lbl = self.findChild(QLabel, "stat_fan1_rpm")
             f1_sub = self.findChild(QLabel, "stat_fan1_sub")
@@ -236,7 +223,7 @@ class DashboardPage(QWidget):
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
                 gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
-                    gpu_sub.setText("0W • Power Conserved")
+                    gpu_sub.setText("0W • D3cold")
             else:
                 gpu_lbl.setText(f"Active ({gpu.power_state or 'D0'})")
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
@@ -247,7 +234,7 @@ class DashboardPage(QWidget):
         if not gpu.present:
             self.boost_label.setText("⚡ Discrete GPU: Not Present (Integrated graphics only)")
         elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
-            self.boost_label.setText(f"⚡ Discrete GPU: Asleep in {gpu.power_state or 'D3cold'} (0W power draw)")
+            self.boost_label.setText(f"⚡ Discrete GPU: Asleep in {gpu.power_state or 'D3cold'} (0W)")
         elif gpu.vendor == "nvidia":
             if gpu.dynamic_boost_supported:
                 status_str = "Active (Dynamic Boost up to ~80W)" if gpu.dynamic_boost_active else "Standby (nvidia-powerd)"

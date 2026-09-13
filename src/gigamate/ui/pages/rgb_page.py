@@ -208,12 +208,19 @@ class RgbPage(QWidget):
         self._highlight_active()
 
     def _set_colour(self, colour: str) -> None:
+        if self.cfg.get("brightness", 2) == 0:
+            restored = self.cfg.get("last_brightness", 2)
+            if restored == 0:
+                restored = 2
+            self.cfg["brightness"] = restored
         self.cfg["colour"] = colour
         save_config(self.cfg)
         self._apply_hardware()
         self._highlight_active()
 
     def _set_brightness(self, level: int) -> None:
+        if level > 0:
+            self.cfg["last_brightness"] = level
         self.cfg["brightness"] = level
         save_config(self.cfg)
         self._apply_hardware()
@@ -244,24 +251,46 @@ class RgbPage(QWidget):
                 set_static(dev, colour, brightness, profile)
 
     def _turn_off_backlight(self) -> None:
+        curr = self.cfg.get("brightness", 2)
+        if curr > 0:
+            self.cfg["last_brightness"] = curr
         self._set_brightness(0)
 
     def _highlight_active(self) -> None:
+        b_level = self.cfg.get("brightness", 2)
         active_col = self.cfg.get("colour", "light_purple")
         active_label, active_hex = self._palette_info.get(
             active_col, (active_col.replace("_", " ").title(), "#b794f4")
         )
 
         # Update Header Badge
-        self.active_color_badge.setText(f"Active: {active_label}")
-        self.active_color_badge.setStyleSheet(
-            f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-            f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
-        )
+        if b_level == 0:
+            self.active_color_badge.setText(f"Active: {active_label} (Off)")
+            self.active_color_badge.setStyleSheet(
+                "color: #718096; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                "border-radius: 12px; background-color: #171c26; border: 1px solid #4a5568;"
+            )
+        else:
+            self.active_color_badge.setText(f"Active: {active_label}")
+            self.active_color_badge.setStyleSheet(
+                f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
+            )
 
         for col_key, btn in self.color_buttons.items():
             label, hex_color = self._palette_info.get(col_key, (col_key, "#ffffff"))
-            if col_key == active_col:
+            if b_level == 0 and col_key == "off":
+                btn.setText(f"  {label}   ✓")
+                btn.setStyleSheet(
+                    "background-color: #242c3d; "
+                    "border: 2px solid #718096; "
+                    "color: #ffffff; "
+                    "font-weight: 700; "
+                    "border-radius: 8px; "
+                    "padding: 8px 14px; "
+                    "text-align: left;"
+                )
+            elif b_level > 0 and col_key == active_col:
                 btn.setText(f"  {label}   ✓")
                 btn.setStyleSheet(
                     f"background-color: #242c3d; "
@@ -275,13 +304,13 @@ class RgbPage(QWidget):
             else:
                 btn.setText(f"  {label}")
                 btn.setStyleSheet(
-                    f"background-color: #1c212d; "
-                    f"border: 1px solid #2f3a4e; "
-                    f"color: #cbd5e0; "
-                    f"font-weight: 500; "
-                    f"border-radius: 8px; "
-                    f"padding: 8px 14px; "
-                    f"text-align: left;"
+                    "background-color: #1c212d; "
+                    "border: 1px solid #2f3a4e; "
+                    "color: #cbd5e0; "
+                    "font-weight: 500; "
+                    "border-radius: 8px; "
+                    "padding: 8px 14px; "
+                    "text-align: left;"
                 )
 
         b_level = self.cfg.get("brightness", 2)

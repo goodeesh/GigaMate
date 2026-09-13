@@ -349,7 +349,8 @@ QCheckBox::indicator {
 
 QCheckBox::indicator:checked {
     background-color: #ff6b35;
-    border-color: #ff6b35;
+    border: 1px solid #ff6b35;
+    image: url(__CHECKBOX_ICON_URL__);
 }
 
 QComboBox {
@@ -364,3 +365,9 @@ QComboBox::drop-down {
     border: none;
 }
 """
+
+from ..paths import resolve_icon
+DARK_THEME = DARK_THEME.replace(
+    "__CHECKBOX_ICON_URL__",
+    resolve_icon("checkbox-checked").replace("\\", "/")
+)

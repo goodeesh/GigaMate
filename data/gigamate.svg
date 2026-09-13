@@ -1,20 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <defs>
-    <linearGradient id="gigaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#ff8c42"/>
-      <stop offset="100%" stop-color="#ff5511"/>
-    </linearGradient>
-    <linearGradient id="innerGlow" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#232b3b"/>
-      <stop offset="100%" stop-color="#141822"/>
+      <stop offset="100%" stop-color="#ff4500"/>
     </linearGradient>
   </defs>
-  <!-- Outer glowing rounded container -->
-  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#gigaGrad)" />
-  <!-- Dark slate core -->
-  <rect x="6" y="6" width="52" height="52" rx="13" fill="url(#innerGlow)" />
-  <!-- Stylized geometric G / Power Monogram -->
-  <path d="M 44 20 L 26 20 C 20.5 20 16 24.5 16 30 C 16 35.5 20.5 40 26 40 L 40 40 C 42.2 40 44 38.2 44 36 L 44 29 L 29 29 L 29 33 L 39.5 33 L 39.5 36 C 39.5 36.3 39.3 36.5 39 36.5 L 26 36.5 C 22.4 36.5 19.5 33.6 19.5 30 C 19.5 26.4 22.4 23.5 26 23.5 L 44 23.5 Z" fill="url(#gigaGrad)" />
-  <!-- Energy pip -->
-  <circle cx="32" cy="20" r="2.5" fill="#ffffff" />
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#bgGrad)"/>
+  <rect x="5.5" y="5.5" width="53" height="53" rx="13" fill="#121622"/>
+  <path d="M 46 19 L 28 19 C 20 19 15 24.5 15 32 C 15 39.5 20 45 28 45 L 42 45 C 44.5 45 46 43 46 40 L 46 31 L 30 31 L 30 36.5 L 40 36.5 L 40 39.5 L 28 39.5 C 23.5 39.5 20.5 36 20.5 32 C 20.5 28 23.5 24.5 28 24.5 L 46 24.5 Z" fill="url(#bgGrad)"/>
 </svg>

@@ -98,15 +98,15 @@ def test_battery_page(qapp):
     from gigamate.ui.pages.battery_page import BatteryPage
 
     page = BatteryPage()
-    assert page.limit_slider.value() in (60, 80, 100)
+    assert page.limit_slider.value() in range(40, 101)
 
-    # Click 60% preset
-    page.btn_preset_60.click()
+    # Move slider to 60%
+    page._set_slider_value(60)
     assert page.limit_slider.value() == 60
     assert "Limit: 60%" in page.slider_label.text()
 
-    # Click 80% preset
-    page.btn_preset_80.click()
+    # Move slider to 80%
+    page._set_slider_value(80)
     assert page.limit_slider.value() == 80
     assert "Limit: 80%" in page.slider_label.text()
 

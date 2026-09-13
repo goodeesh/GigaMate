@@ -78,27 +78,9 @@ class BatteryPage(QWidget):
         c_layout.addWidget(c_title)
         c_layout.addWidget(c_sub)
 
-        # Presets row
-        preset_layout = QHBoxLayout()
-        preset_layout.setSpacing(10)
-
-        self.btn_preset_60 = QPushButton("60% Desk Mode\nMinimum stress")
-        self.btn_preset_80 = QPushButton("80% Balanced\nRecommended")
-        self.btn_preset_100 = QPushButton("100% Travel\nFull capacity")
-
-        for btn in (self.btn_preset_60, self.btn_preset_80, self.btn_preset_100):
-            btn.setProperty("class", "PresetButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(52)
-            preset_layout.addWidget(btn)
-
-        self.btn_preset_60.clicked.connect(lambda: self._select_preset(60))
-        self.btn_preset_80.clicked.connect(lambda: self._select_preset(80))
-        self.btn_preset_100.clicked.connect(lambda: self._select_preset(100))
-        c_layout.addLayout(preset_layout)
-
         # Slider row
         slider_layout = QHBoxLayout()
+        slider_layout.setSpacing(14)
         self.slider_label = QLabel("Limit: 80%")
         self.slider_label.setStyleSheet("color: #ffffff; font-weight: 600; font-size: 14px; min-width: 90px;")
 
@@ -157,25 +139,12 @@ class BatteryPage(QWidget):
         setattr(self, label_attr_name, val_lbl)
         return chip
 
-    def _update_preset_highlights(self, val: int) -> None:
-        for btn, p_val in ((self.btn_preset_60, 60), (self.btn_preset_80, 80), (self.btn_preset_100, 100)):
-            if val == p_val:
-                btn.setStyleSheet("border: 2px solid #ff6b35; background-color: #242d3e; color: #ffffff; font-weight: 700;")
-            else:
-                btn.setStyleSheet("border: 1px solid #2d384d; background-color: #1d2331; color: #cbd5e0; font-weight: 500;")
-
-    def _select_preset(self, val: int) -> None:
-        self._set_slider_value(val)
-        self._apply_charge_limit()
-
     def _set_slider_value(self, val: int) -> None:
         self.limit_slider.setValue(val)
         self.slider_label.setText(f"Limit: {val}%")
-        self._update_preset_highlights(val)
 
     def _on_slider_changed(self, val: int) -> None:
         self.slider_label.setText(f"Limit: {val}%")
-        self._update_preset_highlights(val)
 
     def _apply_charge_limit(self) -> None:
         val = self.limit_slider.value()
