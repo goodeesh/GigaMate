@@ -73,19 +73,42 @@ QPushButton.NavButton:checked {
     border-left: 3px solid #ff6b35;
 }
 
+QWidget#SidebarFooter {
+    border-top: 1px solid #232938;
+    padding: 14px 16px;
+    background-color: #131620;
+}
+
 /* ────────────────────────────────────────────
- * Elevated Cards
+ * Elevated Cards & Tiles
  * ──────────────────────────────────────────── */
 
 QFrame.Card {
-    background-color: #1c212d;
-    border: 1px solid #293042;
+    background-color: #181d28;
+    border: 1px solid #263042;
     border-radius: 12px;
     padding: 18px;
 }
 
 QFrame.Card:hover {
-    border-color: #38425b;
+    border-color: #36435c;
+}
+
+QFrame.MetricTile {
+    background-color: #131720;
+    border: 1px solid #232b3d;
+    border-radius: 10px;
+}
+
+QFrame.MetricTile:hover {
+    border-color: #384660;
+    background-color: #161b26;
+}
+
+QFrame.StatusChip {
+    background-color: #131720;
+    border: 1px solid #232b3d;
+    border-radius: 8px;
 }
 
 QLabel.CardTitle {
@@ -157,26 +180,50 @@ QPushButton.SuccessButton:hover {
 }
 
 QPushButton.ProfileButton {
-    background-color: #232a3b;
+    background-color: #1d2331;
     color: #cbd5e0;
-    border: 1px solid #364157;
+    border: 1px solid #2d384d;
     border-radius: 10px;
-    padding: 10px 14px;
+    padding: 8px 6px;
     font-size: 13px;
     font-weight: 500;
     text-align: center;
 }
 
 QPushButton.ProfileButton:hover {
-    background-color: #2c364b;
+    background-color: #252e40;
     border-color: #ff8c42;
     color: #ffffff;
 }
 
 QPushButton.ProfileButton:checked {
-    background-color: #ff6b35;
+    background-color: #242d3e;
     color: #ffffff;
-    border: 2px solid #ffa066;
+    border: 2px solid #ff6b35;
+    font-weight: 700;
+}
+
+QPushButton.PresetButton {
+    background-color: #1d2331;
+    color: #cbd5e0;
+    border: 1px solid #2d384d;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: center;
+}
+
+QPushButton.PresetButton:hover {
+    background-color: #252e40;
+    border-color: #ff8c42;
+    color: #ffffff;
+}
+
+QPushButton.PresetButton:checked {
+    background-color: #242d3e;
+    color: #ffffff;
+    border: 2px solid #ff6b35;
     font-weight: 700;
 }
 

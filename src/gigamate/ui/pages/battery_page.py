@@ -52,19 +52,14 @@ class BatteryPage(QWidget):
         self.progress_bar.setFixedHeight(22)
         s_layout.addWidget(self.progress_bar)
 
-        # Stats row
-        stats_layout = QHBoxLayout()
-        self.status_label = QLabel("Status: Detecting...")
-        self.status_label.setStyleSheet("color: #a0aec0; font-weight: 500;")
-        self.ac_label = QLabel("Power: Detecting...")
-        self.ac_label.setStyleSheet("color: #a0aec0; font-weight: 500;")
-        self.health_label = QLabel("Health: Detecting...")
-        self.health_label.setStyleSheet("color: #a0aec0; font-weight: 500;")
+        # 3 Status Chips
+        chips_layout = QHBoxLayout()
+        chips_layout.setSpacing(12)
 
-        stats_layout.addWidget(self.status_label)
-        stats_layout.addWidget(self.ac_label)
-        stats_layout.addWidget(self.health_label)
-        s_layout.addLayout(stats_layout)
+        chips_layout.addWidget(self._make_chip("Power Source", "ac_label", "⚡"))
+        chips_layout.addWidget(self._make_chip("Battery Status", "status_label", "🔋"))
+        chips_layout.addWidget(self._make_chip("Battery Health", "health_label", "❤️"))
+        s_layout.addLayout(chips_layout)
         layout.addWidget(status_card)
 
         # ── Battery Care & Charge Threshold Card ──
@@ -92,13 +87,14 @@ class BatteryPage(QWidget):
         self.btn_preset_100 = QPushButton("100% Travel\nFull capacity")
 
         for btn in (self.btn_preset_60, self.btn_preset_80, self.btn_preset_100):
+            btn.setProperty("class", "PresetButton")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(48)
+            btn.setMinimumHeight(52)
             preset_layout.addWidget(btn)
 
-        self.btn_preset_60.clicked.connect(lambda: self._set_slider_value(60))
-        self.btn_preset_80.clicked.connect(lambda: self._set_slider_value(80))
-        self.btn_preset_100.clicked.connect(lambda: self._set_slider_value(100))
+        self.btn_preset_60.clicked.connect(lambda: self._select_preset(60))
+        self.btn_preset_80.clicked.connect(lambda: self._select_preset(80))
+        self.btn_preset_100.clicked.connect(lambda: self._select_preset(100))
         c_layout.addLayout(preset_layout)
 
         # Slider row
@@ -135,12 +131,51 @@ class BatteryPage(QWidget):
         self._set_slider_value(active_limit)
         self._refresh_battery_data()
 
+    def _make_chip(self, title: str, label_attr_name: str, icon_str: str) -> QFrame:
+        chip = QFrame()
+        chip.setProperty("class", "StatusChip")
+        c_lay = QVBoxLayout(chip)
+        c_lay.setContentsMargins(14, 10, 14, 10)
+        c_lay.setSpacing(2)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(6)
+        hdr.setContentsMargins(0, 0, 0, 0)
+        icon_lbl = QLabel(icon_str)
+        icon_lbl.setStyleSheet("font-size: 13px;")
+        hdr.addWidget(icon_lbl)
+
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet("color: #718096; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        hdr.addWidget(t_lbl)
+        hdr.addStretch()
+        c_lay.addLayout(hdr)
+
+        val_lbl = QLabel("Detecting...")
+        val_lbl.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600; margin-top: 2px;")
+        c_lay.addWidget(val_lbl)
+        setattr(self, label_attr_name, val_lbl)
+        return chip
+
+    def _update_preset_highlights(self, val: int) -> None:
+        for btn, p_val in ((self.btn_preset_60, 60), (self.btn_preset_80, 80), (self.btn_preset_100, 100)):
+            if val == p_val:
+                btn.setStyleSheet("border: 2px solid #ff6b35; background-color: #242d3e; color: #ffffff; font-weight: 700;")
+            else:
+                btn.setStyleSheet("border: 1px solid #2d384d; background-color: #1d2331; color: #cbd5e0; font-weight: 500;")
+
+    def _select_preset(self, val: int) -> None:
+        self._set_slider_value(val)
+        self._apply_charge_limit()
+
     def _set_slider_value(self, val: int) -> None:
         self.limit_slider.setValue(val)
         self.slider_label.setText(f"Limit: {val}%")
+        self._update_preset_highlights(val)
 
     def _on_slider_changed(self, val: int) -> None:
         self.slider_label.setText(f"Limit: {val}%")
+        self._update_preset_highlights(val)
 
     def _apply_charge_limit(self) -> None:
         val = self.limit_slider.value()

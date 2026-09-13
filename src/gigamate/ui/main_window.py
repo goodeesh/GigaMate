@@ -159,6 +159,40 @@ class MainWindow(QMainWindow):
 
         sb_layout.addStretch()
 
+        # ── Sidebar Footer (Hardware Info & Daemon Status) ──
+        footer_widget = QWidget()
+        footer_widget.setObjectName("SidebarFooter")
+        footer_layout = QVBoxLayout(footer_widget)
+        footer_layout.setContentsMargins(14, 10, 14, 12)
+        footer_layout.setSpacing(2)
+
+        daemon_row = QHBoxLayout()
+        daemon_row.setSpacing(6)
+        daemon_dot = QLabel("●")
+        daemon_dot.setStyleSheet("color: #48bb78; font-size: 11px;")
+        daemon_lbl = QLabel("Daemon Active")
+        daemon_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        daemon_row.addWidget(daemon_dot)
+        daemon_row.addWidget(daemon_lbl)
+        daemon_row.addStretch()
+        footer_layout.addLayout(daemon_row)
+
+        dmi_name = "Gigabyte Laptop"
+        dmi_path = Path("/sys/class/dmi/id/product_name")
+        if dmi_path.exists():
+            try:
+                raw_name = dmi_path.read_text().strip()
+                if raw_name:
+                    dmi_name = raw_name
+            except Exception:
+                pass
+
+        sys_lbl = QLabel(dmi_name)
+        sys_lbl.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 500;")
+        footer_layout.addWidget(sys_lbl)
+
+        sb_layout.addWidget(footer_widget)
+
         root_layout.addWidget(sidebar)
 
         # ── Main Content Stack ──

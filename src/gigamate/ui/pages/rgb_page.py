@@ -111,6 +111,18 @@ class RgbPage(QWidget):
             self.color_buttons[col_key] = btn
             grid.addWidget(btn, idx // 4, idx % 4)
 
+        # 12th Slot: Quick "Turn Off" button to complete symmetrical 4x3 grid
+        btn_off = QPushButton("  Turn Off")
+        btn_off.setIcon(make_color_swatch_icon("#4a5568", 14))
+        btn_off.setIconSize(QSize(14, 14))
+        btn_off.setProperty("class", "ColorPaletteBtn")
+        btn_off.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_off.setMinimumHeight(44)
+        btn_off.clicked.connect(self._turn_off_backlight)
+        self.color_buttons["off"] = btn_off
+        self._palette_info["off"] = ("Turn Off", "#4a5568")
+        grid.addWidget(btn_off, 11 // 4, 11 % 4)
+
         c_layout.addLayout(grid)
         layout.addWidget(colour_card)
 
@@ -134,6 +146,8 @@ class RgbPage(QWidget):
         self.brightness_group.setExclusive(True)
         self.brightness_buttons = {}
 
+        b_btns_layout = QHBoxLayout()
+        b_btns_layout.setSpacing(8)
         for b_val, label in enumerate(("Off", "Dim (50%)", "Full (100%)")):
             btn = QPushButton(label)
             btn.setCheckable(True)
@@ -142,8 +156,10 @@ class RgbPage(QWidget):
             self.brightness_group.addButton(btn, b_val)
             self.brightness_buttons[b_val] = btn
             btn.clicked.connect(lambda _, v=b_val: self._set_brightness(v))
-            b_row.addWidget(btn)
+            b_btns_layout.addWidget(btn)
 
+        b_row.addLayout(b_btns_layout)
+        b_row.addStretch()
         o_layout.addLayout(b_row)
 
         # Idle Sleep Timeout
@@ -153,6 +169,7 @@ class RgbPage(QWidget):
         idle_row.addWidget(idle_label)
 
         self.idle_combo = QComboBox()
+        self.idle_combo.setFixedWidth(200)
         self.idle_options = [
             ("15 seconds", 15),
             ("30 seconds", 30),
@@ -176,6 +193,7 @@ class RgbPage(QWidget):
 
         self.idle_combo.currentIndexChanged.connect(self._on_idle_changed)
         idle_row.addWidget(self.idle_combo)
+        idle_row.addStretch()
         o_layout.addLayout(idle_row)
 
         # Startup Integration Checkbox
@@ -224,6 +242,9 @@ class RgbPage(QWidget):
                 set_off(dev, profile)
             else:
                 set_static(dev, colour, brightness, profile)
+
+    def _turn_off_backlight(self) -> None:
+        self._set_brightness(0)
 
     def _highlight_active(self) -> None:
         active_col = self.cfg.get("colour", "light_purple")

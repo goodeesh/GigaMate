@@ -58,17 +58,17 @@ class DashboardPage(QWidget):
         self.prof_group.setExclusive(True)
 
         profiles = [
-            (FanProfile.QUIET, "Quiet", "Silent acoustics, capped power"),
-            (FanProfile.BALANCED, "Balanced", "Daily multi-tasking default"),
-            (FanProfile.PERFORMANCE, "Performance", "Aggressive cooling curves"),
-            (FanProfile.GAMING, "Gaming", "Maximum GPU TGP & Boost"),
+            (FanProfile.QUIET, "Quiet", "Silent Acoustics"),
+            (FanProfile.BALANCED, "Balanced", "Daily Multi-tasking"),
+            (FanProfile.PERFORMANCE, "Performance", "High Power Cooling"),
+            (FanProfile.GAMING, "Gaming", "Maximum GPU Boost"),
         ]
 
         for prof, name, desc in profiles:
             btn = QPushButton(f"{name}\n{desc}")
             btn.setProperty("class", "ProfileButton")
             btn.setCheckable(True)
-            btn.setMinimumHeight(64)
+            btn.setMinimumHeight(66)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _, p=prof: self._select_profile(p))
             self._profile_buttons[prof] = btn
@@ -87,26 +87,23 @@ class DashboardPage(QWidget):
         telemetry_card = QFrame()
         telemetry_card.setProperty("class", "Card")
         t_layout = QVBoxLayout(telemetry_card)
+        t_layout.setSpacing(14)
         t_title = QLabel("Real-Time Hardware Telemetry")
         t_title.setProperty("class", "CardTitle")
         t_layout.addWidget(t_title)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(16)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
 
-        # CPU Temp
-        grid.addWidget(self._make_stat_box("CPU Temperature", "stat_cpu_temp"), 0, 0)
-        # Socket Temp
-        grid.addWidget(self._make_stat_box("Socket Temperature", "stat_socket_temp"), 0, 1)
-        # Fan 1 RPM
-        grid.addWidget(self._make_stat_box("CPU Fan Speed", "stat_fan1_rpm"), 1, 0)
-        # Fan 2 RPM
-        grid.addWidget(self._make_stat_box("GPU Fan Speed", "stat_fan2_rpm"), 1, 1)
-        # Duty Cycle
-        grid.addWidget(self._make_stat_box("Total Fan Duty", "stat_duty"), 2, 0)
-        # Discrete GPU Power
-        grid.addWidget(self._make_stat_box("Discrete GPU State", "stat_gpu"), 2, 1)
+        # 3x2 Grid of Elevated Metric Tiles
+        grid.addWidget(self._make_stat_tile("CPU Temperature", "stat_cpu_temp", "🌡️", "stat_cpu_sub"), 0, 0)
+        grid.addWidget(self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub"), 0, 1)
+        grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 2)
+
+        grid.addWidget(self._make_stat_tile("Socket Temperature", "stat_socket_temp", "🌡️", "stat_socket_sub"), 1, 0)
+        grid.addWidget(self._make_stat_tile("GPU Fan Speed", "stat_fan2_rpm", "🌀", "stat_fan2_sub"), 1, 1)
+        grid.addWidget(self._make_stat_tile("Total Fan Duty", "stat_duty", "📊", "stat_duty_sub"), 1, 2)
 
         t_layout.addLayout(grid)
         layout.addWidget(telemetry_card)
@@ -114,21 +111,38 @@ class DashboardPage(QWidget):
         layout.addStretch()
         self._refresh_telemetry()
 
-    def _make_stat_box(self, title: str, object_name: str) -> QWidget:
-        box = QWidget()
-        box_layout = QVBoxLayout(box)
-        box_layout.setContentsMargins(0, 0, 0, 0)
-        box_layout.setSpacing(4)
+    def _make_stat_tile(self, title: str, object_name: str, icon_str: str, subtext_obj: str = "") -> QFrame:
+        tile = QFrame()
+        tile.setProperty("class", "MetricTile")
+        t_layout = QVBoxLayout(tile)
+        t_layout.setContentsMargins(14, 12, 14, 12)
+        t_layout.setSpacing(2)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(6)
+        hdr.setContentsMargins(0, 0, 0, 0)
+        icon_lbl = QLabel(icon_str)
+        icon_lbl.setStyleSheet("font-size: 13px;")
+        hdr.addWidget(icon_lbl)
 
         lbl_title = QLabel(title)
-        lbl_title.setStyleSheet("color: #718096; font-size: 11px; font-weight: 600; text-transform: uppercase;")
+        lbl_title.setStyleSheet("color: #718096; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        hdr.addWidget(lbl_title)
+        hdr.addStretch()
+        t_layout.addLayout(hdr)
+
         lbl_val = QLabel("--")
         lbl_val.setObjectName(object_name)
-        lbl_val.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 700;")
+        lbl_val.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 700; margin-top: 2px;")
+        t_layout.addWidget(lbl_val)
 
-        box_layout.addWidget(lbl_title)
-        box_layout.addWidget(lbl_val)
-        return box
+        if subtext_obj:
+            lbl_sub = QLabel("")
+            lbl_sub.setObjectName(subtext_obj)
+            lbl_sub.setStyleSheet("color: #8896ab; font-size: 11px;")
+            t_layout.addWidget(lbl_sub)
+
+        return tile
 
     def _select_profile(self, profile: FanProfile) -> None:
         """Switch ACPI profile and sync Dynamic Boost."""
@@ -160,40 +174,74 @@ class DashboardPage(QWidget):
 
             # CPU Temp
             cpu_lbl = self.findChild(QLabel, "stat_cpu_temp")
+            cpu_sub = self.findChild(QLabel, "stat_cpu_sub")
             if cpu_lbl:
-                cpu_lbl.setText(f"{state.temp_cpu} °C" if state.temp_cpu is not None else "--")
+                if state.temp_cpu is not None:
+                    cpu_lbl.setText(f"{state.temp_cpu} °C")
+                    if cpu_sub:
+                        cpu_sub.setText("Optimal Thermal" if state.temp_cpu < 65 else "Active Load")
+                else:
+                    cpu_lbl.setText("--")
+                    if cpu_sub:
+                        cpu_sub.setText("Monitoring")
 
             # Socket Temp
             sock_lbl = self.findChild(QLabel, "stat_socket_temp")
+            sock_sub = self.findChild(QLabel, "stat_socket_sub")
             if sock_lbl:
-                sock_lbl.setText(f"{state.temp_socket} °C" if state.temp_socket is not None else "--")
+                if state.temp_socket is not None and state.temp_socket > 0:
+                    sock_lbl.setText(f"{state.temp_socket} °C")
+                    if sock_sub:
+                        sock_sub.setText("System Sensor")
+                else:
+                    sock_lbl.setText("--")
+                    if sock_sub:
+                        sock_sub.setText("Unpopulated")
 
             # Fans
             f1_lbl = self.findChild(QLabel, "stat_fan1_rpm")
+            f1_sub = self.findChild(QLabel, "stat_fan1_sub")
             if f1_lbl:
-                f1_lbl.setText(f"{state.fan1_rpm} RPM" if state.fan1_rpm is not None else "--")
+                rpm1 = state.fan1_rpm if state.fan1_rpm is not None else 0
+                f1_lbl.setText(f"{rpm1} RPM")
+                if f1_sub:
+                    f1_sub.setText("Silent / Stopped" if rpm1 == 0 else "Active Exhaust")
 
             f2_lbl = self.findChild(QLabel, "stat_fan2_rpm")
+            f2_sub = self.findChild(QLabel, "stat_fan2_sub")
             if f2_lbl:
-                f2_lbl.setText(f"{state.fan2_rpm} RPM" if state.fan2_rpm is not None else "--")
+                rpm2 = state.fan2_rpm if state.fan2_rpm is not None else 0
+                f2_lbl.setText(f"{rpm2} RPM")
+                if f2_sub:
+                    f2_sub.setText("Silent / Stopped" if rpm2 == 0 else "Active Exhaust")
 
             duty_lbl = self.findChild(QLabel, "stat_duty")
+            duty_sub = self.findChild(QLabel, "stat_duty_sub")
             if duty_lbl:
                 duty_lbl.setText(f"{state.duty_total}%" if state.duty_total is not None else "--")
+                if duty_sub:
+                    duty_sub.setText("Hardware Auto Curve")
 
         # GPU State
         gpu = get_gpu_state()
         gpu_lbl = self.findChild(QLabel, "stat_gpu")
+        gpu_sub = self.findChild(QLabel, "stat_gpu_sub")
         if gpu_lbl:
             if not gpu.present:
                 gpu_lbl.setText("Not Present")
                 gpu_lbl.setStyleSheet("color: #718096; font-size: 20px; font-weight: 700;")
+                if gpu_sub:
+                    gpu_sub.setText("iGPU Only")
             elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
                 gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")
+                if gpu_sub:
+                    gpu_sub.setText("0W • Power Conserved")
             else:
                 gpu_lbl.setText(f"Active ({gpu.power_state or 'D0'})")
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
+                if gpu_sub:
+                    gpu_sub.setText("High Performance")
 
         # Dynamic Boost / GPU Power telemetry
         if not gpu.present:
