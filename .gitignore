@@ -45,3 +45,4 @@ FEATURE_FAN_CONTROL.md
 
 # Local test runs
 *.log
+original-*-signature.txt

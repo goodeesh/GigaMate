@@ -417,8 +417,8 @@ install_udev() {
         info "Removed old udev rule (99-gigabyte-keyboard-rgb.rules)."
     fi
 
-    if [ -f "$rules_dst" ]; then
-        info "udev rule already exists: $rules_dst"
+    if [ -f "$rules_dst" ] && cmp -s "$rules_src" "$rules_dst"; then
+        info "udev rule up to date: $rules_dst"
         return
     fi
 
@@ -427,6 +427,45 @@ install_udev() {
     sudo udevadm control --reload-rules 2>/dev/null || true
     sudo udevadm trigger 2>/dev/null || true
     info "udev rule installed. You may need to unplug/replug the keyboard."
+}
+
+# --- Configure GPU power management (Dynamic Boost / SmartShift) ---
+configure_gpu_power() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    header "Configuring GPU power management"
+
+    # Install polkit rule for nvidia-powerd if polkit rules dir exists
+    local polkit_dir="/etc/polkit-1/rules.d"
+    local polkit_src="$script_dir/data/50-gigamate-powerd.rules"
+    local polkit_dst="$polkit_dir/50-gigamate-powerd.rules"
+
+    if [ -d "$polkit_dir" ] && [ -f "$polkit_src" ]; then
+        info "Installing polkit rule for nvidia-powerd management (needs sudo)..."
+        sudo cp "$polkit_src" "$polkit_dst"
+        sudo chmod 644 "$polkit_dst" 2>/dev/null || true
+        info "Polkit rule installed: $polkit_dst"
+    fi
+
+    # Check for discrete NVIDIA GPU
+    local has_nvidia=false
+    if [ -d /sys/bus/pci/devices ]; then
+        for v in /sys/bus/pci/devices/*/vendor; do
+            if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
+                has_nvidia=true
+                break
+            fi
+        done
+    fi
+
+    if [ "$has_nvidia" = true ]; then
+        if systemctl list-unit-files nvidia-powerd.service &>/dev/null; then
+            info "NVIDIA GPU detected. Enabling nvidia-powerd for Dynamic Boost..."
+            sudo systemctl enable --now nvidia-powerd.service 2>/dev/null || true
+            info "nvidia-powerd service enabled and active."
+        fi
+    fi
 }
 
 # --- Install systemd user service ---
@@ -547,6 +586,7 @@ main() {
     install_python_pkg
     build_kernel_module
     install_udev
+    configure_gpu_power
     install_service
     install_desktop_entry
     migrate_config

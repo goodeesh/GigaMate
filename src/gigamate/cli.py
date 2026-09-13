@@ -296,13 +296,19 @@ def cmd_status(args) -> None:
     if gpu.present:
         print("  ── Discrete GPU ──")
         print(f"     dGPU state:   {gpu_status_text(gpu)}")
+        if gpu.dynamic_boost_supported:
+            boost_state = "Active" if gpu.dynamic_boost_active else "Inactive"
+            print(f"     Dynamic Boost: {boost_state}")
+        elif gpu.smartshift_supported:
+            bias_str = f"  (bias: {gpu.smartshift_bias:+d})" if gpu.smartshift_bias is not None else ""
+            print(f"     SmartShift:   Active{bias_str}")
         print()
 
 
 def cmd_gpu_status(args) -> None:
     """Show the discrete GPU power state.
 
-    On systems without a discrete NVIDIA GPU this prints nothing.
+    On systems without a discrete GPU this prints nothing.
     """
     gpu = get_gpu_state()
     if not gpu.present:
@@ -313,6 +319,14 @@ def cmd_gpu_status(args) -> None:
     print(f"  dGPU state:   {gpu_status_text(gpu)}")
     print(f"  Runtime PM:   {gpu.status or 'unknown'}")
     print(f"  Power state:  {gpu.power_state or 'unknown'}")
+    if gpu.dynamic_boost_supported:
+        if gpu.dynamic_boost_active:
+            print("  Dynamic Boost: Active (nvidia-powerd)")
+        else:
+            print("  Dynamic Boost: Inactive (run: systemctl enable --now nvidia-powerd)")
+    elif gpu.smartshift_supported:
+        bias_str = f" (bias: {gpu.smartshift_bias:+d})" if gpu.smartshift_bias is not None else ""
+        print(f"  SmartShift:   Supported{bias_str}")
 
 
 # ────────────────────────────────────────────

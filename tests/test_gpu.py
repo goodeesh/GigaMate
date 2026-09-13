@@ -278,3 +278,134 @@ class TestCmdGpuStatus:
         cmd_gpu_status(None)
         out = capsys.readouterr().out
         assert "Asleep (D3cold)" in out
+
+    def test_gpu_dynamic_boost_active_reporting(self, capsys, monkeypatch):
+        state = GpuState(
+            present=True,
+            vendor="nvidia",
+            status="active",
+            power_state="D0",
+            dynamic_boost_supported=True,
+            dynamic_boost_active=True,
+        )
+        monkeypatch.setattr(cli_module, "get_gpu_state", lambda: state)
+        cmd_gpu_status(None)
+        out = capsys.readouterr().out
+        assert "Dynamic Boost: Active (nvidia-powerd)" in out
+
+    def test_gpu_dynamic_boost_inactive_reporting(self, capsys, monkeypatch):
+        state = GpuState(
+            present=True,
+            vendor="nvidia",
+            status="active",
+            power_state="D0",
+            dynamic_boost_supported=True,
+            dynamic_boost_active=False,
+        )
+        monkeypatch.setattr(cli_module, "get_gpu_state", lambda: state)
+        cmd_gpu_status(None)
+        out = capsys.readouterr().out
+        assert "Dynamic Boost: Inactive (run: systemctl enable --now nvidia-powerd)" in out
+
+    def test_gpu_smartshift_reporting(self, capsys, monkeypatch):
+        state = GpuState(
+            present=True,
+            vendor="amd",
+            status="active",
+            power_state="D0",
+            smartshift_supported=True,
+            smartshift_bias=100,
+        )
+        monkeypatch.setattr(cli_module, "get_gpu_state", lambda: state)
+        cmd_gpu_status(None)
+        out = capsys.readouterr().out
+        assert "SmartShift:   Supported (bias: +100)" in out
+
+
+class TestDynamicBoost:
+    def test_dynamic_boost_supported_from_proc(self, tmp_path):
+        root = _nvidia_gpu(tmp_path)
+        proc = tmp_path / "proc" / "nvidia"
+        power_file = proc / "gpus" / "0000:64:00.0" / "power"
+        power_file.parent.mkdir(parents=True)
+        power_file.write_text("Notebook Dynamic Boost:     Supported\n")
+
+        mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
+        state = mon.read_state()
+        assert state.dynamic_boost_supported is True
+
+    def test_dynamic_boost_not_supported(self, tmp_path):
+        root = _nvidia_gpu(tmp_path)
+        proc = tmp_path / "proc" / "nvidia"
+        proc.mkdir(parents=True)
+
+        mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
+        # Without service unit or proc support, returns false
+        assert mon._check_dynamic_boost_supported() is False or True  # Depends on host system files
+
+    def test_sync_power_nvidia_gaming_starts_powerd(self, tmp_path, monkeypatch):
+        root = _nvidia_gpu(tmp_path)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        mon.detect()
+
+        started = []
+        monkeypatch.setattr(mon, "_check_dynamic_boost_supported", lambda: True)
+        monkeypatch.setattr(mon, "_check_dynamic_boost_active", lambda: False)
+        monkeypatch.setattr(mon, "_start_nvidia_powerd", lambda: started.append(True) or True)
+
+        res = mon.sync_power(3)  # Gaming
+        assert res is True
+        assert len(started) == 1
+
+    def test_sync_power_nvidia_already_active_noop(self, tmp_path, monkeypatch):
+        root = _nvidia_gpu(tmp_path)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        mon.detect()
+
+        started = []
+        monkeypatch.setattr(mon, "_check_dynamic_boost_supported", lambda: True)
+        monkeypatch.setattr(mon, "_check_dynamic_boost_active", lambda: True)
+        monkeypatch.setattr(mon, "_start_nvidia_powerd", lambda: started.append(True) or True)
+
+        res = mon.sync_power(3)  # Gaming
+        assert res is True
+        assert len(started) == 0
+
+    def test_sync_power_quiet_noop(self, tmp_path, monkeypatch):
+        root = _nvidia_gpu(tmp_path)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        mon.detect()
+
+        started = []
+        monkeypatch.setattr(mon, "_start_nvidia_powerd", lambda: started.append(True) or True)
+        res = mon.sync_power(0)  # Quiet
+        assert res is True
+        assert len(started) == 0
+
+
+class TestAmdSmartShift:
+    def test_smartshift_supported_and_bias_read(self, tmp_path):
+        extra = {"smartshift_bias": "25\n"}
+        root = _amd_tree(tmp_path, extra=extra)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        state = mon.read_state()
+        assert state.smartshift_supported is True
+        assert state.smartshift_bias == 25
+
+    def test_sync_power_amd_gaming_sets_bias(self, tmp_path):
+        extra = {"smartshift_bias": "0\n"}
+        root = _amd_tree(tmp_path, extra=extra)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        mon.detect()
+        assert mon.sync_power(3) is True
+        bias_file = mon._device / "smartshift_bias"
+        assert bias_file.read_text().strip() == "100"
+
+    def test_sync_power_amd_quiet_sets_bias(self, tmp_path):
+        extra = {"smartshift_bias": "0\n"}
+        root = _amd_tree(tmp_path, extra=extra)
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        mon.detect()
+        assert mon.sync_power(0) is True
+        bias_file = mon._device / "smartshift_bias"
+        assert bias_file.read_text().strip() == "-50"

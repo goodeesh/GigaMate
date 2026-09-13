@@ -15,6 +15,7 @@ device with vendor 0x10de and PCI class 0x03xxxx (display controller),
 so no PCI address is hard-coded.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -42,22 +43,33 @@ class GpuState:
     status: Optional[str] = None  # "active" or "suspended"
     power_state: Optional[str] = None  # "D0", "D3hot", "D3cold", ...
     vendor: Optional[str] = None  # "nvidia", "amd", or None when absent
+    dynamic_boost_supported: bool = False
+    dynamic_boost_active: bool = False
+    smartshift_supported: bool = False
+    smartshift_bias: Optional[int] = None
 
 
 class NvidiaGpuMonitor:
-    """Monitor for the power state of an NVIDIA discrete GPU.
+    """Monitor for the power state and dynamic power features of a discrete GPU.
 
     Reads are sysfs-only and never wake the GPU.
     """
 
-    def __init__(self, pci_sysfs: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        pci_sysfs: Optional[Path] = None,
+        proc_nvidia: Optional[Path] = None,
+    ) -> None:
         """Initialise monitor.
 
         Args:
             pci_sysfs: Override the PCI sysfs root (mainly for tests).
                         If None, the module-level ``PCI_SYSFS`` is used.
+            proc_nvidia: Override the NVIDIA proc path (mainly for tests).
+                         If None, Path("/proc/driver/nvidia") is used.
         """
         self._pci_sysfs: Optional[Path] = pci_sysfs
+        self._proc_nvidia: Optional[Path] = proc_nvidia
         self._device: Optional[Path] = None
         self._vendor: Optional[str] = None
 
@@ -72,7 +84,7 @@ class NvidiaGpuMonitor:
 
     @property
     def is_available(self) -> bool:
-        """Whether an NVIDIA discrete GPU is present."""
+        """Whether a discrete GPU is present."""
         if self._device is None:
             self.detect()
         return self._device is not None
@@ -86,6 +98,16 @@ class NvidiaGpuMonitor:
         assert self._device is not None  # guaranteed by is_available
         state.status = self._read_text(self._device / "power" / "runtime_status")
         state.power_state = self._read_text(self._device / "power_state")
+
+        if self._vendor == "nvidia":
+            state.dynamic_boost_supported = self._check_dynamic_boost_supported()
+            if state.dynamic_boost_supported:
+                state.dynamic_boost_active = self._check_dynamic_boost_active()
+        elif self._vendor == "amd":
+            state.smartshift_supported = self._check_smartshift_supported()
+            if state.smartshift_supported:
+                state.smartshift_bias = self._read_smartshift_bias()
+
         return state
 
     def _find_device(self) -> tuple:
@@ -138,6 +160,177 @@ class NvidiaGpuMonitor:
         except (OSError, IOError):
             return None
 
+    def _check_dynamic_boost_supported(self) -> bool:
+        """Check if discrete NVIDIA GPU supports Dynamic Boost."""
+        if self._vendor != "nvidia":
+            return False
+
+        # 1. Check /proc/driver/nvidia/gpus/*/power
+        proc_root = self._proc_nvidia or Path("/proc/driver/nvidia")
+        gpus_dir = proc_root / "gpus" if proc_root.name != "gpus" else proc_root
+        if gpus_dir.is_dir():
+            try:
+                for p in gpus_dir.iterdir():
+                    power_file = p / "power"
+                    if power_file.is_file():
+                        content = power_file.read_text(errors="ignore")
+                        if "Notebook Dynamic Boost:     Supported" in content or "Notebook Dynamic Boost: Supported" in content:
+                            return True
+            except (OSError, IOError):
+                pass
+
+        # 2. Check if nvidia-powerd service unit or binary exists
+        for unit_dir in [Path("/usr/lib/systemd/system"), Path("/etc/systemd/system")]:
+            if (unit_dir / "nvidia-powerd.service").is_file():
+                return True
+        if Path("/usr/bin/nvidia-powerd").is_file():
+            return True
+
+        return False
+
+    def _check_dynamic_boost_active(self) -> bool:
+        """Check if nvidia-powerd.service is active."""
+        if self._vendor != "nvidia":
+            return False
+
+        # 1. Try DBus query
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            from gi.repository import Gio
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            proxy = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1/unit/nvidia_2dpowerd_2eservice",
+                "org.freedesktop.DBus.Properties",
+                None,
+            )
+            val = proxy.call_sync(
+                "Get",
+                gi.repository.GLib.Variant("(ss)", ("org.freedesktop.systemd1.Unit", "ActiveState")),
+                Gio.DBusCallFlags.NONE,
+                300,
+                None,
+            )
+            if val and len(val) > 0:
+                res = val[0]
+                if isinstance(res, str):
+                    return res == "active"
+                if hasattr(res, "get_string"):
+                    return res.get_string() == "active"
+                return str(res) == "active"
+        except Exception:
+            pass
+
+        # 2. Fallback to systemctl is-active
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["systemctl", "is-active", "--quiet", "nvidia-powerd.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _start_nvidia_powerd(self) -> bool:
+        """Attempt to start nvidia-powerd.service silently."""
+        # 1. Try DBus systemd Manager StartUnit
+        try:
+            import gi
+            gi.require_version("Gio", "2.0")
+            gi.require_version("GLib", "2.0")
+            from gi.repository import Gio, GLib
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            proxy = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                None,
+            )
+            proxy.call_sync(
+                "StartUnit",
+                GLib.Variant("(ss)", ("nvidia-powerd.service", "replace")),
+                Gio.DBusCallFlags.NONE,
+                1000,
+                None,
+            )
+            return True
+        except Exception:
+            pass
+
+        # 2. Fallback to systemctl start
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["systemctl", "start", "nvidia-powerd.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _check_smartshift_supported(self) -> bool:
+        """Check if discrete AMD GPU supports SmartShift."""
+        if self._vendor != "amd" or not self._device:
+            return False
+        return (
+            (self._device / "smartshift_bias").exists()
+            or (self._device / "smartshift_apu_power").exists()
+            or (self._device / "smartshift_dgpu_power").exists()
+        )
+
+    def _read_smartshift_bias(self) -> Optional[int]:
+        """Read smartshift_bias from AMD dGPU sysfs."""
+        if self._vendor != "amd" or not self._device:
+            return None
+        path = self._device / "smartshift_bias"
+        try:
+            text = path.read_text().strip()
+            return int(text)
+        except (OSError, ValueError, IOError):
+            return None
+
+    def sync_power(self, fan_profile_id: int) -> bool:
+        """Apply GPU power tuning matching the selected fan profile."""
+        if not self.is_available:
+            return True
+
+        # 1. NVIDIA Dynamic Boost automation
+        if self._vendor == "nvidia":
+            # For Gaming (3) or Performance (2), ensure nvidia-powerd is running
+            if fan_profile_id in (2, 3):
+                if self._check_dynamic_boost_supported() and not self._check_dynamic_boost_active():
+                    return self._start_nvidia_powerd()
+            return True
+
+        # 2. AMD SmartShift automation
+        if self._vendor == "amd":
+            if not self._device:
+                return True
+            bias_path = self._device / "smartshift_bias"
+            if bias_path.exists() and os.access(str(bias_path), os.W_OK):
+                # 3 (Gaming) -> 100, 2 (Performance) -> 50, 1 (Balanced) -> 0, 0 (Quiet) -> -50
+                bias_val = {3: 100, 2: 50, 1: 0, 0: -50}.get(fan_profile_id, 0)
+                try:
+                    bias_path.write_text(f"{bias_val}\n")
+                    return True
+                except (OSError, IOError):
+                    return False
+            return True
+
+        return True
+
 
 # Global helper instance
 _monitor = NvidiaGpuMonitor()
@@ -186,3 +379,19 @@ def gpu_icon_key(state: GpuState) -> str:
 def get_gpu_state() -> GpuState:
     """Read the current discrete GPU power state (sysfs only, never wakes it)."""
     return _monitor.read_state()
+
+
+def sync_gpu_power(fan_profile_id: int) -> bool:
+    """Synchronize GPU power features (Dynamic Boost / SmartShift) with the profile.
+
+    Args:
+        fan_profile_id: 0 (Quiet), 1 (Balanced), 2 (Performance), 3 (Gaming)
+
+    Returns:
+        True on success or if no action required; False on failure.
+        Never raises exceptions (graceful degradation).
+    """
+    try:
+        return _monitor.sync_power(fan_profile_id)
+    except Exception:
+        return False
