@@ -34,7 +34,7 @@ def test_main_window_creation(qapp):
 
     win = MainWindow()
     assert win.windowTitle() == "GigaMate Center"
-    assert win.stack.count() == 3
+    assert win.stack.count() == 4
 
     # Check navigation switches pages
     win.btn_battery.click()
@@ -42,6 +42,9 @@ def test_main_window_creation(qapp):
 
     win.btn_rgb.click()
     assert win.stack.currentIndex() == 2
+
+    win.btn_settings.click()
+    assert win.stack.currentIndex() == 3
 
     win.btn_dashboard.click()
     assert win.stack.currentIndex() == 0
@@ -321,6 +324,40 @@ def test_tray_save_config_preserves_memory_keys():
             # Must preserve the charge limit set in memory (65), not revert to 80
             assert saved["charge_limit"] == 65
             assert saved["acpi_profile"] == 2
+
+
+def test_settings_page(qapp):
+    from gigamate.ui.pages.settings_page import SettingsPage
+    from gigamate.config import load as load_config, save as save_config
+
+    page = SettingsPage()
+    assert page.chk_startup_apply is not None
+    assert page.chk_sync_power is not None
+
+    # Test toggling startup apply
+    page.chk_startup_apply.setChecked(False)
+    assert load_config()["startup_apply"] is False
+
+    page.chk_startup_apply.setChecked(True)
+    assert load_config()["startup_apply"] is True
+
+    # Test toggling sync power
+    page.chk_sync_power.setChecked(False)
+    assert load_config()["sync_system_power"] is False
+
+    page.chk_sync_power.setChecked(True)
+    assert load_config()["sync_system_power"] is True
+
+    # Test external config reload
+    cfg = load_config()
+    cfg["startup_apply"] = False
+    cfg["sync_system_power"] = False
+    save_config(cfg)
+
+    page.reload_from_config()
+    assert page.chk_startup_apply.isChecked() is False
+    assert page.chk_sync_power.isChecked() is False
+
 
 
 

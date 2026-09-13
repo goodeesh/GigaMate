@@ -196,12 +196,6 @@ class RgbPage(QWidget):
         idle_row.addStretch()
         o_layout.addLayout(idle_row)
 
-        # Startup Integration Checkbox
-        self.chk_startup_apply = QCheckBox("Apply RGB and profile settings automatically on login / startup")
-        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
-        self.chk_startup_apply.toggled.connect(self._on_startup_apply_changed)
-        o_layout.addWidget(self.chk_startup_apply)
-
         layout.addWidget(opts_card)
         layout.addStretch()
 
@@ -233,10 +227,6 @@ class RgbPage(QWidget):
         else:
             self.cfg["idle_off_enabled"] = True
             self.cfg["idle_timeout_sec"] = sec
-        save_config(self.cfg)
-
-    def _on_startup_apply_changed(self, checked: bool) -> None:
-        self.cfg["startup_apply"] = checked
         save_config(self.cfg)
 
     def _apply_hardware(self) -> None:
@@ -340,8 +330,3 @@ class RgbPage(QWidget):
                 self.idle_combo.setCurrentIndex(i)
                 break
         self.idle_combo.blockSignals(False)
-
-        # Update Startup Apply
-        self.chk_startup_apply.blockSignals(True)
-        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
-        self.chk_startup_apply.blockSignals(False)
