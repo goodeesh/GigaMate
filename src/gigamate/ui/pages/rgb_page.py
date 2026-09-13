@@ -1,7 +1,8 @@
 """GigaMate Center — Keyboard RGB Lighting & Effects Page."""
 
 from typing import Optional
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -15,6 +16,19 @@ from PyQt6.QtWidgets import (
 
 from ...config import DEFAULT_CONFIG, load as load_config, resolve_active_profile, save as save_config
 from ...protocol import COLOUR_MAP, get_keyboard, set_off, set_static
+
+
+def make_color_swatch_icon(hex_color: str, size: int = 14) -> QIcon:
+    """Generate a crisp circular antialiased color swatch icon."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(hex_color))
+    painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+    painter.drawEllipse(1, 1, size - 2, size - 2)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class RgbPage(QWidget):
@@ -34,11 +48,22 @@ class RgbPage(QWidget):
         colour_card = QFrame()
         colour_card.setProperty("class", "Card")
         c_layout = QVBoxLayout(colour_card)
-        c_layout.setSpacing(12)
+        c_layout.setSpacing(14)
 
+        # Header with Title and Active Badge
+        c_header = QHBoxLayout()
         c_title = QLabel("Keyboard Backlight Colour")
         c_title.setProperty("class", "CardTitle")
-        c_layout.addWidget(c_title)
+        c_header.addWidget(c_title)
+        c_header.addStretch()
+
+        self.active_color_badge = QLabel("")
+        self.active_color_badge.setStyleSheet(
+            "font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 12px; "
+            "background-color: #171b25; border: 1px solid #364157;"
+        )
+        c_header.addWidget(self.active_color_badge)
+        c_layout.addLayout(c_header)
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -54,14 +79,16 @@ class RgbPage(QWidget):
             ("Pure White", "white", "#f7fafc"),
         ]
 
-        self._palette_colors = {}
+        self._palette_info = {}
         self.color_buttons = {}
         for idx, (label, col_key, hex_color) in enumerate(palette):
-            self._palette_colors[col_key] = hex_color
-            btn = QPushButton(f"●  {label}")
+            self._palette_info[col_key] = (label, hex_color)
+            btn = QPushButton(f"  {label}")
+            btn.setIcon(make_color_swatch_icon(hex_color, 14))
+            btn.setIconSize(QSize(14, 14))
             btn.setProperty("class", "ColorPaletteBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(42)
+            btn.setMinimumHeight(44)
             btn.clicked.connect(lambda _, c=col_key: self._set_colour(c))
             self.color_buttons[col_key] = btn
             grid.addWidget(btn, idx // 4, idx % 4)
@@ -168,29 +195,38 @@ class RgbPage(QWidget):
 
     def _highlight_active(self) -> None:
         active_col = self.cfg.get("colour", "light_purple")
+        active_label, active_hex = self._palette_info.get(active_col, (active_col.capitalize(), "#b794f4"))
+
+        # Update Header Badge
+        self.active_color_badge.setText(f"Active: {active_label}")
+        self.active_color_badge.setStyleSheet(
+            f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+            f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
+        )
+
         for col_key, btn in self.color_buttons.items():
-            hex_color = self._palette_colors.get(col_key, "#ffffff")
+            label, hex_color = self._palette_info.get(col_key, (col_key, "#ffffff"))
             if col_key == active_col:
+                btn.setText(f"  {label}   ✓")
                 btn.setStyleSheet(
-                    f"background-color: #2b3345; "
-                    f"border: 2px solid #ff6b35; "
-                    f"border-left: 6px solid {hex_color}; "
+                    f"background-color: #242c3d; "
+                    f"border: 2px solid {hex_color}; "
                     f"color: #ffffff; "
                     f"font-weight: 700; "
                     f"border-radius: 8px; "
-                    f"text-align: left; "
-                    f"padding-left: 14px;"
+                    f"padding: 8px 14px; "
+                    f"text-align: left;"
                 )
             else:
+                btn.setText(f"  {label}")
                 btn.setStyleSheet(
-                    f"background-color: #202634; "
-                    f"border: 1px solid #333d52; "
-                    f"border-left: 5px solid {hex_color}; "
-                    f"color: #f7fafc; "
+                    f"background-color: #1c212d; "
+                    f"border: 1px solid #2f3a4e; "
+                    f"color: #cbd5e0; "
                     f"font-weight: 500; "
                     f"border-radius: 8px; "
-                    f"text-align: left; "
-                    f"padding-left: 14px;"
+                    f"padding: 8px 14px; "
+                    f"text-align: left;"
                 )
 
         b_level = self.cfg.get("brightness", 2)
