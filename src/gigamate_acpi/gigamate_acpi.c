@@ -210,9 +210,20 @@ static struct device_attribute dev_attr_profile_writable = {
 static ssize_t charge_limit_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
-	int val = acpi_wmbc_read(0x65);
-	if (val > 0 && val <= 100)
-		current_charge_limit = val;
+	int policy = acpi_wmbc_read(0x64);
+	int stop = acpi_wmbc_read(0x65);
+
+	/* If policy query succeeded and is 0 (Standard), charge limit is 100% */
+	if (policy == 0) {
+		current_charge_limit = 100;
+		return sysfs_emit(buf, "100\n");
+	}
+
+	/* If custom stop percentage is valid (40..100) */
+	if (stop >= 40 && stop <= 100) {
+		current_charge_limit = stop;
+		return sysfs_emit(buf, "%d\n", current_charge_limit);
+	}
 
 	if (current_charge_limit > 0 && current_charge_limit <= 100)
 		return sysfs_emit(buf, "%d\n", current_charge_limit);
@@ -225,15 +236,16 @@ static ssize_t charge_limit_store(struct device *dev,
 				  const char *buf, size_t count)
 {
 	unsigned long val;
-	int ret;
+	int ret1, ret2;
 
-	ret = kstrtoul(buf, 10, &val);
-	if (ret)
+	ret1 = kstrtoul(buf, 10, &val);
+	if (ret1)
 		return -EINVAL;
 
 	/* Accept 40..100 (0 or 100 sets standard 100% full charge) */
 	if (val == 0 || val == 100) {
 		/* Standard policy: 0x64 = 0 (Standard), 0x65 = 100 */
+		pr_info(DRIVER_NAME ": Setting standard charging policy (100%%)\n");
 		acpi_wmbd_write(0x64, 0);
 		acpi_wmbd_write(0x65, 100);
 		current_charge_limit = 100;
@@ -244,13 +256,14 @@ static ssize_t charge_limit_store(struct device *dev,
 		return -EINVAL;
 
 	/* Custom policy: 0x64 = 4 (Custom), 0x65 = target percentage */
-	ret = acpi_wmbd_write(0x64, 4);
-	if (ret < 0)
-		return ret;
+	pr_info(DRIVER_NAME ": Setting custom charge limit: %lu%%\n", val);
+	ret1 = acpi_wmbd_write(0x64, 4);
+	ret2 = acpi_wmbd_write(0x65, val);
 
-	ret = acpi_wmbd_write(0x65, val);
-	if (ret < 0)
-		return ret;
+	if (ret1 < 0 && ret2 < 0) {
+		pr_err(DRIVER_NAME ": Failed to set charge limit (policy=%d, stop=%d)\n", ret1, ret2);
+		return -EIO;
+	}
 
 	current_charge_limit = (int)val;
 	return count;
