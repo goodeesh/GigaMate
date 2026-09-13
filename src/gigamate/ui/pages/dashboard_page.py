@@ -223,7 +223,7 @@ class DashboardPage(QWidget):
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
                 gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
-                    gpu_sub.setText("0W • D3cold")
+                    gpu_sub.setText("0W")
             else:
                 gpu_lbl.setText(f"Active ({gpu.power_state or 'D0'})")
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
