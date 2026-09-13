@@ -4,7 +4,10 @@ import pytest
 # Ensure headless Qt execution in tests
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from PyQt6.QtWidgets import QApplication
+try:
+    from PyQt6.QtWidgets import QApplication
+except (ImportError, OSError) as exc:
+    pytest.skip(f"PyQt6/libEGL not available in this test environment: {exc}", allow_module_level=True)
 
 # Ensure QApplication singleton for test suite
 @pytest.fixture(scope="session")
