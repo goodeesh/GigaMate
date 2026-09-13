@@ -18,7 +18,6 @@ from typing import Callable, Optional
 
 from .battery import get_battery_manager
 from .config import load as load_config, resolve_active_profile
-from .power_automation import get_power_automation_engine
 from .protocol import get_keyboard, set_off, set_static
 from .gpu import sync_gpu_power
 
@@ -132,12 +131,7 @@ class SleepHandler:
             time.sleep(0.5)
 
             try:
-                # 1. Re-evaluate AC power and auto-profile
-                auto_engine = get_power_automation_engine()
-                is_ac = auto_engine.battery_mgr.is_ac_online()
-                auto_engine.on_power_changed(is_ac)
-
-                # 2. Restore RGB lighting
+                # 1. Restore RGB lighting
                 cfg = load_config()
                 dev = get_keyboard()
                 if dev is not None:
@@ -149,11 +143,11 @@ class SleepHandler:
                     else:
                         set_static(dev, colour, brightness, profile)
 
-                # 3. Sync discrete GPU dynamic boost if active
+                # 2. Sync discrete GPU dynamic boost if active
                 acpi_profile = cfg.get("acpi_profile", 1)
                 sync_gpu_power(acpi_profile)
 
-                # 4. Re-enforce battery charge limit (embedded controllers often reset limit on wake)
+                # 3. Re-enforce battery charge limit (embedded controllers often reset limit on wake)
                 if cfg.get("charge_limit_enabled", False):
                     limit = cfg.get("charge_limit")
                     if limit:

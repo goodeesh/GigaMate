@@ -35,16 +35,11 @@ def test_sleep_handler_resume():
     handler = SleepHandler(on_resume_hook=on_resume)
 
     with patch("gigamate.sleep_handler.time.sleep"), \
-         patch("gigamate.sleep_handler.get_power_automation_engine") as mock_get_engine, \
          patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
          patch("gigamate.sleep_handler.set_static") as mock_set_static, \
          patch("gigamate.sleep_handler.resolve_active_profile"), \
          patch("gigamate.sleep_handler.sync_gpu_power") as mock_sync_gpu, \
          patch("gigamate.sleep_handler.load_config", return_value={"brightness": 2, "colour": "red", "acpi_profile": 3}):
-
-        mock_engine = MagicMock()
-        mock_engine.battery_mgr.is_ac_online.return_value = True
-        mock_get_engine.return_value = mock_engine
 
         mock_dev = MagicMock()
         mock_get_kb.return_value = mock_dev
@@ -52,6 +47,5 @@ def test_sleep_handler_resume():
         handler.on_prepare_for_sleep(going_to_sleep=False)
 
         assert resume_called is True
-        mock_engine.on_power_changed.assert_called_with(True)
         mock_set_static.assert_called_once()
         mock_sync_gpu.assert_called_with(3)

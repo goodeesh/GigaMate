@@ -51,7 +51,6 @@ from .gpu import get_gpu_state, gpu_short_status_text
 import subprocess
 from .battery import get_battery_manager
 from .gpu_guard import get_dgpu_guard
-from .power_automation import get_power_automation_engine
 from .sleep_handler import get_sleep_handler
 from . import updates as update_checker
 
@@ -967,11 +966,6 @@ class GigaMateTrayApp:
         if gpu.present:
             parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
 
-        # Power Automation poll
-        try:
-            get_power_automation_engine().poll()
-        except Exception:
-            pass
 
         # Battery status
         try:

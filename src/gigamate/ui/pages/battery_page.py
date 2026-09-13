@@ -1,9 +1,8 @@
-"""GigaMate Center — Battery Care & Power Automation Page."""
+"""GigaMate Center — Battery Care & Health Page."""
 
 from typing import Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -16,11 +15,10 @@ from PyQt6.QtWidgets import (
 
 from ...battery import BatteryManager, get_battery_manager
 from ...config import load as load_config, save as save_config
-from ...power_automation import get_power_automation_engine
 
 
 class BatteryPage(QWidget):
-    """Battery health diagnostics, 80% charge threshold limiter, and automation rules."""
+    """Battery health diagnostics and charge threshold limiter."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -129,36 +127,10 @@ class BatteryPage(QWidget):
         c_layout.addWidget(self.limit_status_label)
         layout.addWidget(care_card)
 
-        # ── Power Automation Rules Card ──
-        auto_card = QFrame()
-        auto_card.setProperty("class", "Card")
-        a_layout = QVBoxLayout(auto_card)
-        a_layout.setSpacing(12)
-
-        a_title = QLabel("Smart Power Automation Rules")
-        a_title.setProperty("class", "CardTitle")
-        a_layout.addWidget(a_title)
-
-        cfg = load_config()
-        self.chk_auto_profile = QCheckBox("Auto-switch to Quiet mode on battery / Balanced on AC")
-        self.chk_auto_profile.setChecked(cfg.get("power_automation_enabled", True))
-        self.chk_auto_profile.toggled.connect(self._save_automation_settings)
-        a_layout.addWidget(self.chk_auto_profile)
-
-        self.chk_auto_refresh = QCheckBox("Auto-switch internal display to 60Hz on battery / Max Hz on AC")
-        self.chk_auto_refresh.setChecked(cfg.get("display_refresh_auto", True))
-        self.chk_auto_refresh.toggled.connect(self._save_automation_settings)
-        a_layout.addWidget(self.chk_auto_refresh)
-
-        self.chk_auto_rgb = QCheckBox("Automatically dim keyboard RGB when running on battery")
-        self.chk_auto_rgb.setChecked(cfg.get("battery_rgb_dim", True))
-        self.chk_auto_rgb.toggled.connect(self._save_automation_settings)
-        a_layout.addWidget(self.chk_auto_rgb)
-
-        layout.addWidget(auto_card)
         layout.addStretch()
 
         # Initial load
+        cfg = load_config()
         active_limit = self.battery_mgr.get_charge_limit() or cfg.get("charge_limit", 80)
         self._set_slider_value(active_limit)
         self._refresh_battery_data()
@@ -187,13 +159,6 @@ class BatteryPage(QWidget):
         except Exception as exc:
             self.limit_status_label.setText(f"Error: {exc}")
             self.limit_status_label.setStyleSheet("color: #e53e3e; font-size: 12px;")
-
-    def _save_automation_settings(self) -> None:
-        cfg = load_config()
-        cfg["power_automation_enabled"] = self.chk_auto_profile.isChecked()
-        cfg["display_refresh_auto"] = self.chk_auto_refresh.isChecked()
-        cfg["battery_rgb_dim"] = self.chk_auto_rgb.isChecked()
-        save_config(cfg)
 
     def _refresh_battery_data(self) -> None:
         info = self.battery_mgr.get_battery_info()
