@@ -76,11 +76,6 @@ class DashboardPage(QWidget):
             btn_layout.addWidget(btn)
 
         prof_layout.addLayout(btn_layout)
-
-        # Dynamic Boost status banner
-        self.boost_label = QLabel("GPU Boost: Checking...")
-        self.boost_label.setStyleSheet("color: #a0aec0; font-size: 12px; margin-top: 6px;")
-        prof_layout.addWidget(self.boost_label)
         layout.addWidget(prof_card)
 
         # ── Live Telemetry Cards ──
@@ -229,23 +224,6 @@ class DashboardPage(QWidget):
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
                     gpu_sub.setText("High Performance")
-
-        # Dynamic Boost / GPU Power telemetry
-        if not gpu.present:
-            self.boost_label.setText("⚡ Discrete GPU: Not Present (Integrated graphics only)")
-        elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
-            self.boost_label.setText(f"⚡ Discrete GPU: Asleep in {gpu.power_state or 'D3cold'} (0W)")
-        elif gpu.vendor == "nvidia":
-            if gpu.dynamic_boost_supported:
-                status_str = "Active (Dynamic Boost up to ~80W)" if gpu.dynamic_boost_active else "Standby (nvidia-powerd)"
-                self.boost_label.setText(f"⚡ NVIDIA Dynamic Boost: {status_str}")
-            else:
-                self.boost_label.setText(f"⚡ NVIDIA Discrete GPU: Active ({gpu.power_state or 'D0'})")
-        elif gpu.vendor == "amd":
-            bias = f"Bias {gpu.smartshift_bias}" if gpu.smartshift_bias is not None else "Enabled"
-            self.boost_label.setText(f"⚡ AMD SmartShift: {bias}")
-        else:
-            self.boost_label.setText(f"⚡ Discrete GPU: Active ({gpu.power_state or 'D0'})")
 
         # Update profile buttons state
         if current_prof_id is None:
