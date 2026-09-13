@@ -107,3 +107,33 @@ def test_battery_missing(tmp_path: Path):
     assert mgr.is_available is False
     info = mgr.get_battery_info()
     assert info.present is False
+
+
+def test_battery_without_present_attribute(tmp_path: Path):
+    """Some batteries omit the `present` file entirely; treat them as present."""
+    psy = tmp_path / "power_supply"
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "capacity").write_text("72\n")
+    (bat / "status").write_text("Charging\n")
+    # Note: no `present` file
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.is_available is True
+    info = mgr.get_battery_info()
+    assert info.present is True
+    assert info.capacity == 72
+
+
+def test_battery_marked_absent(tmp_path: Path):
+    """An explicit `present=0` must still report the battery as unavailable."""
+    psy = tmp_path / "power_supply"
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "present").write_text("0\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.is_available is False
+    assert mgr.get_battery_info().present is False

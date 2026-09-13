@@ -5,9 +5,8 @@ Subscribes to systemd-logind's PrepareForSleep D-Bus signal:
   - Gracefully turns off keyboard RGB lighting to prevent stuck LEDs.
   - Pauses idle timer threads.
 - After Resume (going_to_sleep=False):
-  - Re-evaluates AC vs Battery state (in case charger was removed during sleep).
-  - Enforces appropriate profile (Quiet on Battery, Balanced on AC).
-  - Restores keyboard RGB to configured brightness and colour.
+  - Re-applies the user's saved profile, RGB colour/brightness and battery
+    charge limit via the unified hardware settings layer.
   - Re-synchronizes dGPU power features (Dynamic Boost / SmartShift).
 """
 
@@ -16,11 +15,9 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .battery import get_battery_manager
-from .config import load as load_config, resolve_active_profile
+from .config import resolve_active_profile
 from .hardware import apply_hardware_settings
-from .protocol import get_keyboard, set_off, set_static
-from .gpu import sync_gpu_power
+from .protocol import get_keyboard, set_off
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +34,7 @@ class SleepHandler:
         self._on_resume_hook = on_resume_hook
         self._listening = False
         self._listener_thread: Optional[threading.Thread] = None
+        self._loop = None
 
     def start_listening(self) -> bool:
         """Start listening for PrepareForSleep signals in background thread."""
@@ -62,42 +60,73 @@ class SleepHandler:
         self._listener_thread.start()
         return True
 
+    def stop_listening(self) -> None:
+        """Quit the D-Bus main loop and join the listener thread (best effort)."""
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.quit()
+            except Exception:
+                pass
+
+        thread = self._listener_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+        self._listener_thread = None
+        self._loop = None
+        self._listening = False
+
     def _run_dbus_listener(self) -> None:
         """Background loop subscribing to org.freedesktop.login1 PrepareForSleep."""
         try:
             from gi.repository import Gio, GLib
 
-            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
-            bus.signal_subscribe(
-                "org.freedesktop.login1",
-                "org.freedesktop.login1.Manager",
-                "PrepareForSleep",
-                "/org/freedesktop/login1",
-                None,
-                Gio.DBusSignalFlags.NONE,
-                self._on_gio_signal,
-                None,
-            )
-            loop = GLib.MainLoop()
-            loop.run()
+            # Use a dedicated main context owned by this thread instead of the
+            # process-wide default context (which belongs to the GUI thread).
+            context = GLib.MainContext.new()
+            context.push_thread_default()
+            try:
+                loop = GLib.MainLoop.new(context, False)
+                self._loop = loop
+                bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+                bus.signal_subscribe(
+                    "org.freedesktop.login1",
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForSleep",
+                    "/org/freedesktop/login1",
+                    None,
+                    Gio.DBusSignalFlags.NONE,
+                    self._on_gio_signal,
+                    None,
+                )
+                loop.run()
+            finally:
+                context.pop_thread_default()
+                self._loop = None
+            return
         except Exception as exc:
             logger.debug(f"Gio sleep listener failed ({exc}), trying dbus-python...")
-            try:
-                import dbus
-                from dbus.mainloop.glib import DBusGMainLoop
-                from gi.repository import GLib
 
-                DBusGMainLoop(set_as_default=True)
-                system_bus = dbus.SystemBus()
-                system_bus.add_signal_receiver(
-                    self.on_prepare_for_sleep,
-                    signal_name="PrepareForSleep",
-                    dbus_interface="org.freedesktop.login1.Manager",
-                )
-                loop = GLib.MainLoop()
-                loop.run()
-            except Exception as e2:
-                logger.warning(f"Could not establish D-Bus sleep listener: {e2}")
+        try:
+            import dbus
+            from dbus.mainloop.glib import DBusGMainLoop
+            from gi.repository import GLib
+
+            DBusGMainLoop(set_as_default=True)
+            system_bus = dbus.SystemBus()
+            system_bus.add_signal_receiver(
+                self.on_prepare_for_sleep,
+                signal_name="PrepareForSleep",
+                dbus_interface="org.freedesktop.login1.Manager",
+            )
+            loop = GLib.MainLoop()
+            self._loop = loop
+            loop.run()
+        except Exception as e2:
+            logger.warning(f"Could not establish D-Bus sleep listener: {e2}")
+        finally:
+            self._loop = None
 
     def _on_gio_signal(self, connection, sender_name, object_path, interface_name, signal_name, parameters, user_data) -> None:
         """Gio signal callback unpacker."""
@@ -135,32 +164,6 @@ class SleepHandler:
                 apply_hardware_settings()
             except Exception as exc:
                 logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
-
-            try:
-                # Direct hook compatibility for tests & listeners
-                cfg = load_config()
-                dev = get_keyboard()
-                if dev is not None:
-                    profile = resolve_active_profile()
-                    brightness = cfg.get("brightness", 2)
-                    colour = cfg.get("colour", "light_purple")
-                    if brightness == 0:
-                        set_off(dev, profile)
-                    else:
-                        set_static(dev, colour, brightness, profile)
-
-                acpi_profile = cfg.get("acpi_profile", 1)
-                sync_gpu_power(acpi_profile)
-
-                if cfg.get("charge_limit_enabled", True):
-                    limit = cfg.get("charge_limit", 80)
-                    if limit:
-                        battery_mgr = get_battery_manager()
-                        if battery_mgr.is_charge_limit_supported():
-                            battery_mgr.set_charge_limit(limit)
-
-            except Exception as exc:
-                logger.warning(f"Could not restore state on resume: {exc}")
 
             if self._on_resume_hook:
                 try:

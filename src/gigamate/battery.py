@@ -102,7 +102,19 @@ class BatteryManager:
     @property
     def is_available(self) -> bool:
         """Whether a battery is detected on this system."""
-        return self._battery_path is not None and (self._battery_path / "present").exists()
+        if self._battery_path is None:
+            return False
+
+        present_file = self._battery_path / "present"
+        if present_file.exists():
+            try:
+                return present_file.read_text().strip() != "0"
+            except (OSError, PermissionError):
+                pass
+
+        # Some batteries omit the `present` attribute; the discovered device
+        # directory itself is sufficient evidence that a battery exists.
+        return True
 
     def is_ac_online(self) -> bool:
         """Returns True if AC adapter is connected and delivering power."""

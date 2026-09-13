@@ -106,3 +106,12 @@ def test_config_backup_recovery_on_corrupt_file(isolated_config, monkeypatch):
     assert recovered["colour"] == "red"
     assert recovered["brightness"] == 1
 
+
+def test_all_default_config_keys_roundtrip(isolated_config):
+    """Guard against save() silently dropping a known DEFAULT_CONFIG key."""
+    config_module.save(dict(config_module.DEFAULT_CONFIG))
+    loaded = config_module.load()
+    for key, expected in config_module.DEFAULT_CONFIG.items():
+        assert key in loaded, f"key '{key}' was dropped by save()/load()"
+        assert loaded[key] == expected, f"key '{key}' changed: {loaded[key]!r} != {expected!r}"
+

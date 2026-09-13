@@ -1,4 +1,5 @@
 import fcntl
+import logging
 import os
 import socket as py_socket
 import subprocess
@@ -25,9 +26,11 @@ from .pages.dashboard_page import DashboardPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import DARK_THEME
-from ..capabilities import detect_system_capabilities
+from ..capabilities import detect_system_capabilities, invalidate_capabilities
 from ..config import CONFIG_FILE
 from ..paths import ICON_PATHS
+
+logger = logging.getLogger(__name__)
 
 
 def get_runtime_ipc_paths() -> Tuple[str, str]:
@@ -106,8 +109,8 @@ class MainWindow(QMainWindow):
         try:
             from ..hardware import apply_hardware_settings
             apply_hardware_settings()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Could not apply saved hardware settings on launch: {exc}")
 
         self._last_config_mtime = self._get_config_mtime()
         self.config_timer = QTimer(self)
@@ -197,7 +200,8 @@ class MainWindow(QMainWindow):
                 sys_name = sys_caps.product_name
             else:
                 sys_name = f"{sys_caps.product_name} · Generic Device"
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"Capability probe for sidebar footer failed: {exc}")
             sys_name = "Standard PC"
 
         sys_lbl = QLabel(sys_name)
@@ -253,6 +257,9 @@ class MainWindow(QMainWindow):
     def sync_all_from_config(self) -> None:
         """Reload and update all pages from on-disk configuration."""
         self._last_config_mtime = self._get_config_mtime()
+        # Re-probe hardware on window activation/config change so capability
+        # notices reflect hot-plugged keyboards or a newly loaded driver.
+        invalidate_capabilities()
         if hasattr(self, "page_rgb"):
             self.page_rgb.reload_from_config()
         if hasattr(self, "page_dashboard"):
@@ -297,8 +304,8 @@ def ensure_tray_running() -> None:
         )
         if res_after.stdout.strip() == "active":
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"systemd gigamate.service status check failed: {exc}")
 
     # 2. Fallback: check if tray process is running via pgrep
     try:
@@ -315,8 +322,8 @@ def ensure_tray_running() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"Could not spawn tray daemon: {exc}")
 
 
 def run_gui() -> None:
@@ -339,8 +346,8 @@ def run_gui() -> None:
                 s.settimeout(1.5)
                 s.connect(IPC_SOCKET_PATH)
                 s.sendall(b"ACTIVATE\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Could not signal existing instance: {exc}")
         sys.exit(0)
 
     app = QApplication.instance()

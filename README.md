@@ -19,6 +19,9 @@ Known risks:
 - Certain animated keyboard effects can hang the keyboard firmware
   (requires USB reset to recover). Only `static` mode is safe.
 - ACPI profile switching adjusts CPU/GPU power limits.
+- To allow control without root, the kernel module exposes `profile` and
+  `charge_limit` (and the udev rules expose the keyboard) as world-writable
+  (`0666`). Any local user on the machine can therefore change these settings.
 
 Tested on specific Gigabyte models only. Other models may behave differently.
 
@@ -38,9 +41,8 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 
 - **🖥️ GigaMate Center** — Dedicated desktop control panel (PyQt6) engineered for KDE Plasma, GNOME, and Hyprland
 - **🔋 Battery Care & Limiter** — Set max 80% (or custom) charge limit to protect battery longevity; health & cycle monitoring
-- **⚡ Smart Power Automation** — Auto-switch profiles (Quiet on battery / Balanced on AC) and internal display refresh rate (165Hz ⇄ 60Hz)
-- **🛡️ dGPU Sleep Guard** — Zero-wake virtual RAM inspection of processes holding open discrete GPU devices; one-click sleep enforcement
-- **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile and state on resume
+- **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile, RGB and battery limit on resume
+- **🔁 Persistent Settings** — Fan profile, RGB and charge limit are safely re-applied on login, app launch and resume
 - **⌨️ Keyboard RGB & Idle Sleep** — Set colours, brightness, and configurable idle auto-dimming from tray, GUI, or CLI
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
@@ -67,7 +69,7 @@ GigaMate Center...
 Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
 Battery: 85% (AC)  [x] Battery Care (Cap at 80%)
-dGPU: Asleep (D3cold)  /  Active (Enforce Sleep)
+dGPU: Asleep (D3cold)
 Colour & Brightness
 ```
 
@@ -77,8 +79,6 @@ Colour & Brightness
 gigamate center                  # Launch modern GUI Control Panel
 gigamate battery                 # Show battery status, health, and limit
 gigamate battery --limit 80      # Set maximum battery charge limit to 80%
-gigamate gpu-guard               # Inspect processes keeping discrete GPU awake
-gigamate gpu-guard --sleep       # Terminate background leeches and sleep dGPU
 gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
 gigamate status                  # Full hardware status
@@ -192,7 +192,7 @@ GigaMate/
 ├── src/gigamate_acpi/        # Kernel module source
 ├── data/                     # Service, udev, icon, desktop
 ├── docs/                     # Research notes + profile schema
-├── tests/                    # 100+ unit tests
+├── tests/                    # 240+ unit tests
 ├── install.sh / uninstall.sh
 ├── README.md / CONTRIBUTING.md
 └── pyproject.toml / LICENSE

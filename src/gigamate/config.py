@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
 
 from .paths import CONFIG_DIR
 from .profiles import detect_device, resolve_profile
+
+logger = logging.getLogger(__name__)
 
 CONFIG_FILE = CONFIG_DIR / "config.json"
 _CONFIG_BAK_FILE = CONFIG_DIR / "config.json.bak"
@@ -182,6 +185,12 @@ def save(config):
                 safe["acpi_profile"] = acpi_profile
         except (ValueError, TypeError):
             pass
+
+    # `save()` intentionally persists only known, validated keys. Surface any
+    # unknown keys so newly added settings are not silently dropped.
+    dropped = sorted(set(config) - set(safe) - {"acpi_profile"})
+    if dropped:
+        logger.debug("config.save() ignored unknown keys: %s", ", ".join(dropped))
 
     # Atomic write with backup fallback
     tmp_file = CONFIG_DIR / f"config.json.tmp.{os.getpid()}"

@@ -981,45 +981,6 @@ def cmd_battery(args) -> None:
         print("  Charge Limit:   Unsupported by current kernel/firmware")
 
 
-def cmd_gpu_guard(args) -> None:
-    """Inspect processes keeping discrete GPU awake or enforce sleep."""
-    from .gpu_guard import get_dgpu_guard
-    guard = get_dgpu_guard()
-
-    if getattr(args, "sleep", False) or getattr(args, "kill", False):
-        print("Enforcing dGPU sleep: terminating non-protected leech processes...")
-        results = guard.terminate_all_leeches(force=bool(getattr(args, "force", False)))
-        if not results:
-            print("No non-protected background leeches were active.")
-        else:
-            for pid, comm, success in results:
-                status_str = "terminated" if success else "failed"
-                print(f"  - [{comm}] PID {pid}: {status_str}")
-        guard.request_gpu_sleep()
-        print("Requested runtime suspend from kernel.")
-        return
-
-    status = guard.inspect(force_scan=True)
-    if not status.present:
-        print("No discrete GPU detected.")
-        return
-
-    state_str = f"Awake ({status.power_state or 'D0'})" if status.is_awake else f"Asleep ({status.power_state or 'D3cold'})"
-    print(f"dGPU Status:      {state_str}")
-    print(f"Active Processes: {len(status.processes)} ({status.leech_count} background leeches, {status.protected_count} protected)\n")
-
-    if not status.processes:
-        print("No processes currently hold open handles to the dGPU.")
-        return
-
-    print(f"{'PID':<8} {'TYPE':<22} {'PROCESS':<20} {'OPEN DEVICES'}")
-    print("-" * 75)
-    for p in status.processes:
-        cat = "Protected (Session)" if p.is_protected else ("Leech (Background)" if p.is_leech else "Client")
-        devs = ", ".join(p.open_devices)
-        print(f"{p.pid:<8} {cat:<22} {p.comm:<20} {devs}")
-
-
 def _subcommand_main() -> None:
     """New subcommand-based parser (gigamate <subcommand> ...)."""
     parser = argparse.ArgumentParser(
@@ -1139,16 +1100,6 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     battery_parser.add_argument("--status", action="store_true",
                                 help="Show detailed battery status")
 
-    # --- gpu-guard subcommand ---
-    guard_parser = sub.add_parser("gpu-guard", aliases=["guard"],
-                                  help="dGPU Sleep Guard and process inspector")
-    guard_parser.add_argument("--sleep", "-s", action="store_true",
-                              help="Enforce sleep by terminating background leeches")
-    guard_parser.add_argument("--kill", "-k", action="store_true",
-                              help="Alias for --sleep")
-    guard_parser.add_argument("--force", "-f", action="store_true",
-                              help="Force terminate (SIGKILL) instead of SIGTERM")
-
     # --- center / gui subcommand ---
     sub.add_parser("center", aliases=["gui"], help="Open GigaMate Center GUI")
 
@@ -1178,8 +1129,6 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         cmd_update(args)
     elif args.command == "battery":
         cmd_battery(args)
-    elif args.command in ("gpu-guard", "guard"):
-        cmd_gpu_guard(args)
     elif args.command in ("center", "gui"):
         cmd_center(args)
     elif args.command == "tray":

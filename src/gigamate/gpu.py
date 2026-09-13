@@ -381,11 +381,6 @@ def get_gpu_state() -> GpuState:
     return _monitor.read_state()
 
 
-def get_gpu_monitor() -> NvidiaGpuMonitor:
-    """Get the default discrete GPU monitor instance."""
-    return _monitor
-
-
 def sync_gpu_power(fan_profile_id: int) -> bool:
     """Synchronize GPU power features (Dynamic Boost / SmartShift) with the profile.
 

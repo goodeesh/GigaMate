@@ -25,7 +25,7 @@ def test_sleep_handler_suspend():
         mock_set_off.assert_called_once()
 
 
-def test_sleep_handler_resume():
+def test_sleep_handler_resume_applies_settings_once():
     resume_called = False
 
     def on_resume():
@@ -35,17 +35,32 @@ def test_sleep_handler_resume():
     handler = SleepHandler(on_resume_hook=on_resume)
 
     with patch("gigamate.sleep_handler.time.sleep"), \
-         patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
-         patch("gigamate.sleep_handler.set_static") as mock_set_static, \
-         patch("gigamate.sleep_handler.resolve_active_profile"), \
-         patch("gigamate.sleep_handler.sync_gpu_power") as mock_sync_gpu, \
-         patch("gigamate.sleep_handler.load_config", return_value={"brightness": 2, "colour": "red", "acpi_profile": 3}):
-
-        mock_dev = MagicMock()
-        mock_get_kb.return_value = mock_dev
-
+         patch("gigamate.sleep_handler.apply_hardware_settings") as mock_apply:
         handler.on_prepare_for_sleep(going_to_sleep=False)
 
         assert resume_called is True
-        mock_set_static.assert_called_once()
-        mock_sync_gpu.assert_called_with(3)
+        mock_apply.assert_called_once()
+
+
+def test_sleep_handler_stop_listening_is_idempotent():
+    handler = SleepHandler()
+
+    # Never started: stopping must be a safe no-op.
+    handler.stop_listening()
+    assert handler._listening is False
+    assert handler._listener_thread is None
+    assert handler._loop is None
+
+
+def test_sleep_handler_start_stop_listening(monkeypatch):
+    handler = SleepHandler()
+    # Avoid opening a real system-bus connection in tests.
+    monkeypatch.setattr(handler, "_run_dbus_listener", lambda: None)
+
+    if not handler.start_listening():
+        pytest.skip("No D-Bus/Gio backend available in this environment")
+
+    assert handler._listening is True
+    handler.stop_listening()
+    assert handler._listening is False
+    assert handler._listener_thread is None

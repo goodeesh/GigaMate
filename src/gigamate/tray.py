@@ -50,7 +50,6 @@ from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
 import subprocess
 from .battery import get_battery_manager
-from .gpu_guard import get_dgpu_guard
 from .sleep_handler import get_sleep_handler
 from .hardware import apply_hardware_settings
 from . import updates as update_checker
@@ -540,31 +539,6 @@ class GigaMateTrayApp:
         except Exception:
             pass
 
-    def _append_gpu_guard_section(self) -> None:
-        """Add dGPU Sleep Guard status and action."""
-        gpu = get_gpu_state()
-        if not gpu.present:
-            return
-
-        guard = get_dgpu_guard()
-        is_awake = (gpu.status == "active" or gpu.power_state in ("D0", "D1", "D2"))
-
-        self._menu.append(Gtk.SeparatorMenuItem())
-        if not is_awake:
-            item = Gtk.MenuItem(label=f"dGPU: Asleep ({gpu.power_state or 'D3cold'})")
-            item.set_sensitive(False)
-            self._menu.append(item)
-        else:
-            item = Gtk.MenuItem(label=f"dGPU: Active ({gpu.power_state or 'D0'}) — Enforce Sleep")
-            item.connect("activate", self._on_enforce_gpu_sleep)
-            self._menu.append(item)
-
-    def _on_enforce_gpu_sleep(self, _widget) -> None:
-        guard = get_dgpu_guard()
-        guard.terminate_all_leeches()
-        guard.request_gpu_sleep()
-        self._update_status()
-
     def _build_no_hardware_menu(self) -> None:
         """Menu when no Gigabyte hardware is detected at all."""
         self._append_center_item()
@@ -572,7 +546,6 @@ class GigaMateTrayApp:
         item.set_sensitive(False)
         self._menu.append(item)
         self._append_battery_section()
-        self._append_gpu_guard_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -591,7 +564,6 @@ class GigaMateTrayApp:
         self._append_status_section()
         self._append_power_profile_section()
         self._append_battery_section()
-        self._append_gpu_guard_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -621,7 +593,6 @@ class GigaMateTrayApp:
             self._append_power_profile_section()
             self._append_status_section()
             self._append_battery_section()
-            self._append_gpu_guard_section()
 
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
@@ -642,9 +613,6 @@ class GigaMateTrayApp:
 
         # ── Battery Care section ──
         self._append_battery_section()
-
-        # ── dGPU Sleep Guard section ──
-        self._append_gpu_guard_section()
 
         # ── Keyboard RGB section ──
         if self._profile is not None and self._profile.has_rgb:

@@ -601,6 +601,36 @@ def test_rgb_page_when_keyboard_uncalibrated(qapp):
         assert "0x8200" in page.uncalibrated_title.text()
 
 
+def test_main_window_construction_does_not_write_hardware(qapp):
+    """Guard against tests mutating real ACPI/USB/battery hardware.
+
+    The shared conftest fixture must keep all hardware side effects inert when
+    the app applies persisted settings on launch.
+    """
+    from gigamate.ui.main_window import MainWindow
+
+    with patch("gigamate.protocol.set_static") as mock_set_static, \
+         patch("gigamate.protocol.set_off") as mock_set_off, \
+         patch("gigamate.battery.BatteryManager.set_charge_limit") as mock_set_charge, \
+         patch("gigamate.acpi.AcpiController.set_profile") as mock_set_profile:
+        MainWindow()
+
+        mock_set_static.assert_not_called()
+        mock_set_off.assert_not_called()
+        mock_set_charge.assert_not_called()
+        mock_set_profile.assert_not_called()
+
+
+def test_sync_all_from_config_invalidates_capabilities(qapp):
+    """Re-probe hardware when the window re-syncs from on-disk config."""
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    with patch("gigamate.ui.main_window.invalidate_capabilities") as mock_invalidate:
+        win.sync_all_from_config()
+        mock_invalidate.assert_called_once()
+
+
 
 
 
