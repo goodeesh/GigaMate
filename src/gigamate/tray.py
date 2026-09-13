@@ -473,8 +473,25 @@ class GigaMateTrayApp:
         self._menu.append(Gtk.SeparatorMenuItem())
 
     def _on_open_center(self, _widget) -> None:
+        runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+        if not runtime_dir.exists():
+            runtime_dir = Path("/tmp")
+        sock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.sock")
+
+        # 1. Try activating existing instance via Unix socket directly (0ms latency, 0 new processes)
         try:
-            subprocess.Popen(["gigamate", "center"])
+            import socket as py_socket
+            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                s.settimeout(0.8)
+                s.connect(sock_path)
+                s.sendall(b"ACTIVATE\n")
+                return
+        except Exception:
+            pass
+
+        # 2. Not running: launch primary instance detached
+        try:
+            subprocess.Popen(["gigamate", "center"], start_new_session=True)
         except Exception:
             pass
 

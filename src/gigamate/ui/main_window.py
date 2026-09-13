@@ -1,9 +1,9 @@
-"""GigaMate Center — Main Application Window."""
-
+import fcntl
 import os
+import socket as py_socket
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -27,19 +27,36 @@ from .styles import DARK_THEME
 from ..config import CONFIG_FILE
 from ..paths import ICON_PATHS
 
-IPC_SOCKET_NAME = f"gigamate-center-{os.getuid()}"
+
+def get_runtime_ipc_paths() -> Tuple[str, str]:
+    """Return persistent, fixed (sock_path, lock_path) in user runtime directory."""
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    if not runtime_dir.exists():
+        runtime_dir = Path("/tmp")
+    sock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.sock")
+    lock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.lock")
+    return sock_path, lock_path
+
+
+IPC_SOCKET_PATH, IPC_LOCK_PATH = get_runtime_ipc_paths()
+IPC_SOCKET_NAME = IPC_SOCKET_PATH  # Backwards compatibility
 
 
 class SingleInstanceServer(QObject):
     """Listens for activation requests from secondary instances."""
 
-    def __init__(self, window: "MainWindow", parent: Optional[QObject] = None) -> None:
+    def __init__(self, window: "MainWindow", sock_path: Optional[str] = None, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self.window = window
+        self.sock_path = sock_path or IPC_SOCKET_PATH
         self.server = QLocalServer(self)
-        QLocalServer.removeServer(IPC_SOCKET_NAME)
+        try:
+            if os.path.exists(self.sock_path):
+                os.unlink(self.sock_path)
+        except OSError:
+            pass
         self.server.newConnection.connect(self._handle_connection)
-        self.server.listen(IPC_SOCKET_NAME)
+        self.server.listen(self.sock_path)
 
     def _handle_connection(self) -> None:
         client = self.server.nextPendingConnection()
@@ -57,11 +74,13 @@ class SingleInstanceServer(QObject):
     def activate_window(self) -> None:
         """Unminimize, raise, and bring the existing window to the front."""
         self.window.sync_all_from_config()
-        if self.window.isMinimized():
-            self.window.showNormal()
-        self.window.show()
-        self.window.raise_()
-        self.window.activateWindow()
+        win = self.window
+        if win.isMinimized():
+            win.showNormal()
+        win.setWindowState((win.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
+        win.show()
+        win.raise_()
+        win.activateWindow()
 
 
 class MainWindow(QMainWindow):
@@ -142,15 +161,12 @@ class MainWindow(QMainWindow):
 
         sb_layout.addStretch()
 
-        # Version tag
-        ver_lbl = QLabel("v3.0.0-beta")
-        ver_lbl.setStyleSheet("color: #4a5568; font-size: 11px; padding: 0 16px;")
-        sb_layout.addWidget(ver_lbl)
-
         root_layout.addWidget(sidebar)
 
-        # ── Stacked Pages ──
+        # ── Main Content Stack ──
         self.stack = QStackedWidget()
+        self.stack.setObjectName("ContentStack")
+
         self.page_dashboard = DashboardPage()
         self.page_battery = BatteryPage()
         self.page_gpu = GpuPage()
@@ -205,27 +221,35 @@ class MainWindow(QMainWindow):
 
 def run_gui() -> None:
     """Entry point for GigaMate Center GUI."""
+    # Check exclusive instance lock
+    lock_file = open(IPC_LOCK_PATH, "a+")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        is_primary = True
+    except (BlockingIOError, OSError):
+        is_primary = False
+
+    if not is_primary:
+        # Another instance is already running! Connect via socket and tell it to activate.
+        try:
+            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                s.settimeout(1.5)
+                s.connect(IPC_SOCKET_PATH)
+                s.sendall(b"ACTIVATE\n")
+        except Exception:
+            pass
+        sys.exit(0)
+
     app = QApplication.instance()
     is_external_app = app is not None
     if app is None:
         app = QApplication(sys.argv)
 
-    # Check if an instance of GigaMate Center is already running
-    socket = QLocalSocket()
-    socket.connectToServer(IPC_SOCKET_NAME)
-    if socket.waitForConnected(300):
-        # Connected to existing instance! Tell it to activate and bring to front.
-        socket.write(b"ACTIVATE\n")
-        socket.waitForBytesWritten(500)
-        socket.disconnectFromServer()
-        if not is_external_app:
-            sys.exit(0)
-        return
-
     app.setStyleSheet(DARK_THEME)
     window = MainWindow()
-    server = SingleInstanceServer(window, app)
+    server = SingleInstanceServer(window, IPC_SOCKET_PATH, app)
     window._ipc_server = server  # Prevent GC
+    window._instance_lock_file = lock_file  # Keep flock open for process lifetime
     window.show()
 
     if not is_external_app:

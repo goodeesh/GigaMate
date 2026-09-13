@@ -19,19 +19,19 @@ from PyQt6.QtWidgets import (
 from ...config import DEFAULT_CONFIG, load as load_config, resolve_active_profile, save as save_config
 from ...protocol import get_keyboard, set_off, set_static
 
-# Complete display mappings for all profile colours
-COLOR_DISPLAY_METADATA: Dict[str, Tuple[str, str]] = {
-    "red": ("Crimson Red", "#fc8181"),
-    "green": ("Spring Green", "#68d391"),
-    "yellow": ("Amber Yellow", "#f6e05e"),
-    "blue": ("Sky Blue", "#63b3ed"),
-    "orange": ("Sunset Orange", "#f6ad55"),
-    "dark_yellow": ("Dark Yellow", "#ecc94b"),
-    "purple": ("Vibrant Purple", "#b794f4"),
-    "light_purple": ("Light Purple", "#d6bcfa"),
-    "white": ("Pure White", "#f7fafc"),
-    "light_blue": ("Ice Blue", "#90cdf4"),
-    "blush_pink": ("Blush Pink", "#f687b3"),
+# Color swatch hex codes (display names match tray.py: cname.replace('_', ' ').title())
+COLOR_HEX_MAP: Dict[str, str] = {
+    "red": "#fc8181",
+    "green": "#68d391",
+    "yellow": "#f6e05e",
+    "blue": "#63b3ed",
+    "orange": "#f6ad55",
+    "dark_yellow": "#ecc94b",
+    "purple": "#b794f4",
+    "light_purple": "#d6bcfa",
+    "white": "#f7fafc",
+    "light_blue": "#90cdf4",
+    "blush_pink": "#f687b3",
 }
 
 
@@ -90,7 +90,7 @@ class RgbPage(QWidget):
         if profile is not None and profile.colour_names:
             colour_keys = profile.colour_names
         else:
-            colour_keys = list(COLOR_DISPLAY_METADATA.keys())
+            colour_keys = list(COLOR_HEX_MAP.keys())
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -98,12 +98,8 @@ class RgbPage(QWidget):
         self._palette_info = {}
         self.color_buttons = {}
         for idx, col_key in enumerate(colour_keys):
-            if col_key in COLOR_DISPLAY_METADATA:
-                label, hex_color = COLOR_DISPLAY_METADATA[col_key]
-            else:
-                label = col_key.replace("_", " ").title()
-                hex_color = "#a0aec0"
-
+            label = col_key.replace("_", " ").title()
+            hex_color = COLOR_HEX_MAP.get(col_key, "#a0aec0")
             self._palette_info[col_key] = (label, hex_color)
             btn = QPushButton(f"  {label}")
             btn.setIcon(make_color_swatch_icon(hex_color, 14))

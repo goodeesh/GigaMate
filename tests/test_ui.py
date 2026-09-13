@@ -131,7 +131,7 @@ def test_rgb_page_all_profile_colours(qapp):
     # Test selecting yellow (previously missing from Center)
     rgb._set_colour("yellow")
     assert "border: 2px solid #f6e05e" in rgb.color_buttons["yellow"].styleSheet()
-    assert "Active: Amber Yellow" in rgb.active_color_badge.text()
+    assert "Active: Yellow" in rgb.active_color_badge.text()
 
     # Test selecting dark_yellow
     rgb._set_colour("dark_yellow")
@@ -156,7 +156,7 @@ def test_rgb_page_reload_from_config(qapp):
     # Trigger reload
     win.sync_all_from_config()
 
-    assert "Active: Ice Blue" in rgb.active_color_badge.text()
+    assert "Active: Light Blue" in rgb.active_color_badge.text()
     assert rgb.brightness_buttons[1].isChecked()
     assert rgb.idle_combo.currentData() == 300
 
