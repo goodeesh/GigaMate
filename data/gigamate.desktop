@@ -2,7 +2,7 @@
 Type=Application
 Name=GigaMate
 Comment=Gigabyte laptop management — keyboard RGB, fan monitor, power profiles
-Exec=gigamate-tray
+Exec=gigamate center
 Icon=gigamate
 Terminal=false
 Categories=Settings;X-Hardware;

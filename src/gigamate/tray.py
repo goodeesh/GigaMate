@@ -1452,6 +1452,23 @@ class GigaMateTrayApp:
 def main() -> None:
     """Entry point for the GigaMate tray application."""
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    # Single-instance guard to prevent duplicate tray icons
+    import fcntl
+    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/user-{os.getuid()}"))
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    lock_file_path = runtime_dir / "gigamate-tray.lock"
+    try:
+        lock_fd = open(lock_file_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Tray already running: focus/raise GigaMate Center instead
+        try:
+            subprocess.Popen(["gigamate", "center"])
+        except Exception:
+            pass
+        return
+
     GigaMateTrayApp()
     try:
         Gtk.main()

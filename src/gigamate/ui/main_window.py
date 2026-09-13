@@ -1,10 +1,12 @@
 """GigaMate Center — Main Application Window."""
 
+import os
 import sys
 from pathlib import Path
 from typing import Optional
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QObject, QSize, Qt
+from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -23,6 +25,41 @@ from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .styles import DARK_THEME
 from ..paths import ICON_PATHS
+
+IPC_SOCKET_NAME = f"gigamate-center-{os.getuid()}"
+
+
+class SingleInstanceServer(QObject):
+    """Listens for activation requests from secondary instances."""
+
+    def __init__(self, window: "MainWindow", parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self.window = window
+        self.server = QLocalServer(self)
+        QLocalServer.removeServer(IPC_SOCKET_NAME)
+        self.server.newConnection.connect(self._handle_connection)
+        self.server.listen(IPC_SOCKET_NAME)
+
+    def _handle_connection(self) -> None:
+        client = self.server.nextPendingConnection()
+        if client:
+            client.readyRead.connect(lambda: self._on_ready_read(client))
+
+    def _on_ready_read(self, client: QLocalSocket) -> None:
+        try:
+            msg = bytes(client.readAll()).decode("utf-8", errors="ignore").strip()
+            if "ACTIVATE" in msg:
+                self.activate_window()
+        finally:
+            client.disconnectFromServer()
+
+    def activate_window(self) -> None:
+        """Unminimize, raise, and bring the existing window to the front."""
+        if self.window.isMinimized():
+            self.window.showNormal()
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
 
 
 class MainWindow(QMainWindow):
@@ -52,18 +89,41 @@ class MainWindow(QMainWindow):
         # ── Sidebar Navigation ──
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(220)
+        sidebar.setFixedWidth(230)
         sb_layout = QVBoxLayout(sidebar)
         sb_layout.setContentsMargins(0, 0, 0, 16)
         sb_layout.setSpacing(4)
 
-        # Title
+        # ── Brand Header with App Icon ──
+        brand_widget = QWidget()
+        brand_widget.setObjectName("BrandHeader")
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(16, 18, 16, 12)
+        brand_layout.setSpacing(12)
+
+        icon_path = ICON_PATHS.get("gigamate")
+        if icon_path and Path(icon_path).exists():
+            icon_lbl = QLabel()
+            pixmap = QIcon(icon_path).pixmap(QSize(32, 32))
+            icon_lbl.setPixmap(pixmap)
+            icon_lbl.setFixedSize(32, 32)
+            brand_layout.addWidget(icon_lbl)
+
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(1)
+
         title_lbl = QLabel("GigaMate")
         title_lbl.setObjectName("AppTitle")
         sub_lbl = QLabel("Command Center 3.0")
         sub_lbl.setObjectName("AppSubtitle")
-        sb_layout.addWidget(title_lbl)
-        sb_layout.addWidget(sub_lbl)
+
+        title_box.addWidget(title_lbl)
+        title_box.addWidget(sub_lbl)
+        brand_layout.addLayout(title_box)
+        brand_layout.addStretch()
+
+        sb_layout.addWidget(brand_widget)
 
         # Nav Buttons
         self.nav_group = QButtonGroup(self)
@@ -118,8 +178,22 @@ def run_gui() -> None:
     if app is None:
         app = QApplication(sys.argv)
 
+    # Check if an instance of GigaMate Center is already running
+    socket = QLocalSocket()
+    socket.connectToServer(IPC_SOCKET_NAME)
+    if socket.waitForConnected(300):
+        # Connected to existing instance! Tell it to activate and bring to front.
+        socket.write(b"ACTIVATE\n")
+        socket.waitForBytesWritten(500)
+        socket.disconnectFromServer()
+        if not is_external_app:
+            sys.exit(0)
+        return
+
     app.setStyleSheet(DARK_THEME)
     window = MainWindow()
+    server = SingleInstanceServer(window, app)
+    window._ipc_server = server  # Prevent GC
     window.show()
 
     if not is_external_app:

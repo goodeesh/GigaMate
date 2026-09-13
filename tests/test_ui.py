@@ -37,3 +37,58 @@ def test_main_window_creation(qapp):
 
     win.btn_dashboard.click()
     assert win.stack.currentIndex() == 0
+
+
+def test_dashboard_profile_selection(qapp):
+    from gigamate.ui.main_window import MainWindow
+    from gigamate.acpi import FanProfile
+
+    win = MainWindow()
+    dash = win.page_dashboard
+
+    # Select Quiet
+    dash._select_profile(FanProfile.QUIET)
+    assert dash._profile_buttons[FanProfile.QUIET].isChecked()
+    assert not dash._profile_buttons[FanProfile.GAMING].isChecked()
+
+    # Select Gaming
+    dash._select_profile(FanProfile.GAMING)
+    assert dash._profile_buttons[FanProfile.GAMING].isChecked()
+    assert not dash._profile_buttons[FanProfile.QUIET].isChecked()
+
+
+def test_rgb_page_color_highlighting(qapp):
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    rgb = win.page_rgb
+
+    # Select Red
+    rgb._set_colour("red")
+    assert "border: 2px solid #ff6b35" in rgb.color_buttons["red"].styleSheet()
+    assert "border: 1px solid #333d52" in rgb.color_buttons["blue"].styleSheet()
+
+    # Select Blue
+    rgb._set_colour("blue")
+    assert "border: 2px solid #ff6b35" in rgb.color_buttons["blue"].styleSheet()
+    # Red must be reset!
+    assert "border: 1px solid #333d52" in rgb.color_buttons["red"].styleSheet()
+
+
+def test_single_instance_ipc(qapp):
+    from gigamate.ui.main_window import MainWindow, SingleInstanceServer, IPC_SOCKET_NAME
+    from PyQt6.QtNetwork import QLocalSocket
+
+    win = MainWindow()
+    server = SingleInstanceServer(win)
+    try:
+        # Simulate secondary client connecting
+        client = QLocalSocket()
+        client.connectToServer(IPC_SOCKET_NAME)
+        assert client.waitForConnected(1000)
+        client.write(b"ACTIVATE\n")
+        client.waitForBytesWritten(500)
+        client.disconnectFromServer()
+    finally:
+        server.server.close()
+

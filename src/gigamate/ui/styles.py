@@ -26,46 +26,51 @@ QScrollArea {
  * ──────────────────────────────────────────── */
 
 QWidget#Sidebar {
-    background-color: #171b24;
+    background-color: #161922;
     border-right: 1px solid #232938;
+}
+
+QWidget#BrandHeader {
+    padding: 18px 16px 10px 16px;
 }
 
 QLabel#AppTitle {
     color: #ffffff;
-    font-size: 17px;
-    font-weight: 700;
+    font-size: 18px;
+    font-weight: 800;
     letter-spacing: 0.5px;
-    padding: 18px 12px 6px 12px;
 }
 
 QLabel#AppSubtitle {
-    color: #718096;
+    color: #64748b;
     font-size: 11px;
     font-weight: 500;
-    padding: 0px 12px 18px 12px;
+    margin-top: 1px;
 }
 
 QPushButton.NavButton {
     background-color: transparent;
-    color: #a0aec0;
+    color: #94a3b8;
     text-align: left;
-    padding: 10px 16px;
+    padding: 11px 16px;
     border-radius: 8px;
     font-size: 13px;
     font-weight: 500;
     margin: 3px 10px;
     border: none;
+    border-left: 3px solid transparent;
 }
 
 QPushButton.NavButton:hover {
-    background-color: #202634;
+    background-color: #1e2432;
     color: #ffffff;
 }
 
 QPushButton.NavButton:checked {
-    background-color: #ff6b35;
-    color: #ffffff;
+    background-color: #242c3d;
+    color: #ff8c42;
     font-weight: 600;
+    border-left: 3px solid #ff6b35;
 }
 
 /* ────────────────────────────────────────────
@@ -149,6 +154,52 @@ QPushButton.SuccessButton {
 
 QPushButton.SuccessButton:hover {
     background-color: #48bb78;
+}
+
+QPushButton.ProfileButton {
+    background-color: #232a3b;
+    color: #cbd5e0;
+    border: 1px solid #364157;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    text-align: center;
+}
+
+QPushButton.ProfileButton:hover {
+    background-color: #2c364b;
+    border-color: #ff8c42;
+    color: #ffffff;
+}
+
+QPushButton.ProfileButton:checked {
+    background-color: #ff6b35;
+    color: #ffffff;
+    border: 2px solid #ffa066;
+    font-weight: 700;
+}
+
+QPushButton.ColorPaletteBtn {
+    background-color: #202634;
+    color: #f7fafc;
+    border: 1px solid #333d52;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 500;
+    text-align: left;
+}
+
+QPushButton.ColorPaletteBtn:hover {
+    background-color: #293245;
+    border-color: #4a5875;
+}
+
+QPushButton.ColorPaletteBtn:checked {
+    background-color: #2b3345;
+    border: 2px solid #ff6b35;
+    color: #ffffff;
+    font-weight: 700;
 }
 
 /* ────────────────────────────────────────────

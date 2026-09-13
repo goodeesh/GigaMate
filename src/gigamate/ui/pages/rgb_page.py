@@ -54,14 +54,14 @@ class RgbPage(QWidget):
             ("Pure White", "white", "#f7fafc"),
         ]
 
+        self._palette_colors = {}
         self.color_buttons = {}
         for idx, (label, col_key, hex_color) in enumerate(palette):
+            self._palette_colors[col_key] = hex_color
             btn = QPushButton(f"●  {label}")
+            btn.setProperty("class", "ColorPaletteBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setMinimumHeight(42)
-            btn.setStyleSheet(
-                f"border-left: 5px solid {hex_color}; text-align: left; padding-left: 14px;"
-            )
             btn.clicked.connect(lambda _, c=col_key: self._set_colour(c))
             self.color_buttons[col_key] = btn
             grid.addWidget(btn, idx // 4, idx % 4)
@@ -169,14 +169,33 @@ class RgbPage(QWidget):
     def _highlight_active(self) -> None:
         active_col = self.cfg.get("colour", "light_purple")
         for col_key, btn in self.color_buttons.items():
+            hex_color = self._palette_colors.get(col_key, "#ffffff")
             if col_key == active_col:
                 btn.setStyleSheet(
-                    btn.styleSheet() + "background-color: #2b3345; font-weight: bold; border-color: #ff6b35;"
+                    f"background-color: #2b3345; "
+                    f"border: 2px solid #ff6b35; "
+                    f"border-left: 6px solid {hex_color}; "
+                    f"color: #ffffff; "
+                    f"font-weight: 700; "
+                    f"border-radius: 8px; "
+                    f"text-align: left; "
+                    f"padding-left: 14px;"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"background-color: #202634; "
+                    f"border: 1px solid #333d52; "
+                    f"border-left: 5px solid {hex_color}; "
+                    f"color: #f7fafc; "
+                    f"font-weight: 500; "
+                    f"border-radius: 8px; "
+                    f"text-align: left; "
+                    f"padding-left: 14px;"
                 )
 
         b_level = self.cfg.get("brightness", 2)
         for idx, btn in enumerate((self.btn_b_off, self.btn_b_dim, self.btn_b_full)):
             if idx == b_level:
-                btn.setStyleSheet("background-color: #ff6b35; color: #ffffff; font-weight: bold;")
+                btn.setStyleSheet("background-color: #ff6b35; color: #ffffff; font-weight: bold; border: 2px solid #ffa066;")
             else:
                 btn.setStyleSheet("")

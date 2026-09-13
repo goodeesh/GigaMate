@@ -3,6 +3,7 @@
 from typing import Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -53,6 +54,9 @@ class DashboardPage(QWidget):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
+        self.prof_group = QButtonGroup(self)
+        self.prof_group.setExclusive(True)
+
         profiles = [
             (FanProfile.QUIET, "Quiet", "Silent acoustics, capped power"),
             (FanProfile.BALANCED, "Balanced", "Daily multi-tasking default"),
@@ -62,11 +66,13 @@ class DashboardPage(QWidget):
 
         for prof, name, desc in profiles:
             btn = QPushButton(f"{name}\n{desc}")
+            btn.setProperty("class", "ProfileButton")
             btn.setCheckable(True)
             btn.setMinimumHeight(64)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked, p=prof: self._select_profile(p))
+            btn.clicked.connect(lambda _, p=prof: self._select_profile(p))
             self._profile_buttons[prof] = btn
+            self.prof_group.addButton(btn, prof.value)
             btn_layout.addWidget(btn)
 
         prof_layout.addLayout(btn_layout)
@@ -126,18 +132,28 @@ class DashboardPage(QWidget):
 
     def _select_profile(self, profile: FanProfile) -> None:
         """Switch ACPI profile and sync Dynamic Boost."""
+        if not self.acpi_ctrl.available:
+            self.acpi_ctrl = AcpiController()
+
         if self.acpi_ctrl.available:
-            self.acpi_ctrl.set_profile(profile.value)
+            self.acpi_ctrl.set_profile(profile)
             cfg = load_config()
             cfg["acpi_profile"] = profile.value
             save_config(cfg)
             sync_system_power(profile.value)
             sync_gpu_power(profile.value)
+
+        if profile in self._profile_buttons:
+            self._profile_buttons[profile].setChecked(True)
+
         self._refresh_telemetry()
 
     def _refresh_telemetry(self) -> None:
         """Update sensor numbers and highlight active profile."""
         current_prof_id: Optional[int] = None
+        if not self.acpi_ctrl.available:
+            self.acpi_ctrl = AcpiController()
+
         if self.acpi_ctrl.available:
             current_prof_id = self.acpi_ctrl.get_profile()
             state: FanState = self.acpi_ctrl.read_state()
@@ -192,10 +208,6 @@ class DashboardPage(QWidget):
             self.boost_label.setText("")
 
         # Update profile buttons state
-        for prof, btn in self._profile_buttons.items():
-            is_active = (current_prof_id == prof.value)
-            btn.setChecked(is_active)
-            if is_active:
-                btn.setStyleSheet("background-color: #ff6b35; color: #ffffff; font-weight: bold; border-color: #ff8c42;")
-            else:
-                btn.setStyleSheet("")
+        if current_prof_id is not None:
+            for prof, btn in self._profile_buttons.items():
+                btn.setChecked(current_prof_id == prof.value)

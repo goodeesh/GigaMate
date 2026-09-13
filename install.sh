@@ -242,11 +242,28 @@ build_kernel_module() {
         return
     fi
 
-    if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
-        warn "Kernel headers not found at /lib/modules/$(uname -r)/build"
+    local running_kver
+    running_kver="$(uname -r)"
+    local running_headers_found=false
+    local any_headers_found=false
+
+    if [ -d "/lib/modules/${running_kver}/build" ]; then
+        running_headers_found=true
+        any_headers_found=true
+    fi
+
+    # Check for any installed kernel headers (e.g. pending reboot into newer kernel)
+    for kdir in /lib/modules/*/build; do
+        if [ -d "$kdir" ]; then
+            any_headers_found=true
+            break
+        fi
+    done
+
+    if [ "$any_headers_found" = false ]; then
+        warn "No kernel headers found under /lib/modules/*/build"
         warn "Cannot build kernel module. Fan/power features will be disabled."
-        warn "Install the kernel headers matching your running kernel ($(uname -r))"
-        warn "and re-run install.sh to enable them."
+        warn "Install kernel headers for your kernel and re-run install.sh to enable them."
         return
     fi
 
@@ -255,9 +272,9 @@ build_kernel_module() {
     if command -v dkms &>/dev/null; then
         info "Using DKMS to build and install the module..."
 
-        # Remove any existing registration so re-installs and upgrades work
+        # Remove any existing registration so re-installs and upgrades work cleanly
         local entry
-        for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1); do
+        for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1 | sort -u); do
             info "Removing existing DKMS entry: $entry"
             sudo dkms remove "$entry" --all 2>/dev/null || true
         done
@@ -266,59 +283,70 @@ build_kernel_module() {
         make -C "$mod_src" clean 2>/dev/null || true
         sudo rm -rf "/usr/src/gigamate_acpi-$mod_version"
         sudo cp -r "$mod_src" "/usr/src/gigamate_acpi-$mod_version"
-        sudo find "/usr/src/gigamate_acpi-$mod_version" -name '*.o' -o -name '*.ko' -o -name '*.mod*' -o -name 'Module.symvers' -o -name 'modules.order' | sudo xargs -r rm -f
+        sudo find "/usr/src/gigamate_acpi-$mod_version" -name '*.o' -o -name '*.ko*' -o -name '*.mod*' -o -name 'Module.symvers' -o -name 'modules.order' | sudo xargs -r rm -f
 
         if ! sudo dkms add -m gigamate_acpi -v "$mod_version"; then
             warn "DKMS add failed."
             warn "Fan/power features will be disabled."
             return
         fi
-        # Try the default compiler first, then fall back to clang/LLVM
-        if sudo dkms build -m gigamate_acpi -v "$mod_version" 2>/dev/null ||
-           sudo env CC=clang LLVM=1 dkms build -m gigamate_acpi -v "$mod_version" 2>/dev/null; then
-            info "Module built via DKMS"
-        else
-            warn "DKMS build failed."
-            warn "Fan/power features will be disabled."
-            return
-        fi
-        if sudo dkms install -m gigamate_acpi -v "$mod_version"; then
-            info "Module installed via DKMS."
-        else
-            warn "DKMS install failed."
-            warn "Fan/power features will be disabled."
-            return
-        fi
+
+        # Build and install for each installed kernel with headers present
+        for kdir in /lib/modules/*/build; do
+            [ -d "$kdir" ] || continue
+            local kver
+            kver="$(basename "$(dirname "$kdir")")"
+            info "Building gigamate_acpi for kernel $kver..."
+            if sudo dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null ||
+               sudo env CC=clang LLVM=1 dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null; then
+                info "DKMS build succeeded for $kver"
+                if sudo dkms install -m gigamate_acpi -v "$mod_version" -k "$kver" --force 2>/dev/null; then
+                    info "DKMS install succeeded for $kver"
+                fi
+            else
+                warn "DKMS build failed for kernel $kver"
+            fi
+        done
     else
         warn "dkms not found — falling back to a manual build."
         warn "The module will NOT auto-rebuild after kernel updates."
         warn "Install dkms from your distro's official repos and re-run install.sh."
-        info "Building gigamate_acpi.ko..."
-        make -C "$mod_src" clean 2>/dev/null || true
-        if make -C "$mod_src" CC=clang LLVM=1 2>/dev/null; then
-            info "Built with clang"
-        else
-            make -C "$mod_src" || {
-                warn "Kernel module build failed."
-                warn "Fan/power features will be disabled."
-                return
-            }
-            info "Built with default compiler"
+        if [ "$running_headers_found" = true ]; then
+            info "Building gigamate_acpi.ko..."
+            make -C "$mod_src" clean 2>/dev/null || true
+            if make -C "$mod_src" CC=clang LLVM=1 2>/dev/null; then
+                info "Built with clang"
+            else
+                make -C "$mod_src" || {
+                    warn "Kernel module build failed."
+                    warn "Fan/power features will be disabled."
+                    return
+                }
+                info "Built with default compiler"
+            fi
+            sudo make -C "$mod_src" install 2>/dev/null || \
+            sudo make -C "$mod_src" CC=clang LLVM=1 install
+            sudo depmod -a
         fi
-        sudo make -C "$mod_src" install 2>/dev/null || \
-        sudo make -C "$mod_src" CC=clang LLVM=1 install
-        sudo depmod -a
     fi
 
-    info "Loading module..."
-    sudo modprobe -r gigamate_acpi 2>/dev/null || true
-    if ! sudo modprobe gigamate_acpi 2>/dev/null; then
-        warn "Module load failed — is this a Gigabyte laptop with AMW0 ACPI?"
+    if [ "$running_headers_found" = true ]; then
+        info "Loading module for running kernel ($running_kver)..."
+        sudo modprobe -r gigamate_acpi 2>/dev/null || true
+        if ! sudo modprobe gigamate_acpi 2>/dev/null; then
+            warn "Module load failed — is this a Gigabyte laptop with AMW0 ACPI?"
+        fi
+    else
+        info "gigamate_acpi installed for installed kernel(s)."
+        info "Reboot your laptop to boot into the updated kernel and activate new module features."
     fi
 
     # Verify the sysfs interface actually appeared with control files
     if [ -f /sys/devices/platform/gigamate_acpi/profile ] || [ -f /sys/devices/platform/gigamate_acpi/fan1_input ]; then
         info "Module loaded, sysfs interface ready: /sys/devices/platform/gigamate_acpi"
+        if [ -f /sys/devices/platform/gigamate_acpi/charge_limit ]; then
+            info "Battery charge limit supported: /sys/devices/platform/gigamate_acpi/charge_limit"
+        fi
     elif [ -d /sys/devices/platform/gigamate_acpi ]; then
         warn "Module loaded but sysfs control files not found."
         warn "Your laptop may not expose the AMW0 ACPI device — fan/power features will not work."
