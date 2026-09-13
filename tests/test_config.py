@@ -71,3 +71,38 @@ def test_idle_off_preserves_timeout(isolated_config):
     loaded = config_module.load()
     assert loaded["idle_off_enabled"] is False
     assert loaded["idle_timeout_sec"] == 30
+
+
+def test_sync_system_power_roundtrip(isolated_config):
+    config_module.save({"sync_system_power": False})
+    assert config_module.load()["sync_system_power"] is False
+    config_module.save({"sync_system_power": True})
+    assert config_module.load()["sync_system_power"] is True
+
+
+def test_last_brightness_roundtrip(isolated_config):
+    config_module.save({"last_brightness": 1})
+    assert config_module.load()["last_brightness"] == 1
+    config_module.save({"last_brightness": 2})
+    assert config_module.load()["last_brightness"] == 2
+
+
+def test_charge_limit_roundtrip(isolated_config):
+    config_module.save({"charge_limit": 65, "charge_limit_enabled": True})
+    loaded = config_module.load()
+    assert loaded["charge_limit"] == 65
+    assert loaded["charge_limit_enabled"] is True
+
+
+def test_config_backup_recovery_on_corrupt_file(isolated_config, monkeypatch):
+    """If config.json is corrupted (e.g. truncated on crash), recover from .bak file."""
+    config_module.save({"colour": "red", "brightness": 1})
+    bak_file = config_module.CONFIG_DIR / "config.json.bak"
+    assert bak_file.exists()
+
+    # Corrupt primary config
+    isolated_config.write_text("{corrupt json...")
+    recovered = config_module.load()
+    assert recovered["colour"] == "red"
+    assert recovered["brightness"] == 1
+

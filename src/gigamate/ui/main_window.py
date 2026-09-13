@@ -99,6 +99,14 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self._init_ui()
+
+        # Enforce saved user settings to hardware on app open
+        try:
+            from ..hardware import apply_hardware_settings
+            apply_hardware_settings()
+        except Exception:
+            pass
+
         self._last_config_mtime = self._get_config_mtime()
         self.config_timer = QTimer(self)
         self.config_timer.timeout.connect(self._check_config_mtime)
@@ -244,7 +252,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "page_dashboard"):
             self.page_dashboard._refresh_telemetry()
         if hasattr(self, "page_battery"):
-            self.page_battery._refresh_battery_data()
+            self.page_battery.reload_from_config()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():

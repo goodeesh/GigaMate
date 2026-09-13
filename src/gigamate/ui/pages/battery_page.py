@@ -108,9 +108,13 @@ class BatteryPage(QWidget):
         layout.addStretch()
 
         # Initial load
+        self.reload_from_config()
+
+    def reload_from_config(self) -> None:
+        """Reload charge limit and telemetry from saved config."""
         cfg = load_config()
-        active_limit = self.battery_mgr.get_charge_limit() or cfg.get("charge_limit", 80)
-        self._set_slider_value(active_limit)
+        saved_limit = cfg.get("charge_limit", 80)
+        self._set_slider_value(saved_limit)
         self._refresh_battery_data()
 
     def _make_chip(self, title: str, label_attr_name: str, icon_str: str) -> QFrame:

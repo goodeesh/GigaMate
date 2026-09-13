@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 from .battery import get_battery_manager
 from .config import load as load_config, resolve_active_profile
+from .hardware import apply_hardware_settings
 from .protocol import get_keyboard, set_off, set_static
 from .gpu import sync_gpu_power
 
@@ -131,7 +132,12 @@ class SleepHandler:
             time.sleep(0.5)
 
             try:
-                # 1. Restore RGB lighting
+                apply_hardware_settings()
+            except Exception as exc:
+                logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
+
+            try:
+                # Direct hook compatibility for tests & listeners
                 cfg = load_config()
                 dev = get_keyboard()
                 if dev is not None:
@@ -143,13 +149,11 @@ class SleepHandler:
                     else:
                         set_static(dev, colour, brightness, profile)
 
-                # 2. Sync discrete GPU dynamic boost if active
                 acpi_profile = cfg.get("acpi_profile", 1)
                 sync_gpu_power(acpi_profile)
 
-                # 3. Re-enforce battery charge limit (embedded controllers often reset limit on wake)
-                if cfg.get("charge_limit_enabled", False):
-                    limit = cfg.get("charge_limit")
+                if cfg.get("charge_limit_enabled", True):
+                    limit = cfg.get("charge_limit", 80)
                     if limit:
                         battery_mgr = get_battery_manager()
                         if battery_mgr.is_charge_limit_supported():

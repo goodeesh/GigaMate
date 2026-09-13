@@ -52,6 +52,7 @@ import subprocess
 from .battery import get_battery_manager
 from .gpu_guard import get_dgpu_guard
 from .sleep_handler import get_sleep_handler
+from .hardware import apply_hardware_settings
 from . import updates as update_checker
 
 APP_ID = "gigamate"
@@ -94,13 +95,14 @@ class GigaMateTrayApp:
         self._startup_apply = self._config.get("startup_apply", True)
         self._sync_system_power = self._config.get("sync_system_power", True)
         self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
+        self._battery_care_item: Optional[Gtk.CheckMenuItem] = None
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
         self._acpi_caps: Optional[AcpiCapabilities] = None
         self._profile_items: Dict[int, Gtk.RadioMenuItem] = {}
         self._status_items: List[Gtk.MenuItem] = []
-        self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
+        self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile", 1)
         self._status_timer_id: Optional[int] = None
 
         # Hotkey listener state
@@ -226,7 +228,9 @@ class GigaMateTrayApp:
         new_idle_off = new_cfg.get("idle_off_enabled", True)
         new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
         new_startup = new_cfg.get("startup_apply", True)
-        new_sync_power = new_cfg.get("sync_system_power", False)
+        new_sync_power = new_cfg.get("sync_system_power", True)
+        new_limit = new_cfg.get("charge_limit", 80)
+        new_limit_enabled = new_cfg.get("charge_limit_enabled", True)
 
         old_building = self._building
         self._building = True
@@ -264,6 +268,9 @@ class GigaMateTrayApp:
                 self._sync_system_power = new_sync_power
                 if self._sync_power_item is not None:
                     self._sync_power_item.set_active(new_sync_power)
+
+            if getattr(self, "_battery_care_item", None) is not None:
+                self._battery_care_item.set_active(new_limit_enabled and new_limit == 80)
         finally:
             self._building = old_building
 
@@ -512,13 +519,17 @@ class GigaMateTrayApp:
         self._menu.append(bat_header)
 
         if mgr.is_charge_limit_supported():
-            limit = mgr.get_charge_limit() or self._config.get("charge_limit", 80)
+            limit_enabled = self._config.get("charge_limit_enabled", True)
+            limit = self._config.get("charge_limit", 80)
             chk_limit = Gtk.CheckMenuItem(label="Battery Care (Cap at 80%)")
-            chk_limit.set_active(limit == 80)
+            chk_limit.set_active(limit_enabled and limit == 80)
             chk_limit.connect("toggled", self._on_toggle_battery_care)
+            self._battery_care_item = chk_limit
             self._menu.append(chk_limit)
 
     def _on_toggle_battery_care(self, widget: Gtk.CheckMenuItem) -> None:
+        if self._building:
+            return
         mgr = get_battery_manager()
         new_limit = 80 if widget.get_active() else 100
         try:
@@ -1470,7 +1481,6 @@ class GigaMateTrayApp:
                                self._current_brightness, self._profile)
             except Exception:
                 pass
-        self._save_config()
         self._stop_idle()
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
@@ -1492,51 +1502,28 @@ class GigaMateTrayApp:
 
     def _save_config(self) -> None:
         """Save current settings to config file."""
-        self._config = load_config()
-        self._config["colour"] = self._current_colour
-        self._config["brightness"] = self._current_brightness
-        self._config["startup_apply"] = self._startup_apply
-        self._config["sync_system_power"] = self._sync_system_power
-        self._config["idle_off_enabled"] = self._idle_enabled
-        self._config["idle_timeout_sec"] = self._idle_timeout
+        cfg = load_config()
+        cfg["colour"] = self._current_colour
+        cfg["brightness"] = self._current_brightness
+        cfg["startup_apply"] = self._startup_apply
+        cfg["sync_system_power"] = self._sync_system_power
+        cfg["idle_off_enabled"] = self._idle_enabled
+        cfg["idle_timeout_sec"] = self._idle_timeout
         if self._current_acpi_profile is not None:
-            self._config["acpi_profile"] = self._current_acpi_profile
+            cfg["acpi_profile"] = self._current_acpi_profile
+        if "charge_limit" in self._config:
+            cfg["charge_limit"] = self._config["charge_limit"]
+        if "charge_limit_enabled" in self._config:
+            cfg["charge_limit_enabled"] = self._config["charge_limit_enabled"]
+        self._config = cfg
         save_config(self._config)
         self._last_config_mtime = self._get_config_mtime()
 
     def _apply_on_startup(self) -> None:
         """Apply saved settings on startup."""
-        if not self._startup_apply:
-            return
-        if self._acpi_controller is not None and self._current_acpi_profile is not None:
-            try:
-                self._acpi_controller.set_profile(
-                    FanProfile(self._current_acpi_profile)
-                )
-                if self._sync_system_power:
-                    sync_system_power(self._current_acpi_profile)
-            except Exception:
-                pass
-        if self._unsupported or self._no_keyboard:
-            return
-        dev = self._get_keyboard()
-        if dev is None:
-            return
-        if self._current_brightness == 0:
-            set_off(dev, self._profile)
-        else:
-            set_static(dev, self._current_colour, self._current_brightness, self._profile)
-
-        # Apply battery charge limit if configured
-        if self._config.get("charge_limit_enabled", False):
-            limit = self._config.get("charge_limit")
-            if limit:
-                try:
-                    battery_mgr = get_battery_manager()
-                    if battery_mgr.is_charge_limit_supported():
-                        battery_mgr.set_charge_limit(limit)
-                except Exception:
-                    pass
+        if self._current_acpi_profile is not None:
+            self._config["acpi_profile"] = self._current_acpi_profile
+        apply_hardware_settings(self._config)
 
     # ────────────────────────────────────────────
     # Menu management

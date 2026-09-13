@@ -18,6 +18,17 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def isolate_config(tmp_path, monkeypatch):
+    import gigamate.config as config_mod
+    cfg_dir = tmp_path / "config"
+    cfg_file = cfg_dir / "config.json"
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", cfg_file)
+    # Start each test with DEFAULT_CONFIG
+    config_mod.save(dict(config_mod.DEFAULT_CONFIG))
+
+
 def test_main_window_creation(qapp):
     from gigamate.ui.main_window import MainWindow
 
@@ -269,6 +280,48 @@ def test_tray_on_quit_signals_center():
             tray._on_quit()
             assert mock_socket_instance.sendall.called
             assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
+
+
+def test_battery_page_reload_from_config(qapp):
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.config import save as save_config, load as load_config
+
+    page = BatteryPage()
+    cfg = load_config()
+    cfg["charge_limit"] = 70
+    save_config(cfg)
+
+    page.reload_from_config()
+    assert page.limit_slider.value() == 70
+    assert "Limit: 70%" in page.slider_label.text()
+
+
+def test_tray_save_config_preserves_memory_keys():
+    from gigamate.tray import GigaMateTrayApp
+    from unittest.mock import patch, MagicMock
+
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._current_colour = "red"
+        tray._current_brightness = 2
+        tray._startup_apply = True
+        tray._sync_system_power = True
+        tray._idle_enabled = True
+        tray._idle_timeout = 60
+        tray._current_acpi_profile = 2
+        tray._config = {"charge_limit": 65, "charge_limit_enabled": True}
+        tray._get_config_mtime = MagicMock(return_value=100.0)
+
+        with patch("gigamate.tray.save_config") as mock_save, \
+             patch("gigamate.tray.load_config", return_value={"charge_limit": 80}):
+            tray._save_config()
+
+            mock_save.assert_called_once()
+            saved = mock_save.call_args[0][0]
+            # Must preserve the charge limit set in memory (65), not revert to 80
+            assert saved["charge_limit"] == 65
+            assert saved["acpi_profile"] == 2
+
 
 
 

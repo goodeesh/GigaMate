@@ -1,10 +1,13 @@
 import json
+import os
+import shutil
 from pathlib import Path
 
 from .paths import CONFIG_DIR
 from .profiles import detect_device, resolve_profile
 
 CONFIG_FILE = CONFIG_DIR / "config.json"
+_CONFIG_BAK_FILE = CONFIG_DIR / "config.json.bak"
 
 # Legacy path for migration
 _OLD_CONFIG_DIR = Path.home() / ".config" / "gigabyte-keyboard-rgb"
@@ -28,6 +31,8 @@ DEFAULT_CONFIG = {
     "idle_timeout_sec": 60,
     "charge_limit": 80,
     "charge_limit_enabled": True,
+    "sync_system_power": True,
+    "last_brightness": 2,
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -101,21 +106,52 @@ def load():
     _migrate_old_config()
 
     config = dict(DEFAULT_CONFIG)
+    data = None
     if CONFIG_FILE.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text())
-            _migrate_profile_id(data)
-            if "brightness" in data:
-                data["brightness"] = _migrate_brightness(data["brightness"])
-            if "colour" in data:
-                data["colour"] = _migrate_colour(data["colour"])
-            if "idle_timeout_sec" in data:
-                data["idle_timeout_sec"] = _migrate_idle_timeout(data["idle_timeout_sec"])
-            if "idle_off_enabled" in data:
-                data["idle_off_enabled"] = bool(data["idle_off_enabled"])
-            config.update(data)
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            pass
+            bak_file = CONFIG_DIR / "config.json.bak"
+            if bak_file.exists():
+                try:
+                    data = json.loads(bak_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+    if data:
+        _migrate_profile_id(data)
+        if "brightness" in data:
+            data["brightness"] = _migrate_brightness(data["brightness"])
+        if "last_brightness" in data:
+            data["last_brightness"] = _migrate_brightness(data["last_brightness"])
+        if "colour" in data:
+            data["colour"] = _migrate_colour(data["colour"])
+        if "idle_timeout_sec" in data:
+            data["idle_timeout_sec"] = _migrate_idle_timeout(data["idle_timeout_sec"])
+        if "idle_off_enabled" in data:
+            data["idle_off_enabled"] = bool(data["idle_off_enabled"])
+        if "sync_system_power" in data:
+            data["sync_system_power"] = bool(data["sync_system_power"])
+        if "startup_apply" in data:
+            data["startup_apply"] = bool(data["startup_apply"])
+        if "charge_limit" in data:
+            try:
+                cl = int(data["charge_limit"])
+                if 40 <= cl <= 100:
+                    data["charge_limit"] = cl
+            except (ValueError, TypeError):
+                pass
+        if "charge_limit_enabled" in data:
+            data["charge_limit_enabled"] = bool(data["charge_limit_enabled"])
+        if "acpi_profile" in data:
+            try:
+                prof = int(data["acpi_profile"])
+                if 0 <= prof <= 3:
+                    data["acpi_profile"] = prof
+            except (ValueError, TypeError):
+                pass
+        config.update(data)
+
     if not config.get("profile_id"):
         detected = detect_device()
         if detected is not None:
@@ -135,6 +171,8 @@ def save(config):
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
         "charge_limit": int(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
         "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
+        "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
+        "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:
@@ -144,7 +182,24 @@ def save(config):
                 safe["acpi_profile"] = acpi_profile
         except (ValueError, TypeError):
             pass
-    CONFIG_FILE.write_text(json.dumps(safe, indent=2) + "\n")
+
+    # Atomic write with backup fallback
+    tmp_file = CONFIG_DIR / f"config.json.tmp.{os.getpid()}"
+    try:
+        content = json.dumps(safe, indent=2) + "\n"
+        tmp_file.write_text(content, encoding="utf-8")
+        os.replace(tmp_file, CONFIG_FILE)
+        try:
+            bak_file = CONFIG_DIR / "config.json.bak"
+            shutil.copyfile(CONFIG_FILE, bak_file)
+        except OSError:
+            pass
+    finally:
+        if tmp_file.exists():
+            try:
+                tmp_file.unlink()
+            except OSError:
+                pass
 
 
 def resolve_active_profile():
