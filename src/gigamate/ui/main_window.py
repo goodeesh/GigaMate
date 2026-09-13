@@ -1,6 +1,7 @@
 import fcntl
 import os
 import socket as py_socket
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Tuple
@@ -65,7 +66,9 @@ class SingleInstanceServer(QObject):
     def _on_ready_read(self, client: QLocalSocket) -> None:
         try:
             msg = bytes(client.readAll()).decode("utf-8", errors="ignore").strip()
-            if "ACTIVATE" in msg:
+            if "QUIT" in msg:
+                QApplication.quit()
+            elif "ACTIVATE" in msg:
                 self.activate_window()
         finally:
             client.disconnectFromServer()
@@ -249,8 +252,62 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
 
+def ensure_tray_running() -> None:
+    """Ensure that the GigaMate system tray daemon is running.
+
+    Checks user systemd service first, starts it if inactive.
+    Falls back to spawning the tray daemon process if systemd is not active or unavailable.
+    """
+    # 1. Check user systemd service
+    try:
+        res = subprocess.run(
+            ["systemctl", "--user", "is-active", "gigamate.service"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        if res.stdout.strip() == "active":
+            return
+        subprocess.run(
+            ["systemctl", "--user", "start", "gigamate.service"],
+            capture_output=True,
+            timeout=2.0,
+        )
+        res_after = subprocess.run(
+            ["systemctl", "--user", "is-active", "gigamate.service"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        if res_after.stdout.strip() == "active":
+            return
+    except Exception:
+        pass
+
+    # 2. Fallback: check if tray process is running via pgrep
+    try:
+        check = subprocess.run(["pgrep", "-f", "gigamate[- ]tray"], capture_output=True)
+        if check.returncode == 0:
+            return
+
+        import shutil
+        tray_bin = shutil.which("gigamate-tray")
+        cmd = [tray_bin] if tray_bin else [sys.executable, "-m", "gigamate.tray"]
+        subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def run_gui() -> None:
     """Entry point for GigaMate Center GUI."""
+    # Ensure system tray background daemon runs together with Center
+    ensure_tray_running()
+
     # Check exclusive instance lock
     lock_file = open(IPC_LOCK_PATH, "a+")
     try:

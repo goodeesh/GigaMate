@@ -933,6 +933,12 @@ def cmd_center(args) -> None:
         sys.exit(1)
 
 
+def cmd_tray(args) -> None:
+    """Launch GigaMate System Tray daemon."""
+    from .tray import main as tray_main
+    tray_main()
+
+
 def cmd_battery(args) -> None:
     """Show battery status or set charge limit."""
     from .battery import get_battery_manager
@@ -1146,6 +1152,9 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     # --- center / gui subcommand ---
     sub.add_parser("center", aliases=["gui"], help="Open GigaMate Center GUI")
 
+    # --- tray subcommand ---
+    sub.add_parser("tray", help="Start GigaMate System Tray daemon")
+
     # Parse
     args = parser.parse_args()
 
@@ -1173,6 +1182,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         cmd_gpu_guard(args)
     elif args.command in ("center", "gui"):
         cmd_center(args)
+    elif args.command == "tray":
+        cmd_tray(args)
     elif args.command == "gpu":
         if args.gpu_action in ("status", None):
             cmd_gpu_status(args)
@@ -1181,8 +1192,11 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             print("Example: gigamate gpu status")
             sys.exit(1)
     else:
-        parser.print_help()
-        sys.exit(1)
+        if len(sys.argv) == 1:
+            cmd_center(args)
+        else:
+            parser.print_help()
+            sys.exit(1)
 
 
 def _dispatch_rgb(args) -> None:

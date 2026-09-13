@@ -203,3 +203,72 @@ def test_tray_sync_from_external_config():
             tray._profile_items[3].set_active.assert_called_with(True)
 
 
+def test_single_instance_quit_ipc(qapp):
+    from gigamate.ui.main_window import MainWindow, SingleInstanceServer
+    from unittest.mock import patch, MagicMock
+
+    win = MainWindow()
+    server = SingleInstanceServer(win)
+    try:
+        with patch("gigamate.ui.main_window.QApplication.quit") as mock_quit:
+            mock_client = MagicMock()
+            mock_client.readAll.return_value = b"QUIT\n"
+            server._on_ready_read(mock_client)
+            assert mock_quit.called
+            assert mock_client.disconnectFromServer.called
+    finally:
+        server.server.close()
+
+
+def test_ensure_tray_running():
+    from gigamate.ui.main_window import ensure_tray_running
+    from unittest.mock import patch, MagicMock
+
+    # 1. When already active
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(returncode=0, stdout="active\n")
+    with patch("gigamate.ui.main_window.subprocess.run", mock_run):
+        ensure_tray_running()
+        assert mock_run.call_count == 1
+        assert "is-active" in mock_run.call_args[0][0]
+
+    # 2. When inactive, attempts start
+    def fake_run(cmd, **kwargs):
+        if "is-active" in cmd:
+            if fake_run.called_start:
+                return MagicMock(returncode=0, stdout="active\n")
+            return MagicMock(returncode=3, stdout="inactive\n")
+        if "start" in cmd:
+            fake_run.called_start = True
+            return MagicMock(returncode=0, stdout="")
+        return MagicMock(returncode=1)
+
+    fake_run.called_start = False
+    with patch("gigamate.ui.main_window.subprocess.run", side_effect=fake_run):
+        ensure_tray_running()
+        assert fake_run.called_start is True
+
+
+def test_tray_on_quit_signals_center():
+    from gigamate.tray import GigaMateTrayApp
+    from unittest.mock import patch, MagicMock
+
+    with patch("gigamate.tray.load_config", return_value={}), \
+         patch("gigamate.tray.get_keyboard", return_value=None), \
+         patch("gi.repository.AppIndicator3.Indicator.new_with_path", return_value=MagicMock()):
+        tray = GigaMateTrayApp()
+
+        # Mock socket
+        mock_socket_cls = MagicMock()
+        mock_socket_instance = MagicMock()
+        mock_socket_cls.return_value.__enter__.return_value = mock_socket_instance
+
+        with patch("os.path.exists", return_value=True), \
+             patch("socket.socket", mock_socket_cls), \
+             patch("gi.repository.Gtk.main_quit"):
+            tray._on_quit()
+            assert mock_socket_instance.sendall.called
+            assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
+
+
+

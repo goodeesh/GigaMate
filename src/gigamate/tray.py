@@ -76,7 +76,7 @@ class GigaMateTrayApp:
         self._config = load_config()
         self._indicator: Optional[AppIndicator3.Indicator] = None
         self._menu: Optional[Gtk.Menu] = None
-        self._icon_key = "gigamate"
+        self._icon_key: Optional[str] = None
 
         # Keyboard state
         self._profile: Optional[DeviceProfile] = None
@@ -449,13 +449,16 @@ class GigaMateTrayApp:
             self._menu.show_all()
 
         if self._indicator is None:
-            self._indicator = AppIndicator3.Indicator.new(
+            icon_dir = str(Path(APP_ICON_PATH).parent)
+            self._indicator = AppIndicator3.Indicator.new_with_path(
                 APP_ID,
                 APP_ICON_PATH,
                 AppIndicator3.IndicatorCategory.HARDWARE,
+                icon_dir,
             )
             self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self._indicator.set_menu(self._menu)
+        self._refresh_tray_icon()
 
     def _init_sleep_handler(self) -> None:
         """Initialize clean state handling before suspend and after wake."""
@@ -1013,14 +1016,17 @@ class GigaMateTrayApp:
     def _refresh_tray_icon(self) -> None:
         """Switch tray icon to match dGPU + update state (change-only)."""
         key = self._tray_icon_key()
-        if key == self._icon_key:
+        if key == self._icon_key and getattr(self, "_icon_applied", False):
             return
         self._icon_key = key
+        self._icon_applied = True
         if self._indicator is None:
             return
         try:
-            self._indicator.set_icon_full(
-                APP_ICON_PATHS.get(key, APP_ICON_PATH), f"GigaMate {key}")
+            icon_path = APP_ICON_PATHS.get(key, APP_ICON_PATH)
+            icon_dir = str(Path(icon_path).parent)
+            self._indicator.set_icon_theme_path(icon_dir)
+            self._indicator.set_icon_full(icon_path, f"GigaMate {key}")
         except Exception:
             pass
 
@@ -1440,6 +1446,21 @@ class GigaMateTrayApp:
 
     def _on_quit(self, *args) -> None:
         """Save config and quit (restore backlight if idle-dimmed)."""
+        # Close GigaMate Center window if open
+        try:
+            import socket as py_socket
+            runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+            if not runtime_dir.exists():
+                runtime_dir = Path("/tmp")
+            sock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.sock")
+            if os.path.exists(sock_path):
+                with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    s.connect(sock_path)
+                    s.sendall(b"QUIT\n")
+        except Exception:
+            pass
+
         if self._idle_dimmed:
             self._idle_dimmed = False
             try:
@@ -1567,7 +1588,13 @@ def main() -> None:
             pass
         return
 
-    GigaMateTrayApp()
+    app = GigaMateTrayApp()
+    try:
+        from gi.repository import GLibUnix
+        GLibUnix.signal_add(0, signal.SIGTERM, lambda: (app._on_quit(), False)[1])
+        GLibUnix.signal_add(0, signal.SIGINT, lambda: (app._on_quit(), False)[1])
+    except Exception:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
     try:
         Gtk.main()
     except KeyboardInterrupt:
