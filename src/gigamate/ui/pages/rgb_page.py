@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...capabilities import detect_system_capabilities
 from ...config import DEFAULT_CONFIG, load as load_config, resolve_active_profile, save as save_config
 from ...protocol import get_keyboard, set_off, set_static
 
@@ -85,6 +86,65 @@ class RgbPage(QWidget):
         c_header.addWidget(self.active_color_badge)
         c_layout.addLayout(c_header)
 
+        # ── Notice 1: Unsupported Keyboard (non-Gigabyte) ──
+        self.kbd_unsupported_notice = QFrame()
+        self.kbd_unsupported_notice.setStyleSheet(
+            "background-color: #171b26; border: 1px solid #283347; border-radius: 8px; padding: 14px;"
+        )
+        u_lay = QVBoxLayout(self.kbd_unsupported_notice)
+        u_lay.setContentsMargins(14, 12, 14, 12)
+        u_lay.setSpacing(4)
+        u_title = QLabel("ℹ️ No Compatible RGB Keyboard Detected")
+        u_title.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
+        u_body = QLabel(
+            "GigaMate did not detect a supported Gigabyte ITE 829x USB keyboard controller on this system."
+        )
+        u_body.setStyleSheet("color: #8896ab; font-size: 12px;")
+        u_lay.addWidget(u_title)
+        u_lay.addWidget(u_body)
+        c_layout.addWidget(self.kbd_unsupported_notice)
+
+        # ── Notice 2: Uncalibrated Gigabyte Keyboard (profile missing) ──
+        self.kbd_uncalibrated_notice = QFrame()
+        self.kbd_uncalibrated_notice.setStyleSheet(
+            "background-color: #2c1b12; border: 1px solid #744210; border-radius: 8px; padding: 14px;"
+        )
+        c_lay2 = QVBoxLayout(self.kbd_uncalibrated_notice)
+        c_lay2.setContentsMargins(14, 12, 14, 12)
+        c_lay2.setSpacing(8)
+
+        self.uncalibrated_title = QLabel("⚠️ Uncalibrated Gigabyte Keyboard Detected")
+        self.uncalibrated_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 600;")
+        self.uncalibrated_body = QLabel(
+            "Your keyboard hardware was detected, but a color profile has not been generated for this model yet. "
+            "Each Gigabyte generation maps colors to distinct USB payload bytes."
+        )
+        self.uncalibrated_body.setStyleSheet("color: #cbd5e0; font-size: 12px;")
+        self.uncalibrated_body.setWordWrap(True)
+        c_lay2.addWidget(self.uncalibrated_title)
+        c_lay2.addWidget(self.uncalibrated_body)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
+        cmd_hint = QLabel("💡 Run 'gigamate calibrate' in your terminal to create a profile.")
+        cmd_hint.setStyleSheet("color: #ecc94b; font-size: 11px;")
+        action_row.addWidget(cmd_hint)
+        action_row.addStretch()
+
+        btn_safe_off = QPushButton("Turn Off Backlight")
+        btn_safe_off.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_safe_off.clicked.connect(self._turn_off_backlight)
+        action_row.addWidget(btn_safe_off)
+        c_lay2.addLayout(action_row)
+
+        c_layout.addWidget(self.kbd_uncalibrated_notice)
+
+        # ── Palette Container (shown when profile is mapped) ──
+        self.palette_container = QWidget()
+        pal_layout = QVBoxLayout(self.palette_container)
+        pal_layout.setContentsMargins(0, 0, 0, 0)
+        pal_layout.setSpacing(10)
+
         # Dynamically load all colours from active hardware profile (with fallback)
         profile = resolve_active_profile()
         if profile is not None and profile.colour_names:
@@ -123,13 +183,14 @@ class RgbPage(QWidget):
         self._palette_info["off"] = ("Turn Off", "#4a5568")
         grid.addWidget(btn_off, 11 // 4, 11 % 4)
 
-        c_layout.addLayout(grid)
+        pal_layout.addLayout(grid)
+        c_layout.addWidget(self.palette_container)
         layout.addWidget(colour_card)
 
         # ── Brightness & Energy Saver Card ──
-        opts_card = QFrame()
-        opts_card.setProperty("class", "Card")
-        o_layout = QVBoxLayout(opts_card)
+        self.opts_card = QFrame()
+        self.opts_card.setProperty("class", "Card")
+        o_layout = QVBoxLayout(self.opts_card)
         o_layout.setSpacing(16)
 
         o_title = QLabel("Brightness & Energy Saver")
@@ -196,10 +257,40 @@ class RgbPage(QWidget):
         idle_row.addStretch()
         o_layout.addLayout(idle_row)
 
-        layout.addWidget(opts_card)
+        layout.addWidget(self.opts_card)
         layout.addStretch()
 
+        self._refresh_keyboard_support()
         self._highlight_active()
+
+    def _refresh_keyboard_support(self) -> None:
+        """Inspect hardware capabilities and display appropriate notices."""
+        caps = detect_system_capabilities()
+        if not caps.keyboard_detected:
+            self.palette_container.setVisible(False)
+            self.kbd_uncalibrated_notice.setVisible(False)
+            self.kbd_unsupported_notice.setVisible(True)
+            self.opts_card.setVisible(False)
+            self.active_color_badge.setVisible(False)
+        elif not caps.keyboard_profile_loaded:
+            self.palette_container.setVisible(False)
+            self.kbd_unsupported_notice.setVisible(False)
+            self.kbd_uncalibrated_notice.setVisible(True)
+            vid, pid = caps.keyboard_vid_pid or (0x0414, 0x0000)
+            self.uncalibrated_title.setText(f"⚠️ Uncalibrated Gigabyte Keyboard (VID 0x{vid:04X} PID 0x{pid:04X})")
+            self.opts_card.setVisible(False)
+            self.active_color_badge.setText("Uncalibrated")
+            self.active_color_badge.setStyleSheet(
+                "color: #ecc94b; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                "border-radius: 12px; background-color: #171b25; border: 1px solid #744210;"
+            )
+            self.active_color_badge.setVisible(True)
+        else:
+            self.palette_container.setVisible(True)
+            self.kbd_unsupported_notice.setVisible(False)
+            self.kbd_uncalibrated_notice.setVisible(False)
+            self.opts_card.setVisible(True)
+            self.active_color_badge.setVisible(True)
 
     def _set_colour(self, colour: str) -> None:
         if self.cfg.get("brightness", 2) == 0:
@@ -310,6 +401,7 @@ class RgbPage(QWidget):
     def reload_from_config(self) -> None:
         """Synchronize UI with latest on-disk config without hardware writes."""
         self.cfg = load_config()
+        self._refresh_keyboard_support()
 
         # Update Colour buttons and header badge
         self._highlight_active()

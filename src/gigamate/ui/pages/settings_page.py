@@ -8,7 +8,6 @@ Allows configuring:
 """
 
 import subprocess
-from pathlib import Path
 from typing import Optional
 
 from PyQt6.QtCore import Qt
@@ -22,8 +21,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, save as save_config
-from ...profiles import get_dmi_product_name, detect_device
 from ...system_power import sync_system_power
 
 
@@ -127,16 +126,45 @@ class SettingsPage(QWidget):
         grid = QHBoxLayout()
         grid.setSpacing(12)
 
-        product_name = get_dmi_product_name() or "Gigabyte Laptop"
-        grid.addWidget(self._make_chip("Device Model", product_name, "💻"))
+        caps = detect_system_capabilities()
 
-        dev = detect_device()
-        dev_str = f"0x{dev[0]:04x}:0x{dev[1]:04x}" if dev else "ITE 8297 USB"
-        grid.addWidget(self._make_chip("Keyboard HID", dev_str, "⌨️"))
+        # 1. Device Model
+        model_sub = "(Supported)" if caps.is_gigabyte_laptop else "(Generic)"
+        grid.addWidget(self._make_chip("Device Model", caps.product_name, "💻", model_sub))
 
-        acpi_path = Path("/sys/devices/platform/gigamate_acpi")
-        driver_str = "gigamate_acpi (Loaded)" if acpi_path.exists() else "Standard ACPI"
-        grid.addWidget(self._make_chip("ACPI Driver", driver_str, "⚡"))
+        # 2. Keyboard HID
+        if caps.keyboard_detected and caps.keyboard_vid_pid:
+            vid, pid = caps.keyboard_vid_pid
+            kbd_val = f"0x{vid:04X}:0x{pid:04X}"
+            kbd_sub = "(Profile Mapped)" if caps.keyboard_profile_loaded else "(Uncalibrated)"
+        else:
+            kbd_val = "Not Detected"
+            kbd_sub = "(No RGB Controller)"
+        grid.addWidget(self._make_chip("Keyboard HID", kbd_val, "⌨️", kbd_sub))
+
+        # 3. ACPI Driver
+        if caps.acpi_driver_loaded:
+            acpi_val = "gigamate_acpi"
+            acpi_sub = "(Active / Loaded)"
+        elif caps.is_gigabyte_laptop:
+            acpi_val = "Not Loaded"
+            acpi_sub = "(DKMS Required)"
+        else:
+            acpi_val = "Standard ACPI"
+            acpi_sub = "(Generic Linux)"
+        grid.addWidget(self._make_chip("ACPI Driver", acpi_val, "⚡", acpi_sub))
+
+        # 4. Battery Limiter
+        if caps.charge_limit_supported:
+            bat_val = "Supported"
+            bat_sub = "(EC / sysfs)"
+        elif caps.battery_present:
+            bat_val = "Unsupported"
+            bat_sub = "(Firmware Limited)"
+        else:
+            bat_val = "No Battery"
+            bat_sub = "(Continuous AC)"
+        grid.addWidget(self._make_chip("Charge Limiter", bat_val, "🔋", bat_sub))
 
         d_layout.addLayout(grid)
         layout.addWidget(diag_card)
@@ -146,7 +174,7 @@ class SettingsPage(QWidget):
         # Update service status
         self._refresh_service_status()
 
-    def _make_chip(self, title: str, val_text: str, icon_str: str) -> QFrame:
+    def _make_chip(self, title: str, val_text: str, icon_str: str, sub_text: str = "") -> QFrame:
         chip = QFrame()
         chip.setProperty("class", "StatusChip")
         c_lay = QVBoxLayout(chip)
@@ -169,6 +197,12 @@ class SettingsPage(QWidget):
         val_lbl = QLabel(val_text)
         val_lbl.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600; margin-top: 2px;")
         c_lay.addWidget(val_lbl)
+
+        if sub_text:
+            sub_lbl = QLabel(sub_text)
+            sub_lbl.setStyleSheet("color: #8896ab; font-size: 10px; font-weight: 500;")
+            c_lay.addWidget(sub_lbl)
+
         return chip
 
     def _on_startup_apply_toggled(self, checked: bool) -> None:

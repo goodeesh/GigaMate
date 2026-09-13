@@ -1,4 +1,6 @@
 import os
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 # Ensure headless Qt execution in tests
@@ -357,6 +359,247 @@ def test_settings_page(qapp):
     page.reload_from_config()
     assert page.chk_startup_apply.isChecked() is False
     assert page.chk_sync_power.isChecked() is False
+
+
+def test_battery_page_when_battery_missing(qapp):
+    """Verify BatteryPage gracefully handles desktop / continuous AC mode."""
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.battery import BatteryInfo
+
+    mock_info = BatteryInfo(present=False, ac_online=True)
+    with patch("gigamate.ui.pages.battery_page.get_battery_manager") as mock_getter:
+        mock_mgr = MagicMock()
+        mock_mgr.is_available = False
+        mock_mgr.is_charge_limit_supported.return_value = False
+        mock_mgr.get_battery_info.return_value = mock_info
+        mock_getter.return_value = mock_mgr
+
+        page = BatteryPage()
+        page.show()
+        qapp.processEvents()
+        assert page.progress_bar.isVisible() is False
+        assert page.slider_container.isVisible() is False
+        assert page.unsupported_notice.isVisible() is True
+        assert "Continuous AC" in page.notice_title.text()
+
+
+def test_battery_page_when_charge_limit_unsupported(qapp):
+    """Verify BatteryPage shows diagnostics but hides limiter when firmware lacks charge registers."""
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.battery import BatteryInfo
+
+    mock_info = BatteryInfo(present=True, capacity=85, status="Discharging", ac_online=False)
+    with patch("gigamate.ui.pages.battery_page.get_battery_manager") as mock_getter:
+        mock_mgr = MagicMock()
+        mock_mgr.is_available = True
+        mock_mgr.is_charge_limit_supported.return_value = False
+        mock_mgr.get_battery_info.return_value = mock_info
+        mock_getter.return_value = mock_mgr
+
+        page = BatteryPage()
+        page.show()
+        qapp.processEvents()
+        assert page.progress_bar.isVisible() is True
+        assert page.slider_container.isVisible() is False
+        assert page.unsupported_notice.isVisible() is True
+        assert "Hardware Charge Limiting Unavailable" in page.notice_title.text()
+
+
+def test_dashboard_page_when_acpi_driver_missing(qapp):
+    """Verify DashboardPage shows ACPI driver warning when module is not loaded on Gigabyte laptop."""
+    from gigamate.ui.pages.dashboard_page import DashboardPage
+    from gigamate.capabilities import HardwareCapabilities
+
+    mock_caps = HardwareCapabilities(
+        product_name="GIGABYTE AERO 16",
+        is_gigabyte_laptop=True,
+        acpi_available=False,
+        acpi_backend="none",
+        acpi_driver_loaded=False,
+        acpi_driver_missing=True,
+        has_power_profiles=False,
+        has_temperature=False,
+        has_fan_rpm=False,
+        fan_count=0,
+        battery_present=True,
+        charge_limit_supported=True,
+        battery_name="BAT0",
+        keyboard_detected=True,
+        keyboard_profile_loaded=True,
+        keyboard_profile_name="Aero 16",
+        keyboard_vid_pid=(0x0414, 0x8105),
+        has_dgpu=True,
+        gpu_name="NVIDIA GPU",
+    )
+
+    with patch("gigamate.ui.pages.dashboard_page.detect_system_capabilities", return_value=mock_caps), \
+         patch("gigamate.ui.pages.dashboard_page.AcpiController") as mock_ctrl_cls:
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = False
+        mock_ctrl_cls.return_value = mock_ctrl
+
+        page = DashboardPage()
+        page.show()
+        qapp.processEvents()
+        assert page.acpi_warning_box.isVisible() is True
+        assert "ACPI Kernel Driver" in page.wb_title.text()
+        for btn in page._profile_buttons.values():
+            assert btn.isEnabled() is False
+
+
+def test_dashboard_page_when_non_gigabyte(qapp):
+    """Verify DashboardPage shows the generic-hardware notice on non-Gigabyte machines."""
+    from gigamate.ui.pages.dashboard_page import DashboardPage
+    from gigamate.capabilities import HardwareCapabilities
+    from gigamate.gpu import GpuState
+
+    mock_caps = HardwareCapabilities(
+        product_name="Dell XPS 15",
+        is_gigabyte_laptop=False,
+        acpi_available=False,
+        acpi_backend="none",
+        acpi_driver_loaded=False,
+        acpi_driver_missing=False,
+        has_power_profiles=False,
+        has_temperature=False,
+        has_fan_rpm=False,
+        fan_count=0,
+        battery_present=True,
+        charge_limit_supported=False,
+        battery_name="BAT0",
+        keyboard_detected=False,
+        keyboard_profile_loaded=False,
+        keyboard_profile_name=None,
+        keyboard_vid_pid=None,
+        has_dgpu=True,
+        gpu_name="NVIDIA GPU",
+    )
+
+    with patch("gigamate.ui.pages.dashboard_page.detect_system_capabilities", return_value=mock_caps), \
+         patch("gigamate.ui.pages.dashboard_page.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.ui.pages.dashboard_page.get_gpu_state", return_value=GpuState(present=False)):
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = False
+        mock_ctrl_cls.return_value = mock_ctrl
+
+        page = DashboardPage()
+        page.show()
+        qapp.processEvents()
+        assert page.acpi_warning_box.isVisible() is True
+        assert "Non-Gigabyte" in page.wb_title.text()
+        for btn in page._profile_buttons.values():
+            assert btn.isEnabled() is False
+
+
+def test_dashboard_page_single_fan(qapp):
+    """Verify a single-fan chassis shows one unified System Fan tile."""
+    from PyQt6.QtWidgets import QLabel
+    from gigamate.ui.pages.dashboard_page import DashboardPage
+    from gigamate.acpi import AcpiCapabilities, FanProfile, FanState
+    from gigamate.gpu import GpuState
+
+    caps = AcpiCapabilities(
+        has_temperature=True,
+        has_fan_rpm=True,
+        has_fan_duty=True,
+        has_power_profiles=True,
+        fan_count=1,
+        backend="module",
+    )
+    state = FanState(temp_cpu=52, fan1_rpm=1350, duty_total=32, profile=FanProfile.BALANCED)
+
+    with patch("gigamate.ui.pages.dashboard_page.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.ui.pages.dashboard_page.get_gpu_state", return_value=GpuState(present=False)):
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = True
+        mock_ctrl.capabilities = caps
+        mock_ctrl.get_profile.return_value = FanProfile.BALANCED.value
+        mock_ctrl.read_state.return_value = state
+        mock_ctrl_cls.return_value = mock_ctrl
+
+        page = DashboardPage()
+        page.show()
+        qapp.processEvents()
+        assert page.fan2_tile.isVisible() is False
+        title = page.findChild(QLabel, "stat_fan1_rpm_title")
+        assert title is not None
+        assert title.text() == "System Fan Speed"
+
+
+def test_rgb_page_when_keyboard_not_detected(qapp):
+    """Verify RgbPage shows notice when no compatible keyboard is detected."""
+    from gigamate.ui.pages.rgb_page import RgbPage
+    from gigamate.capabilities import HardwareCapabilities
+
+    mock_caps = HardwareCapabilities(
+        product_name="Generic PC",
+        is_gigabyte_laptop=False,
+        acpi_available=False,
+        acpi_backend="none",
+        acpi_driver_loaded=False,
+        acpi_driver_missing=False,
+        has_power_profiles=False,
+        has_temperature=False,
+        has_fan_rpm=False,
+        fan_count=0,
+        battery_present=False,
+        charge_limit_supported=False,
+        battery_name="None",
+        keyboard_detected=False,
+        keyboard_profile_loaded=False,
+        keyboard_profile_name=None,
+        keyboard_vid_pid=None,
+        has_dgpu=False,
+        gpu_name="Integrated Only",
+    )
+
+    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps):
+        page = RgbPage()
+        page.show()
+        qapp.processEvents()
+        assert page.palette_container.isVisible() is False
+        assert page.kbd_unsupported_notice.isVisible() is True
+        assert page.kbd_uncalibrated_notice.isVisible() is False
+        assert page.opts_card.isVisible() is False
+
+
+def test_rgb_page_when_keyboard_uncalibrated(qapp):
+    """Verify RgbPage shows calibration warning when Gigabyte keyboard has no profile."""
+    from gigamate.ui.pages.rgb_page import RgbPage
+    from gigamate.capabilities import HardwareCapabilities
+
+    mock_caps = HardwareCapabilities(
+        product_name="Gigabyte Aorus 15",
+        is_gigabyte_laptop=True,
+        acpi_available=True,
+        acpi_backend="module",
+        acpi_driver_loaded=True,
+        acpi_driver_missing=False,
+        has_power_profiles=True,
+        has_temperature=True,
+        has_fan_rpm=True,
+        fan_count=2,
+        battery_present=True,
+        charge_limit_supported=True,
+        battery_name="BAT0",
+        keyboard_detected=True,
+        keyboard_profile_loaded=False,
+        keyboard_profile_name=None,
+        keyboard_vid_pid=(0x0414, 0x8200),
+        has_dgpu=True,
+        gpu_name="NVIDIA GPU",
+    )
+
+    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps):
+        page = RgbPage()
+        page.show()
+        qapp.processEvents()
+        assert page.palette_container.isVisible() is False
+        assert page.kbd_unsupported_notice.isVisible() is False
+        assert page.kbd_uncalibrated_notice.isVisible() is True
+        assert "0x0414" in page.uncalibrated_title.text()
+        assert "0x8200" in page.uncalibrated_title.text()
+
 
 
 

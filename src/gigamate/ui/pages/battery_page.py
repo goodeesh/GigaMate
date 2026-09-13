@@ -63,22 +63,27 @@ class BatteryPage(QWidget):
         layout.addWidget(status_card)
 
         # ── Battery Care & Charge Threshold Card ──
-        care_card = QFrame()
-        care_card.setProperty("class", "Card")
-        c_layout = QVBoxLayout(care_card)
+        self.care_card = QFrame()
+        self.care_card.setProperty("class", "Card")
+        c_layout = QVBoxLayout(self.care_card)
         c_layout.setSpacing(14)
 
         c_title = QLabel("Battery Care & Charge Limiter")
         c_title.setProperty("class", "CardTitle")
-        c_sub = QLabel(
+        self.care_sub = QLabel(
             "Capping maximum charge at 80% significantly reduces chemical wear on lithium-ion "
             "cells, prolonging battery lifespan."
         )
-        c_sub.setProperty("class", "CardSubtitle")
+        self.care_sub.setProperty("class", "CardSubtitle")
         c_layout.addWidget(c_title)
-        c_layout.addWidget(c_sub)
+        c_layout.addWidget(self.care_sub)
 
-        # Slider row
+        # Container for interactive slider controls (shown when supported)
+        self.slider_container = QWidget()
+        sc_layout = QVBoxLayout(self.slider_container)
+        sc_layout.setContentsMargins(0, 0, 0, 0)
+        sc_layout.setSpacing(10)
+
         slider_layout = QHBoxLayout()
         slider_layout.setSpacing(14)
         self.slider_label = QLabel("Limit: 80%")
@@ -98,13 +103,36 @@ class BatteryPage(QWidget):
         slider_layout.addWidget(self.slider_label)
         slider_layout.addWidget(self.limit_slider)
         slider_layout.addWidget(self.apply_limit_btn)
-        c_layout.addLayout(slider_layout)
+        sc_layout.addLayout(slider_layout)
 
         self.limit_status_label = QLabel("")
         self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px;")
-        c_layout.addWidget(self.limit_status_label)
-        layout.addWidget(care_card)
+        sc_layout.addWidget(self.limit_status_label)
+        c_layout.addWidget(self.slider_container)
 
+        # Informational box (shown when charge limiting or battery is unsupported)
+        self.unsupported_notice = QFrame()
+        self.unsupported_notice.setStyleSheet(
+            "background-color: #171b26; border: 1px solid #283347; border-radius: 8px; padding: 14px;"
+        )
+        u_lay = QVBoxLayout(self.unsupported_notice)
+        u_lay.setContentsMargins(14, 12, 14, 12)
+        u_lay.setSpacing(4)
+
+        self.notice_title = QLabel("ℹ️ Hardware Charge Limiting Unavailable")
+        self.notice_title.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
+        self.notice_body = QLabel(
+            "Your laptop's Embedded Controller (EC) or current firmware does not expose a programmable "
+            "charge threshold. Battery health monitoring and charging diagnostics remain active."
+        )
+        self.notice_body.setStyleSheet("color: #8896ab; font-size: 12px;")
+        self.notice_body.setWordWrap(True)
+
+        u_lay.addWidget(self.notice_title)
+        u_lay.addWidget(self.notice_body)
+        c_layout.addWidget(self.unsupported_notice)
+
+        layout.addWidget(self.care_card)
         layout.addStretch()
 
         # Initial load
@@ -170,13 +198,25 @@ class BatteryPage(QWidget):
 
     def _refresh_battery_data(self) -> None:
         info = self.battery_mgr.get_battery_info()
+        is_supported = self.battery_mgr.is_charge_limit_supported()
+
         if not info.present:
-            self.status_label.setText("Status: No battery found")
-            self.ac_label.setText(f"Power: {'⚡ AC Connected' if info.ac_online else 'Unknown'}")
-            self.health_label.setText("Health: N/A")
-            self.progress_bar.setValue(0)
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("Status: Not Installed")
+            self.ac_label.setText(f"Power: {'⚡ AC Mains Online' if info.ac_online else 'Unknown'}")
+            self.health_label.setText("Health: Continuous AC")
+
+            # Update care card for desktop / no-battery mode
+            self.slider_container.setVisible(False)
+            self.unsupported_notice.setVisible(True)
+            self.notice_title.setText("⚡ Continuous AC Mains Power Mode")
+            self.notice_body.setText(
+                "No internal battery was detected on this system. Operating directly on continuous AC mains power. "
+                "Battery charge threshold limiting is not applicable."
+            )
             return
 
+        self.progress_bar.setVisible(True)
         self.progress_bar.setValue(info.capacity)
         self.status_label.setText(f"Status: {info.status} ({info.capacity}%)")
         self.ac_label.setText(f"Power: {'⚡ AC Connected' if info.ac_online else '🔋 On Battery'}")
@@ -186,3 +226,15 @@ class BatteryPage(QWidget):
             self.health_label.setText(f"Health: {info.health_percent:.1f}%{cycles_str}")
         else:
             self.health_label.setText("Health: Available")
+
+        if is_supported:
+            self.slider_container.setVisible(True)
+            self.unsupported_notice.setVisible(False)
+        else:
+            self.slider_container.setVisible(False)
+            self.unsupported_notice.setVisible(True)
+            self.notice_title.setText("ℹ️ Hardware Charge Limiting Unavailable")
+            self.notice_body.setText(
+                "Your laptop's Embedded Controller (EC) or current firmware does not expose a programmable "
+                "charge threshold. Battery health monitoring and charging diagnostics remain active."
+            )

@@ -25,6 +25,7 @@ from .pages.dashboard_page import DashboardPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import DARK_THEME
+from ..capabilities import detect_system_capabilities
 from ..config import CONFIG_FILE
 from ..paths import ICON_PATHS
 
@@ -190,18 +191,19 @@ class MainWindow(QMainWindow):
         daemon_row.addStretch()
         footer_layout.addLayout(daemon_row)
 
-        dmi_name = "Gigabyte Laptop"
-        dmi_path = Path("/sys/class/dmi/id/product_name")
-        if dmi_path.exists():
-            try:
-                raw_name = dmi_path.read_text().strip()
-                if raw_name:
-                    dmi_name = raw_name
-            except Exception:
-                pass
+        try:
+            sys_caps = detect_system_capabilities()
+            if sys_caps.is_gigabyte_laptop:
+                sys_name = sys_caps.product_name
+            else:
+                sys_name = f"{sys_caps.product_name} · Generic Device"
+        except Exception:
+            sys_name = "Standard PC"
 
-        sys_lbl = QLabel(dmi_name)
-        sys_lbl.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 500;")
+        sys_lbl = QLabel(sys_name)
+        color = "#64748b" if "Generic Device" in sys_name else "#8896ab"
+        sys_lbl.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: 500;")
+        sys_lbl.setWordWrap(True)
         footer_layout.addWidget(sys_lbl)
 
         sb_layout.addWidget(footer_widget)

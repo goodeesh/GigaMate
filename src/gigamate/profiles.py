@@ -213,6 +213,21 @@ def get_dmi_product_name() -> Optional[str]:
     return None
 
 
+def get_dmi_vendor() -> Optional[str]:
+    """Read the system vendor (OEM) string from sysfs DMI tables if available."""
+    dmi_path = Path("/sys/class/dmi/id")
+    try:
+        vendor_file = dmi_path / "sys_vendor"
+        if vendor_file.is_file():
+            vendor = vendor_file.read_text().strip()
+            if vendor and vendor.lower() not in ("", "none", "to be filled by o.e.m.", "default string"):
+                return vendor
+    except (OSError, IOError, PermissionError):
+        pass
+    return None
+
+
+
 def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[DeviceProfile]:
     if vid is None or pid is None:
         detected = detect_device()

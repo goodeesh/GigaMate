@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...acpi import AcpiController, FanProfile, FanState
+from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, save as save_config
 from ...gpu import get_gpu_state, gpu_status_text, sync_gpu_power
 from ...system_power import sync_system_power
@@ -50,6 +51,26 @@ class DashboardPage(QWidget):
         p_sub.setProperty("class", "CardSubtitle")
         prof_layout.addWidget(p_title)
         prof_layout.addWidget(p_sub)
+
+        # Warning box for uninstalled/unloaded ACPI driver or non-Gigabyte hardware
+        self.acpi_warning_box = QFrame()
+        self.acpi_warning_box.setStyleSheet(
+            "background-color: #2c1b12; border: 1px solid #744210; border-radius: 8px; padding: 12px;"
+        )
+        wb_lay = QVBoxLayout(self.acpi_warning_box)
+        wb_lay.setContentsMargins(12, 10, 12, 10)
+        wb_lay.setSpacing(4)
+        self.wb_title = QLabel("⚠️ ACPI Kernel Driver Not Loaded")
+        self.wb_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 600;")
+        self.wb_desc = QLabel(
+            "Hardware fan control and live telemetry require the gigamate_acpi kernel driver. "
+            "Run: sudo dkms install gigamate-acpi/3.0.0 or check Secure Boot."
+        )
+        self.wb_desc.setStyleSheet("color: #cbd5e0; font-size: 12px;")
+        self.wb_desc.setWordWrap(True)
+        wb_lay.addWidget(self.wb_title)
+        wb_lay.addWidget(self.wb_desc)
+        prof_layout.addWidget(self.acpi_warning_box)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
@@ -96,9 +117,13 @@ class DashboardPage(QWidget):
         grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 1, 1, 2)
 
         # Row 1: Cooling Fans & Total Duty
-        grid.addWidget(self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub"), 1, 0)
-        grid.addWidget(self._make_stat_tile("GPU Fan Speed", "stat_fan2_rpm", "🌀", "stat_fan2_sub"), 1, 1)
-        grid.addWidget(self._make_stat_tile("Total Fan Duty", "stat_duty", "📊", "stat_duty_sub"), 1, 2)
+        self.fan1_tile = self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub")
+        self.fan2_tile = self._make_stat_tile("GPU Fan Speed", "stat_fan2_rpm", "🌀", "stat_fan2_sub")
+        self.duty_tile = self._make_stat_tile("Total Fan Duty", "stat_duty", "📊", "stat_duty_sub")
+
+        grid.addWidget(self.fan1_tile, 1, 0)
+        grid.addWidget(self.fan2_tile, 1, 1)
+        grid.addWidget(self.duty_tile, 1, 2)
 
         t_layout.addLayout(grid)
         layout.addWidget(telemetry_card)
@@ -121,6 +146,7 @@ class DashboardPage(QWidget):
         hdr.addWidget(icon_lbl)
 
         lbl_title = QLabel(title)
+        lbl_title.setObjectName(f"{object_name}_title" if object_name else "")
         lbl_title.setStyleSheet("color: #718096; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
         hdr.addWidget(lbl_title)
         hdr.addStretch()
@@ -164,6 +190,25 @@ class DashboardPage(QWidget):
             self.acpi_ctrl = AcpiController()
 
         if self.acpi_ctrl.available:
+            self.acpi_warning_box.setVisible(False)
+            for btn in self._profile_buttons.values():
+                btn.setEnabled(True)
+
+            # Fan count awareness
+            caps = self.acpi_ctrl.capabilities
+            fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
+            fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
+            if caps.fan_count == 1:
+                self.fan2_tile.setVisible(False)
+                if fan1_title:
+                    fan1_title.setText("System Fan Speed")
+            else:
+                self.fan2_tile.setVisible(True)
+                if fan1_title:
+                    fan1_title.setText("CPU Fan Speed")
+                if fan2_title:
+                    fan2_title.setText("GPU Fan Speed")
+
             current_prof_id = self.acpi_ctrl.get_profile()
             state: FanState = self.acpi_ctrl.read_state()
 
@@ -203,6 +248,32 @@ class DashboardPage(QWidget):
                 duty_lbl.setText(f"{state.duty_total}%" if state.duty_total is not None else "--")
                 if duty_sub:
                     duty_sub.setText("Hardware Auto Curve")
+        else:
+            # ACPI unavailable — show warning box and disable buttons
+            sys_caps = detect_system_capabilities()
+            self.acpi_warning_box.setVisible(True)
+            if sys_caps.is_gigabyte_laptop:
+                self.wb_title.setText("⚠️ ACPI Kernel Driver (gigamate_acpi) Not Loaded")
+                self.wb_desc.setText(
+                    "Hardware fan profiles and live telemetry require the gigamate_acpi kernel module. "
+                    "Run: sudo dkms install gigamate-acpi/3.0.0 or check Secure Boot."
+                )
+                reason_str = "Driver Required"
+            else:
+                self.wb_title.setText("ℹ️ Non-Gigabyte Hardware Detected")
+                self.wb_desc.setText(
+                    "Hardware thermal profiles and Embedded Controller sensor telemetry are only available "
+                    "on supported Gigabyte Aero / AORUS laptops."
+                )
+                reason_str = "Unavailable"
+
+            for btn in self._profile_buttons.values():
+                btn.setEnabled(False)
+
+            for sub_name in ("stat_cpu_sub", "stat_fan1_sub", "stat_fan2_sub", "stat_duty_sub"):
+                lbl = self.findChild(QLabel, sub_name)
+                if lbl:
+                    lbl.setText(reason_str)
 
         # GPU State
         gpu = get_gpu_state()
