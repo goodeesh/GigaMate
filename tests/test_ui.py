@@ -23,17 +23,14 @@ def test_main_window_creation(qapp):
 
     win = MainWindow()
     assert win.windowTitle() == "GigaMate Center"
-    assert win.stack.count() == 4
+    assert win.stack.count() == 3
 
     # Check navigation switches pages
     win.btn_battery.click()
     assert win.stack.currentIndex() == 1
 
-    win.btn_gpu.click()
-    assert win.stack.currentIndex() == 2
-
     win.btn_rgb.click()
-    assert win.stack.currentIndex() == 3
+    assert win.stack.currentIndex() == 2
 
     win.btn_dashboard.click()
     assert win.stack.currentIndex() == 0

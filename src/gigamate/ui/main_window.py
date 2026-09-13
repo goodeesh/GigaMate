@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 
 from .pages.dashboard_page import DashboardPage
 from .pages.battery_page import BatteryPage
-from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .styles import DARK_THEME
 from ..config import CONFIG_FILE
@@ -156,8 +155,7 @@ class MainWindow(QMainWindow):
 
         self.btn_dashboard = self._add_nav_btn("⚡  Dashboard", 0, sb_layout)
         self.btn_battery = self._add_nav_btn("🔋  Battery Care", 1, sb_layout)
-        self.btn_gpu = self._add_nav_btn("🛡️  dGPU Sleep Guard", 2, sb_layout)
-        self.btn_rgb = self._add_nav_btn("🎨  RGB Lighting", 3, sb_layout)
+        self.btn_rgb = self._add_nav_btn("🎨  RGB Lighting", 2, sb_layout)
 
         sb_layout.addStretch()
 
@@ -169,12 +167,10 @@ class MainWindow(QMainWindow):
 
         self.page_dashboard = DashboardPage()
         self.page_battery = BatteryPage()
-        self.page_gpu = GpuPage()
         self.page_rgb = RgbPage()
 
         self.stack.addWidget(self.page_dashboard)
         self.stack.addWidget(self.page_battery)
-        self.stack.addWidget(self.page_gpu)
         self.stack.addWidget(self.page_rgb)
 
         root_layout.addWidget(self.stack)
