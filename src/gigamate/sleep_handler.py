@@ -153,6 +153,14 @@ class SleepHandler:
                 acpi_profile = cfg.get("acpi_profile", 1)
                 sync_gpu_power(acpi_profile)
 
+                # 4. Re-enforce battery charge limit (embedded controllers often reset limit on wake)
+                if cfg.get("charge_limit_enabled", False):
+                    limit = cfg.get("charge_limit")
+                    if limit:
+                        battery_mgr = get_battery_manager()
+                        if battery_mgr.is_charge_limit_supported():
+                            battery_mgr.set_charge_limit(limit)
+
             except Exception as exc:
                 logger.warning(f"Could not restore state on resume: {exc}")
 

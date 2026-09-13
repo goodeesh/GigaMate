@@ -1408,6 +1408,17 @@ class GigaMateTrayApp:
         else:
             set_static(dev, self._current_colour, self._current_brightness, self._profile)
 
+        # Apply battery charge limit if configured
+        if self._config.get("charge_limit_enabled", False):
+            limit = self._config.get("charge_limit")
+            if limit:
+                try:
+                    battery_mgr = get_battery_manager()
+                    if battery_mgr.is_charge_limit_supported():
+                        battery_mgr.set_charge_limit(limit)
+                except Exception:
+                    pass
+
     # ────────────────────────────────────────────
     # Menu management
     # ────────────────────────────────────────────
