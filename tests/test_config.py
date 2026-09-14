@@ -192,3 +192,9 @@ def test_bak_recovery_when_primary_missing(isolated_config):
     if isolated_config.exists():
         isolated_config.unlink()
     assert config_module.load()["colour"] == "green"
+
+
+def test_write_failure_does_not_raise(isolated_config, monkeypatch):
+    monkeypatch.setattr(config_module, "_atomic_write_bytes", lambda *a, **k: False)
+    cfg = config_module.update_config(lambda c: {**c, "colour": "red"})
+    assert cfg["colour"] == "red"

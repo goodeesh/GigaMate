@@ -321,7 +321,11 @@ def cmd_status(args) -> None:
                 print()
     else:
         print(f"  ACPI:  ❌ Not available")
-        print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
+        from .capabilities import detect_system_capabilities
+        if detect_system_capabilities().is_gigabyte_laptop:
+            print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
+        else:
+            print("     This is not a supported Gigabyte laptop; fan/power control is unavailable.")
         print()
 
     # Discrete GPU state
@@ -1244,12 +1248,21 @@ def _dispatch_calibrate(args) -> None:
     elif action == "acpi":
         cmd_calibrate_acpi(args)
     elif action == "all":
-        # Run both calibrations
+        # Run both calibrations; a missing RGB keyboard must not abort the
+        # ACPI half (and vice-versa).
         print("=== RGB Calibration ===")
-        cmd_calibrate_rgb(args)
+        try:
+            cmd_calibrate_rgb(args)
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                print("Skipping RGB calibration (no compatible keyboard detected).", file=sys.stderr)
         print()
         print("=== ACPI Calibration ===")
-        cmd_calibrate_acpi(args)
+        try:
+            cmd_calibrate_acpi(args)
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                print("Skipping ACPI calibration.", file=sys.stderr)
         print()
         print("Combined calibration complete.")
         print("Run 'gigamate profile contribute' to share your profile.")

@@ -168,8 +168,8 @@ hardware is changed until you choose it:
 
 Unsupported hardware (non-Gigabyte, no kernel module, no compatible keyboard,
 or no battery limit) is clearly reported and the corresponding options are
-skipped. Existing 2.0.x users get an "upgrade" variant that preserves their
-settings and only offers the new features.
+skipped. Existing 2.0.x users get an "upgrade" variant that keeps their current
+keyboard/idle settings and additionally offers the new features.
 
 ---
 

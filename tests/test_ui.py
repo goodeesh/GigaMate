@@ -770,3 +770,58 @@ def test_run_gui_refuses_root(qapp):
     with patch.object(main_window.os, "geteuid", return_value=0):
         with pytest.raises(SystemExit):
             main_window.run_gui()
+
+
+def test_tray_save_config_does_not_clobber_when_clean():
+    """A tray save with no tray-originated battery change must not write it."""
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._current_colour = "blue"
+        tray._current_brightness = 2
+        tray._startup_apply = False
+        tray._sync_system_power = False
+        tray._idle_enabled = False
+        tray._idle_timeout = 60
+        tray._current_acpi_profile = None
+        tray._config = {"colour": "blue", "charge_limit": 65, "charge_limit_enabled": True}
+        tray._battery_dirty = False
+        tray._get_config_mtime = MagicMock(return_value=100.0)
+
+        captured = {}
+
+        def fake_update(mutate):
+            cfg = mutate({"charge_limit": 80, "charge_limit_enabled": False})
+            captured.update(cfg)
+            return cfg
+
+        with patch("gigamate.tray.update_config", side_effect=fake_update):
+            tray._save_config()
+
+        assert captured["charge_limit"] == 80
+        assert captured["charge_limit_enabled"] is False
+
+
+def test_onboarding_unsupported_opts_out_everything(qapp):
+    from gigamate.capabilities import HardwareCapabilities
+    from gigamate.ui.onboarding import OnboardingWizard
+    from gigamate.config import load as load_config
+
+    caps = HardwareCapabilities(
+        product_name="Generic PC", is_gigabyte_laptop=False, acpi_available=False,
+        acpi_backend="none", acpi_driver_loaded=False, acpi_driver_missing=False,
+        has_power_profiles=False, has_temperature=False, has_fan_rpm=False, fan_count=0,
+        battery_present=False, charge_limit_supported=False, battery_name="None",
+        keyboard_detected=False, keyboard_profile_loaded=False, keyboard_profile_name=None,
+        keyboard_vid_pid=None, has_dgpu=False, gpu_name="Integrated Only",
+    )
+    with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=caps), \
+         patch("gigamate.ui.onboarding.has_user_config", return_value=False):
+        OnboardingWizard().accept()
+
+    cfg = load_config()
+    assert cfg["onboarding_complete"] is True
+    assert cfg["charge_limit_enabled"] is False
+    assert cfg["startup_apply"] is False
+    assert cfg["idle_off_enabled"] is False
+    assert cfg["sync_system_power"] is False

@@ -65,7 +65,8 @@ class SleepHandler:
             if self._listener_thread is not None and self._listener_thread.is_alive():
                 return False
             # Reserve the slot before the (slower) preflight so two concurrent
-            # callers cannot both start a listener.
+            # callers cannot both start a listener, and clear any stale stop.
+            self._stop_event.clear()
             self._listening = True
 
         try:
@@ -85,7 +86,6 @@ class SleepHandler:
             return False
 
         with self._lock:
-            self._stop_event.clear()
             self._listener_thread = threading.Thread(
                 target=self._run_dbus_listener,
                 daemon=True,
@@ -212,16 +212,30 @@ class SleepHandler:
             logger.info("System resumed from sleep: restoring state...")
             # Allow kernel and USB devices 500ms to re-enumerate
             time.sleep(0.5)
+            # Marshal the hardware reapply to the main loop when the signal
+            # arrived on the listener thread, so it cannot race UI writes.
+            if threading.current_thread() is threading.main_thread():
+                self._apply_resume()
+            else:
+                try:
+                    from gi.repository import GLib
 
-            try:
-                # apply_hardware_settings honours the opt-in flags
-                # (startup_apply / charge_limit_enabled / sync_system_power).
-                apply_hardware_settings()
-            except Exception as exc:
-                logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
+                    GLib.idle_add(self._apply_resume)
+                except Exception:
+                    self._apply_resume()
 
+    def _apply_resume(self) -> None:
+        """Re-apply the opted-in saved settings and run the resume hook."""
+        try:
+            # apply_hardware_settings honours the opt-in flags
+            # (startup_apply / charge_limit_enabled / sync_system_power).
+            apply_hardware_settings()
+        except Exception as exc:
+            logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
+
+        if self._on_resume_hook:
             try:
-                self._dispatch_hook(self._on_resume_hook)
+                self._on_resume_hook()
             except Exception as exc:
                 logger.warning(f"Resume hook failed: {exc}")
 

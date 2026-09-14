@@ -378,3 +378,15 @@ def test_forced_backend_reports_unavailable_when_absent(monkeypatch, tmp_path):
     monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "no-such-proc")
     ctrl = AcpiController(backend="module")
     assert ctrl.available is False
+
+
+def test_acpi_call_64bit_error_sentinel(monkeypatch):
+    class FakeProc:
+        def read_text(self):
+            return "0xffffffffffffffff\n"
+
+        def write_text(self, _):
+            pass
+
+    monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", FakeProc())
+    assert AcpiCallBackend()._wmbc_read(0xE1) is None

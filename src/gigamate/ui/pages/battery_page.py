@@ -185,15 +185,21 @@ class BatteryPage(QWidget):
 
     def _apply_charge_limit(self) -> None:
         val = self.limit_slider.value()
+        # Slider at 100% means "no limit": disable the limiter so it is not
+        # re-applied on boot/resume.
+        enabled = val < 100
         try:
             success = self.battery_mgr.set_charge_limit(val)
             if success:
                 def _mutate(cfg):
                     cfg["charge_limit"] = val
-                    cfg["charge_limit_enabled"] = True
+                    cfg["charge_limit_enabled"] = enabled
                     return cfg
                 update_config(_mutate)
-                self.limit_status_label.setText(f"✓ Battery charge threshold successfully set to {val}%")
+                if enabled:
+                    self.limit_status_label.setText(f"✓ Battery charge threshold successfully set to {val}%")
+                else:
+                    self.limit_status_label.setText("✓ Charge limiting disabled (charges to 100%)")
                 self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px;")
             else:
                 self.limit_status_label.setText("⚠ Unable to write charge limit (unsupported on this firmware)")
@@ -214,6 +220,7 @@ class BatteryPage(QWidget):
 
             # Update care card for desktop / no-battery mode
             self.slider_container.setVisible(False)
+            self.care_sub.setVisible(False)
             self.unsupported_notice.setVisible(True)
             self.notice_title.setText("⚡ Continuous AC Mains Power Mode")
             self.notice_body.setText(
@@ -235,9 +242,11 @@ class BatteryPage(QWidget):
 
         if is_supported:
             self.slider_container.setVisible(True)
+            self.care_sub.setVisible(True)
             self.unsupported_notice.setVisible(False)
         else:
             self.slider_container.setVisible(False)
+            self.care_sub.setVisible(False)
             self.unsupported_notice.setVisible(True)
             self.notice_title.setText("ℹ️ Hardware Charge Limiting Unavailable")
             self.notice_body.setText(

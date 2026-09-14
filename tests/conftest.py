@@ -35,9 +35,28 @@ def _no_real_hardware(monkeypatch, tmp_path):
     # Names bound at import time in UI modules must be redirected too.
     monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
     monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
+    monkeypatch.setattr("gigamate.tray.CONFIG_FILE", cfg_file, raising=False)
 
     # ── User profiles isolation ──
     monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", tmp_path / "profiles", raising=False)
+
+    # ── Hermetic env ──
+    monkeypatch.delenv("GIGAMATE_FORCE_SETUP", raising=False)
+    monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
+
+    # ── IPC: never touch the live instance's socket/lock ──
+    sock = str(tmp_path / "gigamate-center-test.sock")
+    lock = str(tmp_path / "gigamate-center-test.lock")
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_PATH", sock, raising=False)
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_LOCK_PATH", lock, raising=False)
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_NAME", sock, raising=False)
+
+    # ── Sleep/idle: no real devices, bus, or X11 handles ──
+    monkeypatch.setattr("gigamate.sleep_handler.get_keyboard", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr("gigamate.sleep_handler.set_off", lambda *a, **k: True, raising=False)
+    for fn in ("mutter_idle_ms", "screensaver_idle_ms", "x11_idle_ms"):
+        monkeypatch.setattr(f"gigamate.idle.{fn}", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr("gigamate.tray.resolve_profile", lambda *a, **k: None, raising=False)
 
     # ── High-level hardware reapplication ──
     noop_apply = MagicMock(side_effect=_safe_apply_hardware_settings)

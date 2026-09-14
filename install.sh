@@ -696,7 +696,7 @@ main() {
     parse_args "$@"
 
     if [ "$(id -u)" = "0" ]; then
-        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "${BASH_SOURCE[0]:-}" ]; then
             info "Re-running install as ${SUDO_USER} (per-user install)..."
             exec sudo -u "$SUDO_USER" -H bash "${BASH_SOURCE[0]}" "$@"
         fi

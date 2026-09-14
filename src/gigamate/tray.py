@@ -1606,18 +1606,25 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
 
     def _save_config(self) -> None:
-        """Save current settings to config file (atomic read-modify-write)."""
+        """Save only the settings the tray actually changed (delta write)."""
         def _mutate(cfg):
-            cfg["colour"] = self._current_colour
-            cfg["brightness"] = self._current_brightness
-            cfg["startup_apply"] = self._startup_apply
-            cfg["sync_system_power"] = self._sync_system_power
-            cfg["idle_off_enabled"] = self._idle_enabled
-            cfg["idle_timeout_sec"] = self._idle_timeout
-            if self._current_acpi_profile is not None:
+            # Write a key only when the tray's value differs from its last
+            # known value, so a stale snapshot cannot clobber a concurrent
+            # Center/CLI edit made within the sync window.
+            pairs = (
+                ("colour", self._current_colour, self._config.get("colour")),
+                ("brightness", self._current_brightness, self._config.get("brightness")),
+                ("startup_apply", self._startup_apply, self._config.get("startup_apply")),
+                ("sync_system_power", self._sync_system_power, self._config.get("sync_system_power")),
+                ("idle_off_enabled", self._idle_enabled, self._config.get("idle_off_enabled")),
+                ("idle_timeout_sec", self._idle_timeout, self._config.get("idle_timeout_sec")),
+            )
+            for key, current, last in pairs:
+                if current != last:
+                    cfg[key] = current
+            if (self._current_acpi_profile is not None
+                    and self._current_acpi_profile != self._config.get("acpi_profile")):
                 cfg["acpi_profile"] = self._current_acpi_profile
-            # Only write the battery keys when the tray originated the change;
-            # otherwise a stale snapshot could clobber a Center/CLI update.
             if getattr(self, "_battery_dirty", False):
                 cfg["charge_limit"] = self._config.get("charge_limit", cfg.get("charge_limit"))
                 cfg["charge_limit_enabled"] = self._config.get(

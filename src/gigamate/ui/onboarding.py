@@ -79,8 +79,8 @@ class _WelcomePage(QWizardPage):
             else "Gigabyte laptop: no — fan/power control is unavailable",
             "Keyboard RGB: detected" if caps.keyboard_detected
             else "Keyboard RGB: not detected",
-            "ACPI driver (gigamate_acpi): loaded" if caps.acpi_driver_loaded
-            else "ACPI driver (gigamate_acpi): not loaded",
+            "ACPI fan/power control: loaded" if caps.acpi_available
+            else "ACPI fan/power control: not available",
             "Battery charge limit: supported" if caps.charge_limit_supported
             else "Battery charge limit: unsupported on this hardware",
         ]
@@ -128,8 +128,8 @@ class _RgbPage(QWizardPage):
             self.notice.setText("")
             self.notice.hide()
         else:
-            self.notice.setText("No compatible Gigabyte RGB keyboard was detected. "
-                                "This step can be configured later in Settings.")
+            self.notice.setText("No compatible Gigabyte RGB keyboard was detected. You can set this up "
+                                "later from the RGB Lighting page in GigaMate Center.")
             self.notice.show()
 
 
@@ -165,8 +165,7 @@ class _IdlePage(QWizardPage):
         if supported:
             self.notice.hide()
         else:
-            self.notice.setText("No compatible RGB keyboard detected; idle "
-                                "backlight control is unavailable.")
+            self.notice.setText("No compatible RGB keyboard detected; idle backlight control is unavailable.")
             self.notice.show()
 
 

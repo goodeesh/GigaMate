@@ -141,6 +141,9 @@ def load():
     if data is None:
         data = _read_json(CONFIG_DIR / "config.json.bak")
 
+    # Whether the active profile id was explicitly persisted (vs. the default).
+    has_stored_profile_id = isinstance(data, dict) and "profile_id" in data
+
     if data:
         if not isinstance(data, dict):
             logger.warning("config.json is not a JSON object; using defaults")
@@ -181,7 +184,8 @@ def load():
                 data.pop("acpi_profile", None)
         config.update(data)
 
-    if not config.get("profile_id"):
+    # Prefer the actually-connected keyboard profile unless one was stored.
+    if not has_stored_profile_id:
         detected = detect_device()
         if detected is not None:
             config["profile_id"] = list(detected)

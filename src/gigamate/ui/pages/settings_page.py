@@ -61,7 +61,8 @@ class SettingsPage(QWidget):
         self.chk_startup_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_startup_apply.toggled.connect(self._on_startup_apply_toggled)
 
-        subtext1 = QLabel("Restores power profile, battery charge threshold, and keyboard backlight when you log in.")
+        subtext1 = QLabel("Re-applies your saved keyboard backlight when you log in. "
+                          "The battery limit and power sync have their own toggles below.")
         subtext1.setStyleSheet("color: #8896ab; font-size: 12px; margin-left: 26px;")
         chk_box1.addWidget(self.chk_startup_apply)
         chk_box1.addWidget(subtext1)

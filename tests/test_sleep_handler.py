@@ -71,12 +71,19 @@ def test_sleep_handler_stop_listening_is_idempotent():
 
 def test_sleep_handler_start_stop_listening(monkeypatch):
     handler = SleepHandler()
-    # Avoid opening a real system-bus connection in tests.
+    # Avoid real bus + listener work in tests.
     monkeypatch.setattr(handler, "_run_dbus_listener", lambda: None)
+    try:
+        import gi
 
-    if not handler.start_listening():
-        pytest.skip("No D-Bus/Gio backend available in this environment")
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
 
+        monkeypatch.setattr(Gio, "bus_get_sync", lambda *a, **k: MagicMock())
+    except Exception:
+        pytest.skip("PyGObject Gio unavailable")
+
+    assert handler.start_listening() is True
     assert handler._listening is True
     handler.stop_listening()
     assert handler._listening is False

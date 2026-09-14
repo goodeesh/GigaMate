@@ -360,13 +360,15 @@ def manual_update_instructions(tag: Optional[str] = None) -> str:
     q_sha = shlex.quote(install_script_sha256_url(ref))
     return (
         "Ask an administrator to run this in a terminal:\n"
-        f"  curl -fL {install_script_url(ref)} -o /tmp/gigamate-install.sh\n"
-        f"  if curl -fL {q_sha} -o /tmp/gigamate-install.sh.sha256 2>/dev/null; then\n"
-        "    [ \"$(sha256sum /tmp/gigamate-install.sh | cut -d' ' -f1)\" = "
-        "\"$(cut -d' ' -f1 /tmp/gigamate-install.sh.sha256)\" ] || "
+        "  tmp=\"$(mktemp /tmp/gigamate-install.XXXXXX.sh)\"\n"
+        f"  curl -fL {install_script_url(ref)} -o \"$tmp\" || "
+        "{ echo 'download failed'; rm -f \"$tmp\"; exit 1; }\n"
+        f"  if curl -fL {q_sha} -o \"$tmp.sha256\" 2>/dev/null; then\n"
+        "    [ \"$(sha256sum \"$tmp\" | cut -d' ' -f1)\" = "
+        "\"$(cut -d' ' -f1 \"$tmp.sha256\")\" ] || "
         "{ echo 'install.sh checksum FAILED'; exit 1; }\n"
         "  else echo 'WARNING: no checksum available; proceeding unverified'; fi\n"
-        f"  bash /tmp/gigamate-install.sh --update --tag {shlex.quote(ref)}"
+        f"  bash \"$tmp\" --update --tag {shlex.quote(ref)}"
     )
 
 
