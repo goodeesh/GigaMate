@@ -38,6 +38,10 @@ jobs:
         run: |
           python -m pytest tests/ -v -rs --strict-markers
 
+      - name: Verify tray imports on system Python (has PyGObject)
+        run: |
+          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','3.0'); import sys; sys.path.insert(0,'src'); import gigamate.tray; print('tray imports OK')"
+
   validate-profiles:
     runs-on: ubuntu-latest
     steps:

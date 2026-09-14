@@ -438,3 +438,17 @@ def test_save_state_is_atomic_and_locked(tmp_path):
     assert updates.load_state(state_file)["latest_known"] == "v1.2.3"
     # No leftover temp files.
     assert not list(tmp_path.glob("*.tmp.*"))
+
+
+def test_update_state_merge_preserves_dismissal(tmp_path):
+    state_file = tmp_path / "update_state.json"
+    updates.save_state({"dismissed_version": "v1.0.0"}, state_file)
+
+    def _merge(state):
+        state["latest_known"] = "v2.0.0"
+        return state
+
+    merged = updates.update_update_state(_merge, state_file)
+    assert merged["dismissed_version"] == "v1.0.0"
+    assert merged["latest_known"] == "v2.0.0"
+    assert updates.load_state(state_file)["dismissed_version"] == "v1.0.0"

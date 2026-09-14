@@ -185,16 +185,18 @@ def detect_device() -> Optional[Tuple[int, int]]:
                 pid = dev.idProduct
             except (AttributeError, usb.core.USBError, ValueError):
                 continue
-            if vid in (0x0414, 0x1044):
+            if vid == 0x0414:
                 return (vid, pid)
-            if vid == 0x04D9:
-                # 0x04D9 is Holtek Semiconductor, widely used by generic mice/keyboards.
-                # Only treat as Gigabyte if (vid, pid) is in known profiles or manufacturer is GIGABYTE.
+            if vid in (0x1044, 0x04D9):
+                # 0x1044 (Chu Yuen) and 0x04D9 (Holtek) are shared ODM VIDs also
+                # used by non-Gigabyte peripherals. Only treat as Gigabyte when
+                # the (vid, pid) is a known profile or the device reports a
+                # Gigabyte manufacturer string.
                 if (vid, pid) in known:
                     return (vid, pid)
                 try:
                     mfr = (dev.manufacturer or "").upper()
-                    if "GIGABYTE" in mfr:
+                    if "GIGABYTE" in mfr or "AORUS" in mfr:
                         return (vid, pid)
                 except Exception:
                     pass

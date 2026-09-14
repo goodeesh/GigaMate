@@ -33,7 +33,7 @@ jobs:
           set -euo pipefail
           extra=()
           case "$TAG" in
-            *a[0-9]*|*b[0-9]*|*rc[0-9]*) extra+=(--prerelease) ;;
+            *[-.]a[0-9]*|*[-.]b[0-9]*|*[-.]rc[0-9]*|*alpha*|*beta*) extra+=(--prerelease) ;;
           esac
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --generate-notes "${extra[@]}"

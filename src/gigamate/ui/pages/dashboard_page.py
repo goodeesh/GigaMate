@@ -260,22 +260,30 @@ class DashboardPage(QWidget):
                     if cpu_sub:
                         cpu_sub.setText("Monitoring")
 
-            # Fans
+            # Fans (a failed read is unknown, not "stopped")
             f1_lbl = self.findChild(QLabel, "stat_fan1_rpm")
             f1_sub = self.findChild(QLabel, "stat_fan1_sub")
             if f1_lbl:
-                rpm1 = state.fan1_rpm if state.fan1_rpm is not None else 0
-                f1_lbl.setText(f"{rpm1} RPM")
-                if f1_sub:
-                    f1_sub.setText("Silent / Stopped" if rpm1 == 0 else "Active Exhaust")
+                if state.fan1_rpm is None:
+                    f1_lbl.setText("--")
+                    if f1_sub:
+                        f1_sub.setText("No data")
+                else:
+                    f1_lbl.setText(f"{state.fan1_rpm} RPM")
+                    if f1_sub:
+                        f1_sub.setText("Silent / Stopped" if state.fan1_rpm == 0 else "Active Exhaust")
 
             f2_lbl = self.findChild(QLabel, "stat_fan2_rpm")
             f2_sub = self.findChild(QLabel, "stat_fan2_sub")
             if f2_lbl:
-                rpm2 = state.fan2_rpm if state.fan2_rpm is not None else 0
-                f2_lbl.setText(f"{rpm2} RPM")
-                if f2_sub:
-                    f2_sub.setText("Silent / Stopped" if rpm2 == 0 else "Active Exhaust")
+                if state.fan2_rpm is None:
+                    f2_lbl.setText("--")
+                    if f2_sub:
+                        f2_sub.setText("No data")
+                else:
+                    f2_lbl.setText(f"{state.fan2_rpm} RPM")
+                    if f2_sub:
+                        f2_sub.setText("Silent / Stopped" if state.fan2_rpm == 0 else "Active Exhaust")
 
             duty_lbl = self.findChild(QLabel, "stat_duty")
             duty_sub = self.findChild(QLabel, "stat_duty_sub")

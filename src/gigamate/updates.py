@@ -119,16 +119,7 @@ def save_state(state: Dict, state_file: Path = STATE_FILE) -> None:
         lock = open(lock_path, "a+")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            tmp = state_file.with_name(state_file.name + f".tmp.{os.getpid()}")
-            try:
-                tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-                os.replace(tmp, state_file)
-            finally:
-                if tmp.exists():
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass
+            _save_state_locked(state, state_file)
         finally:
             try:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -137,6 +128,41 @@ def save_state(state: Dict, state_file: Path = STATE_FILE) -> None:
             lock.close()
     except OSError:
         pass
+
+
+def _save_state_locked(state: Dict, state_file: Path) -> None:
+    """Write state assuming the file lock is already held."""
+    tmp = state_file.with_name(state_file.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, state_file)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def update_update_state(mutator, state_file: Path = STATE_FILE) -> Dict:
+    """Atomically read-modify-write the update state under the file lock."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_name(state_file.name + ".lock")
+    lock = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load_state(state_file)
+        result = mutator(state)
+        if isinstance(result, dict):
+            state = result
+        _save_state_locked(state, state_file)
+        return state
+    finally:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
 
 
 def _http_get_json(url: str, timeout: int,
@@ -236,7 +262,7 @@ def check_for_updates(force: bool = False,
     if not force and not should_check(now, state.get("last_check_ts")):
         latest = cached_latest if isinstance(cached_latest, str) else None
         dismissed = state.get("dismissed_version")
-        avail = bool(latest and is_newer(latest.lstrip("v"), current)
+        avail = bool(latest and is_newer(latest, current)
                      and dismissed != latest)
         return {"current": current, "latest": latest,
                 "update_available": avail, "checked_now": False,
@@ -244,14 +270,17 @@ def check_for_updates(force: bool = False,
 
     latest = fetch_latest_version(timeout=timeout, urlopen=urlopen)
     reachable = latest is not None or _http_reachable(urlopen)
-    state["last_check_ts"] = now
-    if latest:
-        state["latest_known"] = latest
-    save_state(state, state_file)
+    # Merge under the file lock so a concurrent tray/CLI dismiss is preserved.
+    def _merge(state):
+        state["last_check_ts"] = now
+        if latest:
+            state["latest_known"] = latest
+        return state
+    state = update_update_state(_merge, state_file)
 
     known = latest or (cached_latest if isinstance(cached_latest, str) else None)
     dismissed = state.get("dismissed_version")
-    avail = bool(known and is_newer(known.lstrip("v"), current)
+    avail = bool(known and is_newer(known, current)
                  and dismissed != known)
     return {"current": current, "latest": known,
             "update_available": avail, "checked_now": latest is not None,
@@ -259,17 +288,18 @@ def check_for_updates(force: bool = False,
 
 
 def dismiss_version(tag: str, state_file: Path = STATE_FILE) -> None:
-    state = load_state(state_file)
-    state["dismissed_version"] = tag
-    save_state(state, state_file)
+    def _dismiss(state):
+        state["dismissed_version"] = tag
+        return state
+    update_update_state(_dismiss, state_file)
 
 
 def undismiss(state_file: Path = STATE_FILE) -> None:
     """Clear a dismissal (e.g. after a failed update) so the badge returns."""
-    state = load_state(state_file)
-    if "dismissed_version" in state:
-        del state["dismissed_version"]
-        save_state(state, state_file)
+    def _undismiss(state):
+        state.pop("dismissed_version", None)
+        return state
+    update_update_state(_undismiss, state_file)
 
 
 def admin_status(run: Callable = subprocess.run) -> str:
@@ -380,13 +410,14 @@ def _download_verify_run(url: str, extra_args: str,
 def manual_update_instructions(tag: Optional[str] = None) -> str:
     """Checksum-verified, no-pipe update command for an administrator."""
     ref = tag or _pinned_ref()
+    q_url = shlex.quote(install_script_url(ref))
     q_sha = shlex.quote(install_script_sha256_url(ref))
     return (
         "Ask an administrator to run this in a terminal:\n"
         "  tmp=\"$(mktemp /tmp/gigamate-install.XXXXXX.sh)\"\n"
-        f"  curl -fL {install_script_url(ref)} -o \"$tmp\" || "
+        f"  curl -fL --proto \"=https\" --max-time 60 {q_url} -o \"$tmp\" || "
         "{ echo 'download failed'; rm -f \"$tmp\"; exit 1; }\n"
-        f"  if curl -fL {q_sha} -o \"$tmp.sha256\" 2>/dev/null; then\n"
+        f"  if curl -fL --proto \"=https\" --max-time 30 {q_sha} -o \"$tmp.sha256\" 2>/dev/null; then\n"
         "    [ \"$(sha256sum \"$tmp\" | cut -d' ' -f1)\" = "
         "\"$(cut -d' ' -f1 \"$tmp.sha256\")\" ] || "
         "{ echo 'install.sh checksum FAILED'; exit 1; }\n"

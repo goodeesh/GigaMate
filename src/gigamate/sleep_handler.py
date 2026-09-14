@@ -188,26 +188,17 @@ class SleepHandler:
         """Dispatch clean hardware transitions before sleep and after wake."""
         if going_to_sleep:
             logger.info("System entering sleep: turning off RGB and cleaning state...")
-            # Only touch the keyboard when the user opted into startup control;
-            # otherwise we would change a backlight we do not manage.
-            try:
-                cfg = load_config()
-            except Exception:
-                cfg = {}
-            if cfg.get("startup_apply", False):
+            # Marshal the USB write to the main loop like the resume path, so
+            # it cannot race UI-thread writes to the same device.
+            if threading.current_thread() is threading.main_thread():
+                self._do_suspend()
+            else:
                 try:
-                    dev = get_keyboard()
-                    if dev is not None:
-                        profile = resolve_active_profile()
-                        set_off(dev, profile)
-                except Exception as exc:
-                    logger.warning(f"Could not turn off RGB on sleep: {exc}")
+                    from gi.repository import GLib
 
-            try:
-                self._dispatch_hook(self._on_suspend_hook)
-            except Exception as exc:
-                logger.warning(f"Suspend hook failed: {exc}")
-
+                    GLib.idle_add(self._do_suspend)
+                except Exception:
+                    self._do_suspend()
         else:
             logger.info("System resumed from sleep: restoring state...")
             # Allow kernel and USB devices 500ms to re-enumerate
@@ -223,6 +214,29 @@ class SleepHandler:
                     GLib.idle_add(self._apply_resume)
                 except Exception:
                     self._apply_resume()
+
+    def _keyboard_managed(self) -> bool:
+        """Whether the user opted into keyboard-backlight management."""
+        try:
+            return bool(load_config().get("startup_apply", False))
+        except Exception:
+            return False
+
+    def _do_suspend(self) -> None:
+        """Turn off the managed backlight and run the suspend hook."""
+        if self._keyboard_managed():
+            try:
+                dev = get_keyboard()
+                if dev is not None:
+                    profile = resolve_active_profile()
+                    set_off(dev, profile)
+            except Exception as exc:
+                logger.warning(f"Could not turn off RGB on sleep: {exc}")
+
+        try:
+            self._dispatch_hook(self._on_suspend_hook)
+        except Exception as exc:
+            logger.warning(f"Suspend hook failed: {exc}")
 
     def _apply_resume(self) -> None:
         """Re-apply the opted-in saved settings and run the resume hook."""

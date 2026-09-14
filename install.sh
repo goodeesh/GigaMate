@@ -70,10 +70,11 @@ for url in ('https://api.github.com/repos/${REPO}/releases/latest',
         continue
 " 2>/dev/null || true)"
     fi
-    # Accept stable tags; a prerelease only when the caller explicitly asked.
+    # Accept stable tags; a prerelease only when it is the explicitly
+    # requested tag (never silently picked up for stable users).
     if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "$tag"
-    elif [ -n "${REQUESTED_TAG:-}" ] && [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+    elif [[ -n "${REQUESTED_TAG:-}" && "$tag" == "$REQUESTED_TAG" && "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
         echo "$tag"
     fi
 }
