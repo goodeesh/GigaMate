@@ -266,11 +266,11 @@ class TestGetGpuState:
 
 
 class TestCmdGpuStatus:
-    def test_no_gpu_prints_nothing(self, capsys, monkeypatch):
+    def test_no_gpu_prints_integrated_message(self, capsys, monkeypatch):
         monkeypatch.setattr(cli_module, "get_gpu_state", lambda: GpuState(present=False))
         cmd_gpu_status(None)
         out = capsys.readouterr().out
-        assert out == ""
+        assert "No discrete GPU detected" in out
 
     def test_gpu_present_prints_state(self, capsys, monkeypatch):
         state = GpuState(present=True, status="suspended", power_state="D3cold")

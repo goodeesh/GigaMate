@@ -1,5 +1,6 @@
 """GigaMate Center — Performance & Hardware Dashboard."""
 
+import time
 from typing import Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -15,8 +16,8 @@ from PyQt6.QtWidgets import (
 
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
-from ...config import load as load_config, save as save_config
-from ...gpu import get_gpu_state, gpu_status_text, sync_gpu_power
+from ...config import load as load_config, update_config
+from ...gpu import get_gpu_state, gpu_status_text
 from ...system_power import sync_system_power
 
 
@@ -29,10 +30,19 @@ class DashboardPage(QWidget):
         self._profile_buttons = {}
         self._init_ui()
 
-        # Telemetry update timer (every 1.5s)
+        # Telemetry update timer (every 1.5s); only refreshes while visible.
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._refresh_telemetry)
+        self.timer.timeout.connect(self._on_telemetry_tick)
         self.timer.start(1500)
+
+    def _on_telemetry_tick(self) -> None:
+        """Timer entry point that skips work while the page is hidden."""
+        if self.isVisible():
+            self._refresh_telemetry()
+
+    def reload_from_config(self) -> None:
+        """Public page-lifecycle hook: refresh telemetry/highlight."""
+        self._refresh_telemetry()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -64,7 +74,7 @@ class DashboardPage(QWidget):
         self.wb_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 600;")
         self.wb_desc = QLabel(
             "Hardware fan control and live telemetry require the gigamate_acpi kernel driver. "
-            "Run: sudo dkms install gigamate-acpi/3.0.0 or check Secure Boot."
+            "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
         )
         self.wb_desc.setStyleSheet("color: #cbd5e0; font-size: 12px;")
         self.wb_desc.setWordWrap(True)
@@ -165,18 +175,33 @@ class DashboardPage(QWidget):
 
         return tile
 
+    def _ensure_acpi_controller(self) -> None:
+        """Re-probe for an ACPI backend at most once every 10 s when absent."""
+        if self.acpi_ctrl.available:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_acpi_retry_at", 0.0) < 10.0:
+            return
+        self._acpi_retry_at = now
+        self.acpi_ctrl = AcpiController()
+
     def _select_profile(self, profile: FanProfile) -> None:
-        """Switch ACPI profile and sync Dynamic Boost."""
-        if not self.acpi_ctrl.available:
-            self.acpi_ctrl = AcpiController()
+        """Switch ACPI profile and sync system/GPU power per user preference."""
+        self._ensure_acpi_controller()
+
+        def _mutate(cfg):
+            cfg["acpi_profile"] = profile.value
+            return cfg
+
+        cfg = update_config(_mutate)
 
         if self.acpi_ctrl.available:
             self.acpi_ctrl.set_profile(profile)
-            cfg = load_config()
-            cfg["acpi_profile"] = profile.value
-            save_config(cfg)
+
+        # sync_system_power() also synchronizes GPU power (Dynamic Boost /
+        # SmartShift); honour the user's preference like the tray and Settings.
+        if cfg.get("sync_system_power", True):
             sync_system_power(profile.value)
-            sync_gpu_power(profile.value)
 
         if profile in self._profile_buttons:
             self._profile_buttons[profile].setChecked(True)
@@ -186,8 +211,7 @@ class DashboardPage(QWidget):
     def _refresh_telemetry(self) -> None:
         """Update sensor numbers and highlight active profile."""
         current_prof_id: Optional[int] = None
-        if not self.acpi_ctrl.available:
-            self.acpi_ctrl = AcpiController()
+        self._ensure_acpi_controller()
 
         if self.acpi_ctrl.available:
             self.acpi_warning_box.setVisible(False)
@@ -198,11 +222,17 @@ class DashboardPage(QWidget):
             caps = self.acpi_ctrl.capabilities
             fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
             fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
-            if caps.fan_count == 1:
+            if not caps.has_fan_rpm:
+                # No fan telemetry: hide the tiles rather than fabricate 0 RPM.
+                self.fan1_tile.setVisible(False)
+                self.fan2_tile.setVisible(False)
+            elif caps.fan_count == 1:
+                self.fan1_tile.setVisible(True)
                 self.fan2_tile.setVisible(False)
                 if fan1_title:
                     fan1_title.setText("System Fan Speed")
             else:
+                self.fan1_tile.setVisible(True)
                 self.fan2_tile.setVisible(True)
                 if fan1_title:
                     fan1_title.setText("CPU Fan Speed")
@@ -210,7 +240,7 @@ class DashboardPage(QWidget):
                     fan2_title.setText("GPU Fan Speed")
 
             current_prof_id = self.acpi_ctrl.get_profile()
-            state: FanState = self.acpi_ctrl.read_state()
+            state: FanState = self.acpi_ctrl.read_state() or FanState()
 
             # CPU Temp
             cpu_lbl = self.findChild(QLabel, "stat_cpu_temp")
@@ -256,7 +286,7 @@ class DashboardPage(QWidget):
                 self.wb_title.setText("⚠️ ACPI Kernel Driver (gigamate_acpi) Not Loaded")
                 self.wb_desc.setText(
                     "Hardware fan profiles and live telemetry require the gigamate_acpi kernel module. "
-                    "Run: sudo dkms install gigamate-acpi/3.0.0 or check Secure Boot."
+                    "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
                 )
                 reason_str = "Driver Required"
             else:

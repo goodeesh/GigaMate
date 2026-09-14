@@ -184,7 +184,7 @@ class TestAcpiController:
 
     def test_no_backend_available(self, monkeypatch):
         # Ensure no env var and no sysfs/proc available
-        monkeypatch.delenv("GIGAMETE_ACPI_MOCK", raising=False)
+        monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
         ctrl = AcpiController()
         # On a non-Gigabyte system, this should have no backend
         # We can't guarantee this in CI, so just check it doesn't crash
@@ -195,7 +195,7 @@ class TestAcpiController:
         assert ctrl.available is True
 
     def test_read_state_no_backend(self, monkeypatch):
-        monkeypatch.delenv("GIGAMETE_ACPI_MOCK", raising=False)
+        monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
         # Make ModuleBackend and AcpiCallBackend both fail by pointing to nonexistent paths
         # This is tricky to test without mocking — just ensure no crash
         # We'll test with an invalid backend name instead
@@ -283,6 +283,65 @@ class TestAcpiCallBackendDetection:
         assert caps.has_fan_rpm is True
         assert caps.has_power_profiles is True
 
+    def test_module_backend_detects_single_fan(self, monkeypatch, tmp_path):
+        """Only attributes that actually read are counted (fan_count == 1)."""
+        sysfs_dir = tmp_path / "gigamate_acpi"
+        sysfs_dir.mkdir()
+        (sysfs_dir / "temp1_input").write_text("50\n")
+        (sysfs_dir / "fan1_input").write_text("2500\n")
+        # fan2_input exists (module creates it) but is unreadable.
+        (sysfs_dir / "fan2_input").mkdir()
+        (sysfs_dir / "profile").write_text("1\n")
+        monkeypatch.setattr(acpi_module, "GIGAMATE_ACPI_SYSFS", sysfs_dir)
+
+        backend = ModuleBackend()
+        caps = backend.detect()
+        assert caps.fan_count == 1
+
+
+class TestAcpiCallBackendSafety:
+    def test_detect_never_writes_a_profile(self, monkeypatch, tmp_path):
+        """detect() must be read-only: no WMBD write probe (would change profile)."""
+        proc = tmp_path / "call"
+        proc.write_text("0x0\n")
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", proc)
+        monkeypatch.setattr(os, "access", lambda path, mode: True)
+
+        writes = []
+        monkeypatch.setattr(
+            AcpiCallBackend, "_wmbd_write",
+            lambda self, cmd, val: writes.append((cmd, val)),
+        )
+        AcpiCallBackend().detect()
+        assert writes == []
+
+    def test_hex_reply_is_parsed(self, monkeypatch, tmp_path):
+        class FakeProc:
+            def exists(self):
+                return True
+
+            def read_text(self):
+                return "0x1a\n"
+
+            def write_text(self, _):
+                pass
+
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", FakeProc())
+        backend = AcpiCallBackend()
+        assert backend._wmbc_read(0xE1) == 26
+
+    def test_error_sentinel_returns_none(self, monkeypatch):
+        class FakeProc:
+            def read_text(self):
+                return "0xffffffff\n"
+
+            def write_text(self, _):
+                pass
+
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", FakeProc())
+        backend = AcpiCallBackend()
+        assert backend._wmbc_read(0xE1) is None
+
 
 class TestProbeAcpiCapabilities:
     def test_probe_with_mock(self):
@@ -295,3 +354,11 @@ class TestProbeAcpiCapabilities:
         # Just ensure it doesn't crash
         caps = probe_acpi_capabilities()
         assert isinstance(caps, AcpiCapabilities)
+
+
+def test_forced_backend_reports_unavailable_when_absent(monkeypatch, tmp_path):
+    monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
+    monkeypatch.setattr(acpi_module, "GIGAMATE_ACPI_SYSFS", tmp_path / "no-such-sysfs")
+    monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "no-such-proc")
+    ctrl = AcpiController(backend="module")
+    assert ctrl.available is False

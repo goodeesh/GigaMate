@@ -60,14 +60,14 @@ try:
 except Exception:
     print('')" 2>/dev/null || true)"
     fi
-    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
         echo "$tag"
     fi
 }
 
 installed_version() {
     if command -v gigamate &>/dev/null; then
-        gigamate version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+        gigamate version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?' | head -1
     elif python3 -c "import gigamate" 2>/dev/null; then
         python3 -c "import gigamate; print(gigamate.__version__)" 2>/dev/null || true
     fi
@@ -104,16 +104,36 @@ ensure_checkout() {
     tmpdir="$(mktemp -d)"
     tarball="$tmpdir/gigamate.tar.gz"
     local url
-    if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
         url="https://codeload.github.com/${REPO}/tar.gz/refs/tags/${ref}"
     else
         url="https://codeload.github.com/${REPO}/tar.gz/refs/heads/${ref}"
-        if ! curl -sSL --max-time 60 -o "$tarball" "$url"; then
+    fi
+    if ! curl -fL --proto "=https" --max-time 60 -o "$tarball" "$url"; then
+        if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
             url="https://github.com/${REPO}/archive/refs/heads/${ref}.tar.gz"
+            curl -fL --proto "=https" --max-time 60 -o "$tarball" "$url" || {
+                error "Download failed: $url"; exit 1; }
+        else
+            error "Download failed: $url"; exit 1
         fi
     fi
-    curl -sSL --max-time 60 -o "$tarball" "$url" || {
-        error "Download failed: $url"; exit 1; }
+
+    # Best-effort integrity check against the release-published checksum.
+    if [[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+        local tarball_sha_url="https://github.com/${REPO}/releases/download/${ref}/gigamate.tar.gz.sha256"
+        if curl -fL --proto "=https" --max-time 30 -o "$tmpdir/gigamate.tar.gz.sha256" "$tarball_sha_url" 2>/dev/null; then
+            local expected actual
+            expected="$(cut -d ' ' -f1 "$tmpdir/gigamate.tar.gz.sha256" | head -n1)"
+            actual="$(sha256sum "$tarball" | cut -d ' ' -f1)"
+            if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+                error "Tarball checksum verification FAILED"; exit 1
+            fi
+            info "Verified tarball checksum."
+        else
+            warn "No tarball checksum available; proceeding unverified."
+        fi
+    fi
     tar -xzf "$tarball" -C "$tmpdir" || { error "Extract failed"; exit 1; }
     top="$(find "$tmpdir" -maxdepth 1 -name 'GigaMate-*' | head -1)"
     if [ -z "$top" ] || [ ! -f "$top/install.sh" ]; then
@@ -310,6 +330,8 @@ build_kernel_module() {
                 info "DKMS build succeeded for $kver"
                 if sudo dkms install -m gigamate_acpi -v "$mod_version" -k "$kver" --force 2>/dev/null; then
                     info "DKMS install succeeded for $kver"
+                else
+                    warn "DKMS install failed for kernel $kver"
                 fi
             else
                 warn "DKMS build failed for kernel $kver"
@@ -385,7 +407,13 @@ build_kernel_module() {
         info "Module will auto-load on boot."
     fi
 
-    info "Kernel module installed successfully."
+    if [ -d /sys/devices/platform/gigamate_acpi ] || \
+       find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
+        info "Kernel module installed successfully."
+    else
+        warn "Kernel module was NOT installed for the running kernel."
+        warn "Fan/power features will be unavailable until a build succeeds."
+    fi
 }
 
 # --- Install Python package ---
@@ -558,6 +586,9 @@ install_desktop_entry() {
     local icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
     mkdir -p "$icon_dir"
     cp "$script_dir"/data/gigamate*.svg "$icon_dir/"
+    if [ -f "$script_dir/data/checkbox-checked.svg" ]; then
+        cp "$script_dir/data/checkbox-checked.svg" "$icon_dir/"
+    fi
     rm -f "$icon_dir/gigabyte-keyboard-rgb.svg" 2>/dev/null || true
 
     # Refresh caches
@@ -584,6 +615,12 @@ migrate_config() {
         info "Settings migrated. Old config left in place for safety."
         info "  Remove it later: rm -r $old_config"
     elif [ -d "$old_config" ] && [ -d "$new_config" ]; then
+        # The new dir may have been created by a running tray (config.json is
+        # auto-migrated in Python), so still copy any un-migrated profiles.
+        if [ -d "$old_config/profiles" ]; then
+            mkdir -p "$new_config/profiles"
+            cp -n "$old_config/profiles"/*.json "$new_config/profiles"/ 2>/dev/null || true
+        fi
         info "Both old and new config found. Using new config."
     else
         info "No migration needed."
@@ -626,9 +663,12 @@ main() {
     build_kernel_module
     install_udev
     configure_gpu_power
+    # Migrate the old config/profiles *before* starting the tray: the tray
+    # creates ~/.config/gigamate on launch, which would otherwise make
+    # migrate_config take the "both exist" branch and skip user profiles.
+    migrate_config
     install_service
     install_desktop_entry
-    migrate_config
 
     if [ "$DO_UPDATE" = true ]; then
         # install_service already restarted the tray; just drop the cached
@@ -676,7 +716,7 @@ main() {
     echo "    gigabyte-rgb-tray                Same as gigamate-tray"
     echo
     echo "  To contribute your profile:"
-    echo "    gigamate calibrate --all         Generate your model's profile"
+    echo "    gigamate calibrate all           Generate your model's profile"
     echo "    gigamate profile contribute      Guide to create a Pull Request"
     echo
     echo "  Tray app auto-starts on login via systemd."

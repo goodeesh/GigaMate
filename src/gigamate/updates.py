@@ -14,6 +14,7 @@ Design for battery efficiency:
 Stdlib only (urllib + json), gi-free so tests run without PyGObject.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -35,6 +36,7 @@ TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=1"
 RAW_VERSION_URL = (
     f"https://raw.githubusercontent.com/{REPO}/main/pyproject.toml"
 )
+# Last-resort bootstrap ref used only when no valid release tag is known.
 INSTALL_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.sh"
 
 CHECK_INTERVAL_SEC = 24 * 3600  # daily + startup
@@ -44,7 +46,11 @@ FETCH_TIMEOUT_SEC = 5
 STATE_FILE = CONFIG_DIR / "update_state.json"
 
 _TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-_VALID_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# Tag validation requires a leading 'v' (maintainer-pushed release tags).
+_VALID_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
+# Version parsing for comparison allows an optional 'v'.
+_PRERELEASE_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
+_PRE_RANK = {"a": 0, "b": 1, "rc": 2, "": 3}
 
 
 def parse_version(text: str) -> Tuple[int, int, int]:
@@ -55,16 +61,27 @@ def parse_version(text: str) -> Tuple[int, int, int]:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+def _version_key(text: str) -> Tuple[int, int, int, int, int]:
+    """Comparable key including pre-release ordering (a < b < rc < final)."""
+    m = _PRERELEASE_VERSION_RE.match((text or "").strip())
+    if not m:
+        raise ValueError(f"Invalid version: {text!r}")
+    pre = m.group(4) or ""
+    pre_num = int(m.group(5)) if m.group(5) else 0
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            _PRE_RANK[pre], pre_num)
+
+
 def is_newer(latest: str, current: str) -> bool:
-    """True if latest > current (both 'vX.Y.Z' or 'X.Y.Z')."""
+    """True if latest > current (handles pre-release suffixes)."""
     try:
-        return parse_version(latest) > parse_version(current)
+        return _version_key(latest) > _version_key(current)
     except ValueError:
         return False
 
 
 def is_valid_tag(tag: str) -> bool:
-    """Only maintainer-pushed release tags count (vX.Y.Z exactly)."""
+    """Only maintainer-pushed release tags count (vX.Y.Z[, aN|bN|rcN])."""
     return bool(_VALID_TAG_RE.match((tag or "").strip()))
 
 
@@ -95,9 +112,29 @@ def load_state(state_file: Path = STATE_FILE) -> Dict:
 
 
 def save_state(state: Dict, state_file: Path = STATE_FILE) -> None:
+    """Atomically persist update state, serialized across processes."""
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps(state, indent=2) + "\n")
+        lock_path = state_file.with_name(state_file.name + ".lock")
+        lock = open(lock_path, "a+")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            tmp = state_file.with_name(state_file.name + f".tmp.{os.getpid()}")
+            try:
+                tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp, state_file)
+            finally:
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+        finally:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock.close()
     except OSError:
         pass
 
@@ -253,10 +290,82 @@ def admin_status(run: Callable = subprocess.run) -> str:
 
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
 
-MANUAL_UPDATE_INSTRUCTIONS = (
-    "Ask an administrator to run this in a terminal:\n"
-    f"  curl -sSL {INSTALL_URL} | bash -s -- --update"
-)
+
+def install_script_url(tag: Optional[str] = None) -> str:
+    """Return the install.sh URL pinned to a release tag.
+
+    Falls back to ``main`` only when no valid tag is known (e.g. a repo with
+    no releases yet); callers should pass a discovered ``vX.Y.Z`` tag.
+    """
+    ref = (tag or "").strip()
+    if not is_valid_tag(ref):
+        ref = "main"
+    return f"https://raw.githubusercontent.com/{REPO}/{ref}/install.sh"
+
+
+def install_script_sha256_url(tag: Optional[str] = None) -> str:
+    """Release-asset URL for the install.sh checksum (published by CI)."""
+    ref = (tag or "").strip()
+    if not is_valid_tag(ref):
+        return ""
+    return f"https://github.com/{REPO}/releases/download/{ref}/install.sh.sha256"
+
+
+def _pinned_ref() -> str:
+    """Best-known release tag from cached update state, else ``main``."""
+    try:
+        tag = load_state().get("latest_known")
+    except Exception:
+        tag = None
+    return tag if isinstance(tag, str) and is_valid_tag(tag) else "main"
+
+
+def _download_verify_run(url: str, extra_args: str,
+                         sha_url: Optional[str] = None) -> str:
+    """Shell snippet: download (fail on HTTP error), verify, then run.
+
+    The download never pipes straight into a shell: it is written to a temp
+    file, the published ``install.sh.sha256`` release asset is verified when
+    available, and only then executed with ``bash``. Privileged steps inside
+    install.sh elevate individually, so the updater itself must not run as
+    root (that would break the user-level pip/systemd steps).
+    """
+    q_url = shlex.quote(url)
+    q_sha = shlex.quote(sha_url or "")
+    verify = (
+        f'if [ -n {q_sha} ] && curl -fL --proto "=https" -o "$tmp.sha256" {q_sha} 2>/dev/null; then '
+        '  expected="$(cut -d " " -f1 "$tmp.sha256" | head -n1)"; '
+        '  actual="$(sha256sum "$tmp" | cut -d " " -f1)"; '
+        '  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then '
+        '    echo "install.sh checksum verification FAILED" >&2; '
+        '    rm -f "$tmp" "$tmp.sha256"; exit 1; fi; '
+        '  echo "Verified install.sh checksum."; '
+        'else '
+        '  echo "WARNING: no checksum available for install.sh; proceeding unverified." >&2; '
+        'fi; '
+    )
+    return (
+        'tmp="$(mktemp)" || exit 1; '
+        f'if ! curl -fL --proto "=https" -o "$tmp" {q_url}; then '
+        '  echo "Failed to download install.sh" >&2; rm -f "$tmp"; exit 1; fi; '
+        + verify +
+        f'bash "$tmp" {extra_args}; rc=$?; '
+        'rm -f "$tmp" "$tmp.sha256"'
+    )
+
+
+def manual_update_instructions(tag: Optional[str] = None) -> str:
+    """Checksum-verified, no-pipe update command for an administrator."""
+    ref = tag or _pinned_ref()
+    return (
+        "Ask an administrator to run this in a terminal:\n"
+        f"  curl -fL {install_script_url(ref)} -o /tmp/gigamate-install.sh\n"
+        f"  curl -fL {install_script_sha256_url(ref)} -o /tmp/gigamate-install.sh.sha256 2>/dev/null && "
+        "(cd /tmp && sha256sum -c gigamate-install.sh.sha256) || "
+        'echo "WARNING: no checksum available; proceeding unverified"\n'
+        "  bash /tmp/gigamate-install.sh --update"
+    )
+
 
 
 def _capture_stdout(argv: list, timeout: int = 10,
@@ -393,7 +502,8 @@ def build_terminal_update_command(
         desktop: str = "",
         which: Callable[[str], Optional[str]] = shutil.which,
         detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
-        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+        env: Optional[Mapping[str, str]] = None,
+        tag: Optional[str] = None) -> Optional[list]:
     """Argv opening the user's terminal running the update, else None.
 
     Prefers the desktop's configured default terminal (KDE/GNOME/$TERMINAL/
@@ -401,8 +511,11 @@ def build_terminal_update_command(
     emulators. The update runs inside with the shell kept afterwards so
     output stays visible.
     """
-    inner = (f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes;"
-             f" exec bash")
+    ref = tag or _pinned_ref()
+    snippet = _download_verify_run(
+        install_script_url(ref), "--update --yes",
+        sha_url=install_script_sha256_url(ref) or None)
+    inner = f"{snippet}; exec bash"
     detect_fn = detect if detect is not None else (
         lambda: _default_detect(env, which))
     try:
@@ -461,14 +574,16 @@ def menu_item_label(update_available: bool) -> str:
     return "Update available" if update_available else "Check for updates"
 
 
-def build_update_command(log_file: Path = UPDATE_LOG_FILE) -> list:
+def build_update_command(log_file: Path = UPDATE_LOG_FILE,
+                         tag: Optional[str] = None) -> list:
     """Argv the tray spawns in background to self-update non-interactively.
 
     Output goes to ``log_file`` so silent background failures stay
     diagnosable (the tray shows the path when the updater exits non-zero).
     """
-    # Piped through bash -s -- so it works without a local checkout;
-    # install.sh bootstraps the latest tag itself (see --update).
-    return ["bash", "-c",
-            f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes"
-            f" >{shlex.quote(str(log_file))} 2>&1"]
+    ref = tag or _pinned_ref()
+    snippet = _download_verify_run(
+        install_script_url(ref), "--update --yes",
+        sha_url=install_script_sha256_url(ref) or None)
+    log_q = shlex.quote(str(log_file))
+    return ["bash", "-c", f"{{ {snippet}; exit $rc; }} >{log_q} 2>&1"]

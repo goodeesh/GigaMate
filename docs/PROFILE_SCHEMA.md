@@ -254,7 +254,7 @@ for a complete example with all 11 colours and full ACPI section.
    - Automatically probes all ACPI commands and detects what works
    - Appends the `acpi` section to your existing profile
 
-3. **Combined:** `gigamate calibrate --all`
+3. **Combined:** `gigamate calibrate all`
    - Runs both steps above in sequence
 
 ### Manual
@@ -280,9 +280,6 @@ Once your profile is ready:
 ```sh
 # Print step-by-step PR instructions
 gigamate profile contribute
-
-# Or auto-create a Pull Request (requires gh CLI)
-gigamate profile contribute --pr
 ```
 
 The profile will be added to `src/gigamate/profile_data/` and shipped

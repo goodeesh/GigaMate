@@ -2,10 +2,12 @@ import fcntl
 import logging
 import os
 import socket as py_socket
+import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTimer
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -28,19 +30,9 @@ from .pages.settings_page import SettingsPage
 from .styles import DARK_THEME
 from ..capabilities import detect_system_capabilities, invalidate_capabilities
 from ..config import CONFIG_FILE
-from ..paths import ICON_PATHS
+from ..paths import ICON_PATHS, get_runtime_ipc_paths
 
 logger = logging.getLogger(__name__)
-
-
-def get_runtime_ipc_paths() -> Tuple[str, str]:
-    """Return persistent, fixed (sock_path, lock_path) in user runtime directory."""
-    runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-    if not runtime_dir.exists():
-        runtime_dir = Path("/tmp")
-    sock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.sock")
-    lock_path = str(runtime_dir / f"gigamate-center-{os.getuid()}.lock")
-    return sock_path, lock_path
 
 
 IPC_SOCKET_PATH, IPC_LOCK_PATH = get_runtime_ipc_paths()
@@ -62,11 +54,47 @@ class SingleInstanceServer(QObject):
             pass
         self.server.newConnection.connect(self._handle_connection)
         self.server.listen(self.sock_path)
+        # Restrict the socket to this user (private runtime dir + 0600).
+        try:
+            os.chmod(self.sock_path, 0o600)
+        except OSError:
+            pass
+
+    def _peer_uid(self, client: QLocalSocket) -> Optional[int]:
+        """Return the peer's uid via SO_PEERCRED, or None if unavailable."""
+        try:
+            fd = int(client.socketDescriptor())
+            if fd < 0:
+                return None
+            dupfd = os.dup(fd)
+        except (OSError, TypeError, ValueError):
+            return None
+        try:
+            sock = py_socket.socket(fileno=dupfd)
+            try:
+                creds = sock.getsockopt(
+                    py_socket.SOL_SOCKET, py_socket.SO_PEERCRED,
+                    struct.calcsize("3i"),
+                )
+                _pid, uid, _gid = struct.unpack("3i", creds)
+                return uid
+            finally:
+                sock.close()
+        except OSError:
+            return None
 
     def _handle_connection(self) -> None:
         client = self.server.nextPendingConnection()
-        if client:
-            client.readyRead.connect(lambda: self._on_ready_read(client))
+        if client is None:
+            return
+        uid = self._peer_uid(client)
+        if uid is not None and uid != os.getuid():
+            logger.warning("Rejecting IPC connection from uid %s", uid)
+            client.disconnectFromServer()
+            client.deleteLater()
+            return
+        client.disconnected.connect(client.deleteLater)
+        client.readyRead.connect(lambda: self._on_ready_read(client))
 
     def _on_ready_read(self, client: QLocalSocket) -> None:
         try:
@@ -77,6 +105,7 @@ class SingleInstanceServer(QObject):
                 self.activate_window()
         finally:
             client.disconnectFromServer()
+            client.deleteLater()
 
     def activate_window(self) -> None:
         """Unminimize, raise, and bring the existing window to the front."""
@@ -185,14 +214,16 @@ class MainWindow(QMainWindow):
 
         daemon_row = QHBoxLayout()
         daemon_row.setSpacing(6)
-        daemon_dot = QLabel("●")
-        daemon_dot.setStyleSheet("color: #48bb78; font-size: 11px;")
-        daemon_lbl = QLabel("Daemon Active")
-        daemon_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
-        daemon_row.addWidget(daemon_dot)
-        daemon_row.addWidget(daemon_lbl)
+        self._daemon_dot = QLabel("●")
+        self._daemon_dot.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self._daemon_lbl = QLabel("Daemon: checking…")
+        self._daemon_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        daemon_row.addWidget(self._daemon_dot)
+        daemon_row.addWidget(self._daemon_lbl)
         daemon_row.addStretch()
         footer_layout.addLayout(daemon_row)
+        # Probe the service after the window is up (avoids blocking startup).
+        QTimer.singleShot(0, self._refresh_daemon_status)
 
         try:
             sys_caps = detect_system_capabilities()
@@ -252,18 +283,53 @@ class MainWindow(QMainWindow):
     def _check_config_mtime(self) -> None:
         mtime = self._get_config_mtime()
         if mtime > getattr(self, "_last_config_mtime", 0.0):
-            self.sync_all_from_config()
+            self.sync_all_from_config(invalidate=True)
 
-    def sync_all_from_config(self) -> None:
-        """Reload and update all pages from on-disk configuration."""
+    def _service_is_active(self) -> bool:
+        """Best-effort check of the tray daemon's systemd user service."""
+        try:
+            res = subprocess.run(
+                ["systemctl", "--user", "is-active", "gigamate.service"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1,
+            )
+            return res.stdout.strip() == "active"
+        except Exception:
+            return False
+
+    def _refresh_daemon_status(self) -> None:
+        """Update the sidebar daemon indicator to match reality (30 s cache)."""
+        if not hasattr(self, "_daemon_lbl"):
+            return
+        now = time.monotonic()
+        cache = getattr(self, "_daemon_status_cache", None)
+        if cache is not None and (now - cache[0]) < 30.0:
+            active = cache[1]
+        else:
+            active = self._service_is_active()
+            self._daemon_status_cache = (now, active)
+        self._daemon_dot.setStyleSheet(
+            f"color: {'#48bb78' if active else '#e53e3e'}; font-size: 11px;")
+        self._daemon_lbl.setText("Daemon Active" if active else "Daemon Inactive")
+
+    def sync_all_from_config(self, invalidate: bool = False) -> None:
+        """Reload and update all pages from on-disk configuration.
+
+        Hardware capability re-probing is only forced when the config actually
+        changed (``invalidate=True``); window activation must not trigger a
+        USB/ACPI scan on every focus.
+        """
         self._last_config_mtime = self._get_config_mtime()
-        # Re-probe hardware on window activation/config change so capability
-        # notices reflect hot-plugged keyboards or a newly loaded driver.
-        invalidate_capabilities()
+        if invalidate:
+            invalidate_capabilities()
+        if hasattr(self, "_daemon_lbl"):
+            QTimer.singleShot(0, self._refresh_daemon_status)
         if hasattr(self, "page_rgb"):
             self.page_rgb.reload_from_config()
         if hasattr(self, "page_dashboard"):
-            self.page_dashboard._refresh_telemetry()
+            self.page_dashboard.reload_from_config()
         if hasattr(self, "page_battery"):
             self.page_battery.reload_from_config()
         if hasattr(self, "page_settings"):
@@ -309,7 +375,11 @@ def ensure_tray_running() -> None:
 
     # 2. Fallback: check if tray process is running via pgrep
     try:
-        check = subprocess.run(["pgrep", "-f", "gigamate[- ]tray"], capture_output=True)
+        check = subprocess.run(
+            ["pgrep", "-f", "gigamate[. -]tray"],
+            capture_output=True,
+            timeout=2,
+        )
         if check.returncode == 0:
             return
 

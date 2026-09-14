@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -147,7 +148,7 @@ def load_builtin_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
             data = json.loads(path.read_text())
             profile = DeviceProfile.from_dict(data)
             profiles[profile.id] = profile
-        except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
             print(f"Warning: skipping built-in profile {path.name}: {exc}", file=sys.stderr)
     return profiles
 
@@ -161,7 +162,7 @@ def load_user_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
             data = json.loads(path.read_text())
             profile = DeviceProfile.from_dict(data)
             profiles[profile.id] = profile
-        except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
             print(f"Warning: skipping user profile {path.name}: {exc}", file=sys.stderr)
     return profiles
 
@@ -238,9 +239,22 @@ def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Opt
 
 
 def save_user_profile(profile: DeviceProfile) -> Path:
+    """Persist a user profile atomically after validation."""
+    errors = validate_profile(profile)
+    if errors:
+        raise ValueError("Invalid profile: " + "; ".join(errors))
     USER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     path = USER_PROFILES_DIR / f"{profile.vid:04X}_{profile.pid:04X}.json"
-    path.write_text(json.dumps(profile.to_dict(), indent=2) + "\n")
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(profile.to_dict(), indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     return path
 
 
@@ -267,15 +281,24 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
         for colour_name, levels in profile.colour_map.items():
             if not colour_name:
                 errors.append("Colour name is empty")
+            if not isinstance(levels, dict):
+                errors.append(f"Colour '{colour_name}' levels are not a mapping")
+                continue
             for level_key in (0, 1, 2):
                 if level_key not in levels:
                     errors.append(f"Colour '{colour_name}' missing brightness level {level_key}")
-                else:
+                    continue
+                try:
                     byte5, byte4 = levels[level_key]
-                    if not (0x00 <= byte5 <= 0xFF):
-                        errors.append(f"Colour '{colour_name}' level {level_key}: byte5 out of range")
-                    if not (0x00 <= byte4 <= 0xFF):
-                        errors.append(f"Colour '{colour_name}' level {level_key}: byte4 out of range")
+                    byte5 = int(byte5)
+                    byte4 = int(byte4)
+                except (TypeError, ValueError):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: invalid byte pair")
+                    continue
+                if not (0x00 <= byte5 <= 0xFF):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: byte5 out of range")
+                if not (0x00 <= byte4 <= 0xFF):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: byte4 out of range")
 
     if profile.has_acpi:
         acpi = profile.acpi

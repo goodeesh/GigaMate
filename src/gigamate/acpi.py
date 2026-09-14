@@ -13,6 +13,7 @@ Usage:
 import enum
 import os
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -167,11 +168,31 @@ class MockBackend(AcpiBackend):
 PROC_ACPI_CALL = Path("/proc/acpi/call")
 
 
+def _plausible(value: Optional[int], lo: int, hi: int) -> Optional[int]:
+    """Return ``value`` if it is a plausible sensor reading, else None.
+
+    Guards against EC error/invalid sentinels leaking into the UI as bogus
+    temperatures or fan speeds.
+    """
+    if value is None:
+        return None
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return v if lo <= v <= hi else None
+
+
 class AcpiCallBackend(AcpiBackend):
     """Backend using the acpi_call kernel module via /proc/acpi/call.
 
     Requires the acpi_call (or acpi_call-dkms) kernel module loaded.
     """
+
+    # /proc/acpi/call is a write-command-then-read-result interface with no
+    # per-call isolation; serialize access so concurrent processes/threads
+    # cannot observe each other's replies.
+    _CALL_LOCK = threading.Lock()
 
     def detect(self) -> AcpiCapabilities:
         if not PROC_ACPI_CALL.exists():
@@ -181,34 +202,39 @@ class AcpiCallBackend(AcpiBackend):
 
         caps = AcpiCapabilities(backend="acpi_call")
 
-        # Probe sensors
+        # Probe sensors (all read-only WMBC queries).
+        interface_ok = False
         if self._wmbc_read(0xE1) is not None:
             caps.has_temperature = True
+            interface_ok = True
         if self._wmbc_read(0xE4) is not None:
             caps.has_fan_rpm = True
             caps.fan_count += 1
+            interface_ok = True
         if self._wmbc_read(0xE5) is not None:
             caps.has_fan_rpm = True
             caps.fan_count += 1
+            interface_ok = True
         if self._wmbc_read(0x46) is not None:
             caps.has_fan_duty = True
+            interface_ok = True
 
-        # Probe power profiles
-        result = self._wmbd_write(0xED, 0)
-        if result is not None:
-            caps.has_power_profiles = True
+        # Never probe profile support with a WMBD write (it would change the
+        # active profile). If the AMW0 WMI interface answers WMBC queries at
+        # all, WMBD profile control is assumed available.
+        caps.has_power_profiles = interface_ok
 
         return caps
 
     def read_state(self) -> FanState:
         state = FanState()
-        state.temp_cpu = self._wmbc_read(0xE1)
-        state.temp_socket = self._wmbc_read(0xE2)
-        state.fan1_rpm = self._wmbc_read(0xE4)
-        state.fan2_rpm = self._wmbc_read(0xE5)
-        state.duty_total = self._wmbc_read(0x50)
-        state.duty_cpu = self._wmbc_read(0x46)
-        state.duty_gpu = self._wmbc_read(0x47)
+        state.temp_cpu = _plausible(self._wmbc_read(0xE1), 0, 150)
+        state.temp_socket = _plausible(self._wmbc_read(0xE2), 0, 150)
+        state.fan1_rpm = _plausible(self._wmbc_read(0xE4), 0, 20000)
+        state.fan2_rpm = _plausible(self._wmbc_read(0xE5), 0, 20000)
+        state.duty_total = _plausible(self._wmbc_read(0x50), 0, 100)
+        state.duty_cpu = _plausible(self._wmbc_read(0x46), 0, 100)
+        state.duty_gpu = _plausible(self._wmbc_read(0x47), 0, 100)
         # No known WMBC command to read current profile; leave as None
         return state
 
@@ -223,25 +249,43 @@ class AcpiCallBackend(AcpiBackend):
         # Could probe by writing/reading back if we had a cache
         return None
 
-    def _wmbc_read(self, cmd: int) -> Optional[int]:
-        """Call WMBC via /proc/acpi/call and parse result."""
-        try:
-            cmd_str = f"WMBC {cmd} 0"
-            PROC_ACPI_CALL.write_text(cmd_str)
-            result = PROC_ACPI_CALL.read_text().strip()
-            return int(result)
-        except (OSError, ValueError, IOError):
+    def _acpi_call(self, cmd_str: str) -> Optional[int]:
+        """Issue a command to /proc/acpi/call and parse its reply.
+
+        acpi_call writes the command and exposes the result via the same file;
+        the write+read pair is serialized with a process-wide lock. Replies are
+        typically hexadecimal (``0x...``), so parse with base 0.
+        """
+        with self._CALL_LOCK:
+            try:
+                PROC_ACPI_CALL.write_text(cmd_str)
+                result = PROC_ACPI_CALL.read_text().strip()
+            except (OSError, IOError):
+                return None
+
+        if not result or result.lower() in ("none", "not supported", "error"):
             return None
+        try:
+            value = int(result, 0)
+        except (ValueError, TypeError):
+            return None
+        # acpi_call uses all-ones as an error sentinel.
+        if value in (-1, 0xFFFFFFFF):
+            return None
+        return value
+
+    def _wmbc_read(self, cmd: int) -> Optional[int]:
+        """Call WMBC (read) via /proc/acpi/call and parse the result.
+
+        The AMW0 WMBC/WMBD methods take three integer arguments
+        ``(0, command, value)`` (see the kernel module), so the leading ``0``
+        must be present.
+        """
+        return self._acpi_call(f"WMBC 0 {cmd} 0")
 
     def _wmbd_write(self, cmd: int, val: int) -> Optional[int]:
-        """Call WMBD via /proc/acpi/call and parse result."""
-        try:
-            cmd_str = f"WMBD {cmd} {val}"
-            PROC_ACPI_CALL.write_text(cmd_str)
-            result = PROC_ACPI_CALL.read_text().strip()
-            return int(result)
-        except (OSError, ValueError, IOError):
-            return None
+        """Call WMBD (write) via /proc/acpi/call and parse the result."""
+        return self._acpi_call(f"WMBD 0 {cmd} {val}")
 
 
 # ──────────────────────────────────────────────
@@ -264,16 +308,18 @@ class ModuleBackend(AcpiBackend):
 
         caps = AcpiCapabilities(backend="module")
 
-        # Check which sysfs files exist
-        if (GIGAMATE_ACPI_SYSFS / "temp1_input").exists():
+        # The module creates every attribute unconditionally, so a file's mere
+        # existence does not prove the EC implements it. Read actual values to
+        # learn the real sensor/fan layout (and allow fan_count == 1).
+        if self._read_sysfs_int("temp1_input") is not None:
             caps.has_temperature = True
-        if (GIGAMATE_ACPI_SYSFS / "fan1_input").exists():
+        if self._read_sysfs_int("fan1_input") is not None:
             caps.has_fan_rpm = True
             caps.fan_count += 1
-        if (GIGAMATE_ACPI_SYSFS / "fan2_input").exists():
+        if self._read_sysfs_int("fan2_input") is not None:
             caps.has_fan_rpm = True
             caps.fan_count += 1
-        if (GIGAMATE_ACPI_SYSFS / "pwm1").exists():
+        if self._read_sysfs_int("pwm1") is not None:
             caps.has_fan_duty = True
         if (GIGAMATE_ACPI_SYSFS / "profile").exists():
             caps.has_power_profiles = True
@@ -285,13 +331,13 @@ class ModuleBackend(AcpiBackend):
 
     def read_state(self) -> FanState:
         state = FanState()
-        state.temp_cpu = self._read_sysfs_int("temp1_input")
-        state.temp_socket = self._read_sysfs_int("temp2_input")
-        state.fan1_rpm = self._read_sysfs_int("fan1_input")
-        state.fan2_rpm = self._read_sysfs_int("fan2_input")
-        state.duty_total = self._read_sysfs_int("pwm1_total")
-        state.duty_cpu = self._read_sysfs_int("pwm1")
-        state.duty_gpu = self._read_sysfs_int("pwm2")
+        state.temp_cpu = _plausible(self._read_sysfs_int("temp1_input"), 0, 150)
+        state.temp_socket = _plausible(self._read_sysfs_int("temp2_input"), 0, 150)
+        state.fan1_rpm = _plausible(self._read_sysfs_int("fan1_input"), 0, 20000)
+        state.fan2_rpm = _plausible(self._read_sysfs_int("fan2_input"), 0, 20000)
+        state.duty_total = _plausible(self._read_sysfs_int("pwm1_total"), 0, 100)
+        state.duty_cpu = _plausible(self._read_sysfs_int("pwm1"), 0, 100)
+        state.duty_gpu = _plausible(self._read_sysfs_int("pwm2"), 0, 100)
         prof = self._read_sysfs_int("profile")
         if prof is not None and 0 <= prof <= 3:
             state.profile = FanProfile(prof)
@@ -348,9 +394,17 @@ class AcpiController:
         if backend == "mock":
             self._backend = MockBackend()
         elif backend == "module":
-            self._backend = ModuleBackend()
+            module_backend = ModuleBackend()
+            caps = module_backend.detect()
+            if caps.backend != "none":
+                self._backend = module_backend
+                self._capabilities = caps
         elif backend == "acpi_call":
-            self._backend = AcpiCallBackend()
+            acpi_call_backend = AcpiCallBackend()
+            caps = acpi_call_backend.detect()
+            if caps.backend != "none":
+                self._backend = acpi_call_backend
+                self._capabilities = caps
         elif backend is None:
             self._auto_detect()
         else:
@@ -368,6 +422,7 @@ class AcpiController:
         caps = module_backend.detect()
         if caps.backend != "none":
             self._backend = module_backend
+            self._capabilities = caps
             return
 
         # Fall back to acpi_call
@@ -375,6 +430,7 @@ class AcpiController:
         caps = acpi_call_backend.detect()
         if caps.backend != "none":
             self._backend = acpi_call_backend
+            self._capabilities = caps
             return
 
         # No backend available

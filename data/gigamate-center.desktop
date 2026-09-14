@@ -2,8 +2,8 @@
 Type=Application
 Name=GigaMate Center
 GenericName=Laptop Control Center
-Comment=Gigabyte laptop management — Performance profiles, Battery care, dGPU sleep guard, RGB lighting
-Exec=gigamate center
+Comment=Gigabyte laptop management — Performance profiles, Battery care, RGB lighting
+Exec=gigamate-center
 Icon=gigamate
 Terminal=false
 Categories=Settings;HardwareSettings;System;

@@ -114,12 +114,15 @@ pipx uninstall gigabyte-keyboard-rgb 2>/dev/null || true
 header "Desktop entry and icon"
 
 DESKTOP_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/gigamate.desktop"
+CENTER_DESKTOP_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/applications/gigamate-center.desktop"
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 OLD_DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/gigabyte-keyboard-rgb-tray.desktop"
 OLD_ICON="${ICON_DIR}/gigabyte-keyboard-rgb.svg"
 
 rm -f "$DESKTOP_FILE" 2>/dev/null && info "Removed: $DESKTOP_FILE"
+rm -f "$CENTER_DESKTOP_FILE" 2>/dev/null && info "Removed: $CENTER_DESKTOP_FILE"
 rm -f "$ICON_DIR"/gigamate*.svg 2>/dev/null && info "Removed gigamate icons"
+rm -f "$ICON_DIR/checkbox-checked.svg" 2>/dev/null || true
 rm -f "$OLD_DESKTOP" 2>/dev/null && info "Removed old: $OLD_DESKTOP"
 rm -f "$OLD_ICON" 2>/dev/null && info "Removed old: $OLD_ICON"
 

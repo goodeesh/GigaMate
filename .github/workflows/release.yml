@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha256sum install.sh | sed 's#  .*#  install.sh#' > install.sh.sha256
+          curl -fL --proto '=https' -o /tmp/gigamate.tar.gz \
+            "https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/refs/tags/${TAG}"
+          sha256sum /tmp/gigamate.tar.gz | sed 's#  .*#  gigamate.tar.gz#' > gigamate.tar.gz.sha256
+          cat install.sh.sha256 gigamate.tar.gz.sha256
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
+          gh release upload "$TAG" install.sh.sha256 gigamate.tar.gz.sha256 --clobber

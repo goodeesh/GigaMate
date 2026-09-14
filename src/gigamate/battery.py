@@ -60,40 +60,52 @@ class BatteryManager:
 
     def _detect_paths(self) -> None:
         """Discover active battery and AC adapter directories in sysfs."""
+        self._battery_paths: list = []
         if not self._power_supply_dir.exists():
             return
 
-        # Find first primary battery (BAT0, BAT1, etc.)
-        for path in sorted(self._power_supply_dir.glob("BAT*")):
-            if path.is_dir() and (path / "type").exists():
+        def _type_of(path: Path) -> Optional[str]:
+            type_file = path / "type"
+            if type_file.exists():
                 try:
-                    if (path / "type").read_text().strip().lower() == "battery":
-                        self._battery_path = path
-                        break
+                    return type_file.read_text().strip().lower()
                 except (OSError, PermissionError):
-                    continue
+                    return None
+            return None
 
-        # If no BAT* found, search any power supply with type Battery
-        if not self._battery_path:
-            for path in sorted(self._power_supply_dir.iterdir()):
-                if path.is_dir() and (path / "type").exists():
-                    try:
-                        if (path / "type").read_text().strip().lower() == "battery":
-                            self._battery_path = path
-                            break
-                    except (OSError, PermissionError):
+        try:
+            entries = sorted(self._power_supply_dir.iterdir())
+        except (OSError, PermissionError):
+            return
+
+        batteries = []
+        for path in entries:
+            if path.is_dir() and _type_of(path) == "battery":
+                batteries.append(path)
+
+        self._battery_paths = batteries
+
+        # Prefer the first battery that explicitly reports itself present,
+        # so a pack on BAT1 is still found when BAT0 reports present=0.
+        for path in batteries:
+            present_file = path / "present"
+            if present_file.exists():
+                try:
+                    if present_file.read_text().strip() == "0":
                         continue
-
-        # Find AC / Mains adapter (AC, ACAD, ADP1, etc.)
-        for path in sorted(self._power_supply_dir.iterdir()):
-            if path.is_dir() and (path / "type").exists():
-                try:
-                    t = (path / "type").read_text().strip().lower()
-                    if t in ("mains", "ac"):
-                        self._ac_path = path
-                        break
                 except (OSError, PermissionError):
-                    continue
+                    pass
+            self._battery_path = path
+            break
+        else:
+            if batteries:
+                self._battery_path = batteries[0]
+
+        # Find AC / Mains adapter (AC, ACAD, ADP1, USB-C PD, etc.)
+        for path in entries:
+            if path.is_dir() and _type_of(path) in ("mains", "ac", "usb", "usb_pd"):
+                self._ac_path = path
+                break
 
     @property
     def battery_path(self) -> Optional[Path]:
@@ -126,9 +138,18 @@ class BatteryManager:
                 except (OSError, PermissionError):
                     pass
 
-        # Fallback: check all power supplies with online == 1
+        # Fallback: check mains-like supplies for online == 1 (ignore unrelated
+        # online supplies such as USB gadgets or peripherals).
         if self._power_supply_dir.exists():
             for p in self._power_supply_dir.glob("*/online"):
+                supply = p.parent
+                type_file = supply / "type"
+                try:
+                    stype = type_file.read_text().strip().lower() if type_file.exists() else ""
+                except (OSError, PermissionError):
+                    continue
+                if stype not in ("mains", "ac", "usb", "usb_pd"):
+                    continue
                 try:
                     if p.read_text().strip() == "1":
                         return True
@@ -137,14 +158,30 @@ class BatteryManager:
         return False
 
     def is_charge_limit_supported(self) -> bool:
-        """Whether setting battery charge limit is supported on this hardware."""
+        """Whether setting battery charge limit is supported on this hardware.
+
+        The kernel module always creates the ``charge_limit`` attribute, so we
+        must actually read it: ``-ENODATA`` (EC has no charge registers) or a
+        permission/parse failure means the limit is unsupported.
+        """
         # 1. GigaMate ACPI sysfs module attribute
-        if (self._acpi_sysfs_dir / "charge_limit").exists():
-            return True
+        acpi_file = self._acpi_sysfs_dir / "charge_limit"
+        if acpi_file.exists():
+            try:
+                val = int(acpi_file.read_text().strip())
+                return 0 < val <= 100
+            except (OSError, ValueError):
+                return False
 
         # 2. Linux standard kernel charge_control_end_threshold
-        if self._battery_path and (self._battery_path / "charge_control_end_threshold").exists():
-            return True
+        if self._battery_path:
+            std_file = self._battery_path / "charge_control_end_threshold"
+            if std_file.exists():
+                try:
+                    int(std_file.read_text().strip())
+                    return True
+                except (OSError, ValueError):
+                    return False
 
         return False
 
@@ -178,8 +215,9 @@ class BatteryManager:
 
         Returns True on success, False otherwise.
         """
-        if limit != 0 and (limit < 40 or limit > 100):
+        if limit is None or not (40 <= int(limit) <= 100):
             raise ValueError(f"Charge limit must be between 40 and 100 percent (got {limit})")
+        limit = int(limit)
 
         # 1. Try GigaMate ACPI module
         acpi_file = self._acpi_sysfs_dir / "charge_limit"

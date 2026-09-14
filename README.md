@@ -43,7 +43,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **🔋 Battery Care & Limiter** — Set max 80% (or custom) charge limit to protect battery longevity; health & cycle monitoring
 - **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile, RGB and battery limit on resume
 - **🔁 Persistent Settings** — Fan profile, RGB and charge limit are safely re-applied on login, app launch and resume
-- **⌨️ Keyboard RGB & Idle Sleep** — Set colours, brightness, and configurable idle auto-dimming from tray, GUI, or CLI
+- **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
 - **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles with native KDE Plasma OSD overlay
@@ -69,8 +69,7 @@ GigaMate Center...
 Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
 Battery: 85% (AC)  [x] Battery Care (Cap at 80%)
-dGPU: Asleep (D3cold)
-Colour & Brightness
+Colour / Brightness / Backlight idle off
 ```
 
 ### CLI
@@ -81,6 +80,7 @@ gigamate battery                 # Show battery status, health, and limit
 gigamate battery --limit 80      # Set maximum battery charge limit to 80%
 gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
+gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
 gigamate status                  # Full hardware status
 gigamate gpu status              # Show discrete GPU power state
 gigamate profile                 # Show current power profile

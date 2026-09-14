@@ -17,7 +17,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ...capabilities import detect_system_capabilities
-from ...config import DEFAULT_CONFIG, load as load_config, resolve_active_profile, save as save_config
+from ...config import load as load_config, resolve_active_profile, update_config
+from ...idle import IDLE_STEP_OFF, IDLE_TIMEOUT_STEPS, nearest_idle_step
 from ...protocol import get_keyboard, set_off, set_static
 
 # Color swatch hex codes (display names match tray.py: cname.replace('_', ' ').title())
@@ -126,7 +127,7 @@ class RgbPage(QWidget):
 
         action_row = QHBoxLayout()
         action_row.setSpacing(12)
-        cmd_hint = QLabel("💡 Run 'gigamate calibrate' in your terminal to create a profile.")
+        cmd_hint = QLabel("💡 Run 'gigamate calibrate rgb' in your terminal to create a profile.")
         cmd_hint.setStyleSheet("color: #ecc94b; font-size: 11px;")
         action_row.addWidget(cmd_hint)
         action_row.addStretch()
@@ -141,49 +142,10 @@ class RgbPage(QWidget):
 
         # ── Palette Container (shown when profile is mapped) ──
         self.palette_container = QWidget()
-        pal_layout = QVBoxLayout(self.palette_container)
-        pal_layout.setContentsMargins(0, 0, 0, 0)
-        pal_layout.setSpacing(10)
-
-        # Dynamically load all colours from active hardware profile (with fallback)
-        profile = resolve_active_profile()
-        if profile is not None and profile.colour_names:
-            colour_keys = profile.colour_names
-        else:
-            colour_keys = list(COLOR_HEX_MAP.keys())
-
-        grid = QGridLayout()
-        grid.setSpacing(10)
-
-        self._palette_info = {}
-        self.color_buttons = {}
-        for idx, col_key in enumerate(colour_keys):
-            label = col_key.replace("_", " ").title()
-            hex_color = COLOR_HEX_MAP.get(col_key, "#a0aec0")
-            self._palette_info[col_key] = (label, hex_color)
-            btn = QPushButton(f"  {label}")
-            btn.setIcon(make_color_swatch_icon(hex_color, 14))
-            btn.setIconSize(QSize(14, 14))
-            btn.setProperty("class", "ColorPaletteBtn")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(44)
-            btn.clicked.connect(lambda _, c=col_key: self._set_colour(c))
-            self.color_buttons[col_key] = btn
-            grid.addWidget(btn, idx // 4, idx % 4)
-
-        # 12th Slot: Quick "Turn Off" button to complete symmetrical 4x3 grid
-        btn_off = QPushButton("  Turn Off")
-        btn_off.setIcon(make_color_swatch_icon("#4a5568", 14))
-        btn_off.setIconSize(QSize(14, 14))
-        btn_off.setProperty("class", "ColorPaletteBtn")
-        btn_off.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_off.setMinimumHeight(44)
-        btn_off.clicked.connect(self._turn_off_backlight)
-        self.color_buttons["off"] = btn_off
-        self._palette_info["off"] = ("Turn Off", "#4a5568")
-        grid.addWidget(btn_off, 11 // 4, 11 % 4)
-
-        pal_layout.addLayout(grid)
+        self._palette_layout = QVBoxLayout(self.palette_container)
+        self._palette_layout.setContentsMargins(0, 0, 0, 0)
+        self._palette_layout.setSpacing(10)
+        self._build_palette()
         c_layout.addWidget(self.palette_container)
         layout.addWidget(colour_card)
 
@@ -231,26 +193,10 @@ class RgbPage(QWidget):
 
         self.idle_combo = QComboBox()
         self.idle_combo.setFixedWidth(200)
-        self.idle_options = [
-            ("15 seconds", 15),
-            ("30 seconds", 30),
-            ("1 minute", 60),
-            ("2 minutes", 120),
-            ("5 minutes", 300),
-            ("15 minutes", 900),
-            ("Never (Always On)", 0),
-        ]
+        # Single source of truth shared with the tray (gigamate.idle).
+        self.idle_options = [(label, sec) for sec, label in IDLE_TIMEOUT_STEPS]
         for text, sec in self.idle_options:
             self.idle_combo.addItem(text, sec)
-
-        current_timeout = self.cfg.get("idle_timeout_sec", 60)
-        if not self.cfg.get("idle_off_enabled", True):
-            current_timeout = 0
-
-        for i, (_, sec) in enumerate(self.idle_options):
-            if sec == current_timeout:
-                self.idle_combo.setCurrentIndex(i)
-                break
 
         self.idle_combo.currentIndexChanged.connect(self._on_idle_changed)
         idle_row.addWidget(self.idle_combo)
@@ -260,19 +206,92 @@ class RgbPage(QWidget):
         layout.addWidget(self.opts_card)
         layout.addStretch()
 
+        self._sync_idle_combo()
         self._refresh_keyboard_support()
         self._highlight_active()
+
+    def _sync_idle_combo(self) -> None:
+        """Select the combo entry matching the stored timeout (nearest step)."""
+        if not self.cfg.get("idle_off_enabled", True):
+            target = IDLE_STEP_OFF
+        else:
+            target = nearest_idle_step(self.cfg.get("idle_timeout_sec", 60))
+
+        for i, (_, sec) in enumerate(self.idle_options):
+            if sec == target:
+                self.idle_combo.blockSignals(True)
+                self.idle_combo.setCurrentIndex(i)
+                self.idle_combo.blockSignals(False)
+                break
+
+    def _build_palette(self) -> None:
+        """(Re)build the colour grid from the active hardware profile."""
+        # Remove any previously built palette widgets.
+        while self._palette_layout.count():
+            item = self._palette_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            nested = item.layout()
+            if nested is not None:
+                while nested.count():
+                    sub = nested.takeAt(0)
+                    sub_widget = sub.widget()
+                    if sub_widget is not None:
+                        sub_widget.deleteLater()
+
+        profile = resolve_active_profile()
+        self._palette_profile_key = (profile.vid, profile.pid) if profile is not None else None
+        if profile is not None and profile.colour_names:
+            colour_keys = profile.colour_names
+        else:
+            colour_keys = list(COLOR_HEX_MAP.keys())
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+
+        self._palette_info = {}
+        self.color_buttons = {}
+        for idx, col_key in enumerate(colour_keys):
+            label = col_key.replace("_", " ").title()
+            hex_color = COLOR_HEX_MAP.get(col_key, "#a0aec0")
+            self._palette_info[col_key] = (label, hex_color)
+            btn = QPushButton(f"  {label}")
+            btn.setIcon(make_color_swatch_icon(hex_color, 14))
+            btn.setIconSize(QSize(14, 14))
+            btn.setProperty("class", "ColorPaletteBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setMinimumHeight(44)
+            btn.clicked.connect(lambda _, c=col_key: self._set_colour(c))
+            self.color_buttons[col_key] = btn
+            grid.addWidget(btn, idx // 4, idx % 4)
+
+        # 12th Slot: Quick "Turn Off" button to complete symmetrical 4x3 grid
+        btn_off = QPushButton("  Turn Off")
+        btn_off.setIcon(make_color_swatch_icon("#4a5568", 14))
+        btn_off.setIconSize(QSize(14, 14))
+        btn_off.setProperty("class", "ColorPaletteBtn")
+        btn_off.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_off.setMinimumHeight(44)
+        btn_off.clicked.connect(self._turn_off_backlight)
+        self.color_buttons["off"] = btn_off
+        self._palette_info["off"] = ("Turn Off", "#4a5568")
+        grid.addWidget(btn_off, 11 // 4, 11 % 4)
+
+        self._palette_layout.addLayout(grid)
 
     def _refresh_keyboard_support(self) -> None:
         """Inspect hardware capabilities and display appropriate notices."""
         caps = detect_system_capabilities()
         if not caps.keyboard_detected:
+            self._kbd_state = "unsupported"
             self.palette_container.setVisible(False)
             self.kbd_uncalibrated_notice.setVisible(False)
             self.kbd_unsupported_notice.setVisible(True)
             self.opts_card.setVisible(False)
             self.active_color_badge.setVisible(False)
         elif not caps.keyboard_profile_loaded:
+            self._kbd_state = "uncalibrated"
             self.palette_container.setVisible(False)
             self.kbd_unsupported_notice.setVisible(False)
             self.kbd_uncalibrated_notice.setVisible(True)
@@ -286,6 +305,7 @@ class RgbPage(QWidget):
             )
             self.active_color_badge.setVisible(True)
         else:
+            self._kbd_state = "supported"
             self.palette_container.setVisible(True)
             self.kbd_unsupported_notice.setVisible(False)
             self.kbd_uncalibrated_notice.setVisible(False)
@@ -293,32 +313,44 @@ class RgbPage(QWidget):
             self.active_color_badge.setVisible(True)
 
     def _set_colour(self, colour: str) -> None:
-        if self.cfg.get("brightness", 2) == 0:
-            restored = self.cfg.get("last_brightness", 2)
-            if restored == 0:
-                restored = 2
-            self.cfg["brightness"] = restored
-        self.cfg["colour"] = colour
-        save_config(self.cfg)
+        # Atomic read-modify-write so concurrent changes from tray/CLI are not
+        # clobbered by a stale in-memory snapshot.
+        def _mutate(cfg):
+            if cfg.get("brightness", 2) == 0:
+                restored = cfg.get("last_brightness", 2)
+                if restored == 0:
+                    restored = 2
+                cfg["brightness"] = restored
+            cfg["colour"] = colour
+            return cfg
+
+        self.cfg = update_config(_mutate)
         self._apply_hardware()
         self._highlight_active()
 
     def _set_brightness(self, level: int) -> None:
-        if level > 0:
-            self.cfg["last_brightness"] = level
-        self.cfg["brightness"] = level
-        save_config(self.cfg)
+        def _mutate(cfg):
+            if level > 0:
+                cfg["last_brightness"] = level
+            cfg["brightness"] = level
+            return cfg
+
+        self.cfg = update_config(_mutate)
         self._apply_hardware()
         self._highlight_active()
 
     def _on_idle_changed(self, index: int) -> None:
         sec = self.idle_combo.currentData()
-        if sec == 0:
-            self.cfg["idle_off_enabled"] = False
-        else:
-            self.cfg["idle_off_enabled"] = True
-            self.cfg["idle_timeout_sec"] = sec
-        save_config(self.cfg)
+
+        def _mutate(cfg):
+            if sec == 0:
+                cfg["idle_off_enabled"] = False
+            else:
+                cfg["idle_off_enabled"] = True
+                cfg["idle_timeout_sec"] = sec
+            return cfg
+
+        self.cfg = update_config(_mutate)
 
     def _apply_hardware(self) -> None:
         dev = get_keyboard()
@@ -344,19 +376,20 @@ class RgbPage(QWidget):
             active_col, (active_col.replace("_", " ").title(), "#b794f4")
         )
 
-        # Update Header Badge
-        if b_level == 0:
-            self.active_color_badge.setText(f"Active: {active_label} (Off)")
-            self.active_color_badge.setStyleSheet(
-                "color: #718096; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-                "border-radius: 12px; background-color: #171c26; border: 1px solid #4a5568;"
-            )
-        else:
-            self.active_color_badge.setText(f"Active: {active_label}")
-            self.active_color_badge.setStyleSheet(
-                f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-                f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
-            )
+        # Update Header Badge (keep the "Uncalibrated" badge when applicable)
+        if getattr(self, "_kbd_state", "supported") != "uncalibrated":
+            if b_level == 0:
+                self.active_color_badge.setText(f"Active: {active_label} (Off)")
+                self.active_color_badge.setStyleSheet(
+                    "color: #718096; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                    "border-radius: 12px; background-color: #171c26; border: 1px solid #4a5568;"
+                )
+            else:
+                self.active_color_badge.setText(f"Active: {active_label}")
+                self.active_color_badge.setStyleSheet(
+                    f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                    f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
+                )
 
         for col_key, btn in self.color_buttons.items():
             label, hex_color = self._palette_info.get(col_key, (col_key, "#ffffff"))
@@ -401,6 +434,14 @@ class RgbPage(QWidget):
     def reload_from_config(self) -> None:
         """Synchronize UI with latest on-disk config without hardware writes."""
         self.cfg = load_config()
+
+        # Rebuild the palette if the active hardware profile changed (e.g. a
+        # newly calibrated keyboard or a hot-plugged model).
+        profile = resolve_active_profile()
+        key = (profile.vid, profile.pid) if profile is not None else None
+        if key != getattr(self, "_palette_profile_key", "unset"):
+            self._build_palette()
+
         self._refresh_keyboard_support()
 
         # Update Colour buttons and header badge
@@ -412,13 +453,4 @@ class RgbPage(QWidget):
             self.brightness_buttons[b_level].setChecked(True)
 
         # Update Idle Timeout without re-firing signal
-        current_timeout = self.cfg.get("idle_timeout_sec", 60)
-        if not self.cfg.get("idle_off_enabled", True):
-            current_timeout = 0
-
-        self.idle_combo.blockSignals(True)
-        for i, (_, sec) in enumerate(self.idle_options):
-            if sec == current_timeout:
-                self.idle_combo.setCurrentIndex(i)
-                break
-        self.idle_combo.blockSignals(False)
+        self._sync_idle_combo()

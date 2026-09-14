@@ -8,6 +8,10 @@ Subscribes to systemd-logind's PrepareForSleep D-Bus signal:
   - Re-applies the user's saved profile, RGB colour/brightness and battery
     charge limit via the unified hardware settings layer.
   - Re-synchronizes dGPU power features (Dynamic Boost / SmartShift).
+
+The D-Bus signal is delivered on a dedicated listener thread, but the
+suspend/resume hooks belong to the (single-threaded) desktop UI, so they are
+marshalled back to the main loop before running.
 """
 
 import logging
@@ -35,34 +39,62 @@ class SleepHandler:
         self._listening = False
         self._listener_thread: Optional[threading.Thread] = None
         self._loop = None
+        self._subscription_id = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+
+    def set_hooks(
+        self,
+        on_suspend: Optional[Callable[[], None]] = None,
+        on_resume: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Attach suspend/resume callbacks (used by the tray to pause idle monitoring)."""
+        self._on_suspend_hook = on_suspend
+        self._on_resume_hook = on_resume
 
     def start_listening(self) -> bool:
-        """Start listening for PrepareForSleep signals in background thread."""
-        if self._listening:
-            return True
+        """Start listening for PrepareForSleep signals in a background thread.
 
-        try:
-            import dbus
-            from dbus.mainloop.glib import DBusGMainLoop
-        except ImportError:
-            try:
-                from gi.repository import Gio, GLib
-            except ImportError:
-                logger.debug("Neither dbus-python nor PyGObject Gio available for sleep handling.")
+        Returns True only if a system bus is actually reachable, so callers can
+        trust the return value.
+        """
+        with self._lock:
+            if self._listening:
+                return True
+            # Never start a second worker over a wedged one.
+            if self._listener_thread is not None and self._listener_thread.is_alive():
                 return False
 
-        self._listening = True
-        self._listener_thread = threading.Thread(
-            target=self._run_dbus_listener,
-            daemon=True,
-            name="GigaMateSleepListener",
-        )
-        self._listener_thread.start()
+        try:
+            from gi.repository import Gio
+        except ImportError:
+            logger.debug("PyGObject Gio unavailable; sleep handling disabled.")
+            return False
+
+        # One-time preflight so a transient bus failure is reported honestly
+        # instead of being discovered later in the listener thread.
+        try:
+            Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except Exception as exc:
+            logger.warning(f"Could not connect to the system bus for sleep handling: {exc}")
+            return False
+
+        with self._lock:
+            self._stop_event.clear()
+            self._listening = True
+            self._listener_thread = threading.Thread(
+                target=self._run_dbus_listener,
+                daemon=True,
+                name="GigaMateSleepListener",
+            )
+            self._listener_thread.start()
         return True
 
     def stop_listening(self) -> None:
         """Quit the D-Bus main loop and join the listener thread (best effort)."""
-        loop = self._loop
+        self._stop_event.set()
+        with self._lock:
+            loop = self._loop
         if loop is not None:
             try:
                 loop.quit()
@@ -73,9 +105,11 @@ class SleepHandler:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=2.0)
 
-        self._listener_thread = None
-        self._loop = None
-        self._listening = False
+        with self._lock:
+            self._listening = False
+            if thread is None or not thread.is_alive():
+                self._listener_thread = None
+                self._loop = None
 
     def _run_dbus_listener(self) -> None:
         """Background loop subscribing to org.freedesktop.login1 PrepareForSleep."""
@@ -88,9 +122,11 @@ class SleepHandler:
             context.push_thread_default()
             try:
                 loop = GLib.MainLoop.new(context, False)
-                self._loop = loop
+                with self._lock:
+                    self._loop = loop
+
                 bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
-                bus.signal_subscribe(
+                sub_id = bus.signal_subscribe(
                     "org.freedesktop.login1",
                     "org.freedesktop.login1.Manager",
                     "PrepareForSleep",
@@ -100,33 +136,41 @@ class SleepHandler:
                     self._on_gio_signal,
                     None,
                 )
+                with self._lock:
+                    self._subscription_id = sub_id
+
+                # A stop may have raced in before the loop was published.
+                if self._stop_event.is_set():
+                    loop.quit()
                 loop.run()
+
+                try:
+                    bus.signal_unsubscribe(sub_id)
+                except Exception:
+                    pass
             finally:
                 context.pop_thread_default()
-                self._loop = None
-            return
         except Exception as exc:
-            logger.debug(f"Gio sleep listener failed ({exc}), trying dbus-python...")
+            logger.warning(f"Could not establish D-Bus sleep listener: {exc}")
+        finally:
+            with self._lock:
+                self._listening = False
+                self._subscription_id = None
+                self._loop = None
 
+    def _dispatch_hook(self, hook: Optional[Callable[[], None]]) -> None:
+        """Run a UI hook on the main loop; call directly when already on it."""
+        if hook is None:
+            return
+        if threading.current_thread() is threading.main_thread():
+            hook()
+            return
         try:
-            import dbus
-            from dbus.mainloop.glib import DBusGMainLoop
             from gi.repository import GLib
 
-            DBusGMainLoop(set_as_default=True)
-            system_bus = dbus.SystemBus()
-            system_bus.add_signal_receiver(
-                self.on_prepare_for_sleep,
-                signal_name="PrepareForSleep",
-                dbus_interface="org.freedesktop.login1.Manager",
-            )
-            loop = GLib.MainLoop()
-            self._loop = loop
-            loop.run()
-        except Exception as e2:
-            logger.warning(f"Could not establish D-Bus sleep listener: {e2}")
-        finally:
-            self._loop = None
+            GLib.idle_add(hook)
+        except Exception:
+            hook()
 
     def _on_gio_signal(self, connection, sender_name, object_path, interface_name, signal_name, parameters, user_data) -> None:
         """Gio signal callback unpacker."""
@@ -149,11 +193,10 @@ class SleepHandler:
             except Exception as exc:
                 logger.warning(f"Could not turn off RGB on sleep: {exc}")
 
-            if self._on_suspend_hook:
-                try:
-                    self._on_suspend_hook()
-                except Exception as exc:
-                    logger.warning(f"Suspend hook failed: {exc}")
+            try:
+                self._dispatch_hook(self._on_suspend_hook)
+            except Exception as exc:
+                logger.warning(f"Suspend hook failed: {exc}")
 
         else:
             logger.info("System resumed from sleep: restoring state...")
@@ -161,15 +204,14 @@ class SleepHandler:
             time.sleep(0.5)
 
             try:
-                apply_hardware_settings()
+                apply_hardware_settings(force_keyboard=True)
             except Exception as exc:
                 logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
 
-            if self._on_resume_hook:
-                try:
-                    self._on_resume_hook()
-                except Exception as exc:
-                    logger.warning(f"Resume hook failed: {exc}")
+            try:
+                self._dispatch_hook(self._on_resume_hook)
+            except Exception as exc:
+                logger.warning(f"Resume hook failed: {exc}")
 
 
 _default_sleep_handler: Optional[SleepHandler] = None

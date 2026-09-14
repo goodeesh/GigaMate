@@ -16,6 +16,7 @@ so no PCI address is hard-coded.
 """
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,11 @@ class NvidiaGpuMonitor:
         self._proc_nvidia: Optional[Path] = proc_nvidia
         self._device: Optional[Path] = None
         self._vendor: Optional[str] = None
+        # Cache the (relatively expensive) nvidia-powerd active query so the
+        # UI telemetry timer does not issue DBus/systemctl calls every tick.
+        self._boost_active_cache: Optional[tuple] = None
+        # Dynamic Boost support cannot change without a reboot/rebind.
+        self._boost_supported_cache: Optional[bool] = None
 
     @property
     def _sysfs_root(self) -> Path:
@@ -161,10 +167,15 @@ class NvidiaGpuMonitor:
             return None
 
     def _check_dynamic_boost_supported(self) -> bool:
-        """Check if discrete NVIDIA GPU supports Dynamic Boost."""
+        """Whether the dGPU supports Dynamic Boost (cached)."""
         if self._vendor != "nvidia":
             return False
+        if self._boost_supported_cache is None:
+            self._boost_supported_cache = self._query_dynamic_boost_supported()
+        return self._boost_supported_cache
 
+    def _query_dynamic_boost_supported(self) -> bool:
+        """Check if discrete NVIDIA GPU supports Dynamic Boost."""
         # 1. Check /proc/driver/nvidia/gpus/*/power
         proc_root = self._proc_nvidia or Path("/proc/driver/nvidia")
         gpus_dir = proc_root / "gpus" if proc_root.name != "gpus" else proc_root
@@ -188,8 +199,20 @@ class NvidiaGpuMonitor:
 
         return False
 
+    _BOOST_ACTIVE_TTL = 10.0
+
     def _check_dynamic_boost_active(self) -> bool:
-        """Check if nvidia-powerd.service is active."""
+        """Cached view of whether nvidia-powerd.service is active."""
+        now = time.monotonic()
+        cache = self._boost_active_cache
+        if cache is not None and (now - cache[0]) < self._BOOST_ACTIVE_TTL:
+            return cache[1]
+        result = self._query_dynamic_boost_active()
+        self._boost_active_cache = (now, result)
+        return result
+
+    def _query_dynamic_boost_active(self) -> bool:
+        """Check if nvidia-powerd.service is active (DBus/systemctl)."""
         if self._vendor != "nvidia":
             return False
 
@@ -240,6 +263,7 @@ class NvidiaGpuMonitor:
 
     def _start_nvidia_powerd(self) -> bool:
         """Attempt to start nvidia-powerd.service silently."""
+        self._boost_active_cache = None  # invalidate cached active state
         # 1. Try DBus systemd Manager StartUnit
         try:
             import gi

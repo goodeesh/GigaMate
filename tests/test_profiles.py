@@ -374,3 +374,21 @@ class TestGetDmiProductName:
 
 
 
+
+
+def test_malformed_user_profile_is_skipped(tmp_path, monkeypatch):
+    from gigamate.profiles import load_user_profiles
+    user_dir = tmp_path / "profiles"
+    user_dir.mkdir()
+    (user_dir / "bad.json").write_text('{"vid": null, "pid": "0x8105"}')
+    (user_dir / "good.json").write_text('{"vid": "0x0414", "pid": "0x8105", "name": "T"}')
+    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", user_dir)
+    profs = load_user_profiles()
+    assert (0x0414, 0x8105) in profs
+
+
+def test_save_user_profile_rejects_invalid(tmp_path, monkeypatch):
+    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", tmp_path / "profiles")
+    bad = DeviceProfile(vid=0x0414, pid=0x8105, name="", colour_map={})
+    with pytest.raises(ValueError):
+        save_user_profile(bad)

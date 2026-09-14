@@ -39,7 +39,7 @@ def test_sleep_handler_resume_applies_settings_once():
         handler.on_prepare_for_sleep(going_to_sleep=False)
 
         assert resume_called is True
-        mock_apply.assert_called_once()
+        mock_apply.assert_called_once_with(force_keyboard=True)
 
 
 def test_sleep_handler_stop_listening_is_idempotent():
@@ -64,3 +64,15 @@ def test_sleep_handler_start_stop_listening(monkeypatch):
     handler.stop_listening()
     assert handler._listening is False
     assert handler._listener_thread is None
+
+
+def test_dispatch_hook_runs_directly_on_main_thread():
+    called = []
+    handler = SleepHandler()
+    handler._dispatch_hook(lambda: called.append(1))
+    assert called == [1]
+
+
+def test_dispatch_hook_ignores_none():
+    handler = SleepHandler()
+    handler._dispatch_hook(None)  # must not raise

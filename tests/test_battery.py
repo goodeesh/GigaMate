@@ -137,3 +137,62 @@ def test_battery_marked_absent(tmp_path: Path):
     mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
     assert mgr.is_available is False
     assert mgr.get_battery_info().present is False
+
+
+def test_multi_battery_prefers_present_pack(tmp_path: Path):
+    """When BAT0 reports absent, the present BAT1 must be selected."""
+    psy = tmp_path / "power_supply"
+    for name, present in (("BAT0", "0"), ("BAT1", "1")):
+        bat = psy / name
+        bat.mkdir(parents=True)
+        (bat / "type").write_text("Battery\n")
+        (bat / "present").write_text(present + "\n")
+        (bat / "capacity").write_text("77\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.is_available is True
+    assert mgr.get_battery_info().name == "BAT1"
+
+
+def test_ac_online_ignores_unrelated_supply(tmp_path: Path):
+    psy = tmp_path / "power_supply"
+    # A battery with an `online` file must not be mistaken for mains.
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "online").write_text("1\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.is_ac_online() is False
+
+
+def test_ac_online_accepts_usb_pd(tmp_path: Path):
+    psy = tmp_path / "power_supply"
+    usb = psy / "UC0"
+    usb.mkdir(parents=True)
+    (usb / "type").write_text("USB_PD\n")
+    (usb / "online").write_text("1\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.is_ac_online() is True
+
+
+def test_charge_limit_unsupported_when_unreadable(tmp_path: Path):
+    acpi = tmp_path / "acpi"
+    acpi.mkdir()
+    (acpi / "charge_limit").mkdir()  # exists but unreadable
+    mgr = BatteryManager(power_supply_dir=tmp_path / "psy", acpi_sysfs_dir=acpi)
+    assert mgr.is_charge_limit_supported() is False
+
+
+def test_set_charge_limit_rejects_zero_and_out_of_range(tmp_path: Path):
+    psy = tmp_path / "power_supply"
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "present").write_text("1\n")
+    (bat / "charge_control_end_threshold").write_text("100\n")
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    for bad in (0, 39, 101, None):
+        with pytest.raises(ValueError):
+            mgr.set_charge_limit(bad)

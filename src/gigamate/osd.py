@@ -41,7 +41,7 @@ def _show_kde_osd(name: str, desc: str = "", icon: str = "preferences-system-pow
             "showText",
             GLib.Variant("(ss)", (icon, text)),
             Gio.DBusCallFlags.NONE,
-            1000,
+            250,
             None,
         )
         return True
@@ -86,7 +86,7 @@ def _show_freedesktop_notification(name: str, desc: str = "", icon: str = "prefe
                 ),
             ),
             Gio.DBusCallFlags.NONE,
-            1000,
+            250,
             None,
         )
         return True

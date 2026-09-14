@@ -8,9 +8,10 @@ Allows configuring:
 """
 
 import subprocess
+import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...capabilities import detect_system_capabilities
-from ...config import load as load_config, save as save_config
+from ...config import load as load_config, update_config
 from ...system_power import sync_system_power
 
 
@@ -123,50 +124,11 @@ class SettingsPage(QWidget):
         d_title.setProperty("class", "CardTitle")
         d_layout.addWidget(d_title)
 
-        grid = QHBoxLayout()
-        grid.setSpacing(12)
+        self._diag_grid = QHBoxLayout()
+        self._diag_grid.setSpacing(12)
+        d_layout.addLayout(self._diag_grid)
+        self._populate_diag_chips()
 
-        caps = detect_system_capabilities()
-
-        # 1. Device Model
-        model_sub = "(Supported)" if caps.is_gigabyte_laptop else "(Generic)"
-        grid.addWidget(self._make_chip("Device Model", caps.product_name, "💻", model_sub))
-
-        # 2. Keyboard HID
-        if caps.keyboard_detected and caps.keyboard_vid_pid:
-            vid, pid = caps.keyboard_vid_pid
-            kbd_val = f"0x{vid:04X}:0x{pid:04X}"
-            kbd_sub = "(Profile Mapped)" if caps.keyboard_profile_loaded else "(Uncalibrated)"
-        else:
-            kbd_val = "Not Detected"
-            kbd_sub = "(No RGB Controller)"
-        grid.addWidget(self._make_chip("Keyboard HID", kbd_val, "⌨️", kbd_sub))
-
-        # 3. ACPI Driver
-        if caps.acpi_driver_loaded:
-            acpi_val = "gigamate_acpi"
-            acpi_sub = "(Active / Loaded)"
-        elif caps.is_gigabyte_laptop:
-            acpi_val = "Not Loaded"
-            acpi_sub = "(DKMS Required)"
-        else:
-            acpi_val = "Standard ACPI"
-            acpi_sub = "(Generic Linux)"
-        grid.addWidget(self._make_chip("ACPI Driver", acpi_val, "⚡", acpi_sub))
-
-        # 4. Battery Limiter
-        if caps.charge_limit_supported:
-            bat_val = "Supported"
-            bat_sub = "(EC / sysfs)"
-        elif caps.battery_present:
-            bat_val = "Unsupported"
-            bat_sub = "(Firmware Limited)"
-        else:
-            bat_val = "No Battery"
-            bat_sub = "(Continuous AC)"
-        grid.addWidget(self._make_chip("Charge Limiter", bat_val, "🔋", bat_sub))
-
-        d_layout.addLayout(grid)
         layout.addWidget(diag_card)
 
         layout.addStretch()
@@ -205,38 +167,108 @@ class SettingsPage(QWidget):
 
         return chip
 
+    def _populate_diag_chips(self) -> None:
+        """(Re)build the hardware diagnostic chips from a fresh capability probe."""
+        while self._diag_grid.count():
+            item = self._diag_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        caps = detect_system_capabilities()
+
+        # 1. Device Model
+        model_sub = "(Supported)" if caps.is_gigabyte_laptop else "(Generic)"
+        self._diag_grid.addWidget(self._make_chip("Device Model", caps.product_name, "💻", model_sub))
+
+        # 2. Keyboard HID
+        if caps.keyboard_detected and caps.keyboard_vid_pid:
+            vid, pid = caps.keyboard_vid_pid
+            kbd_val = f"0x{vid:04X}:0x{pid:04X}"
+            kbd_sub = "(Profile Mapped)" if caps.keyboard_profile_loaded else "(Uncalibrated)"
+        else:
+            kbd_val = "Not Detected"
+            kbd_sub = "(No RGB Controller)"
+        self._diag_grid.addWidget(self._make_chip("Keyboard HID", kbd_val, "⌨️", kbd_sub))
+
+        # 3. ACPI Driver
+        if caps.acpi_driver_loaded:
+            acpi_val = "gigamate_acpi"
+            acpi_sub = "(Active / Loaded)"
+        elif caps.is_gigabyte_laptop:
+            acpi_val = "Not Loaded"
+            acpi_sub = "(DKMS Required)"
+        else:
+            acpi_val = "Standard ACPI"
+            acpi_sub = "(Generic Linux)"
+        self._diag_grid.addWidget(self._make_chip("ACPI Driver", acpi_val, "⚡", acpi_sub))
+
+        # 4. Battery Limiter
+        if caps.charge_limit_supported:
+            bat_val = "Supported"
+            bat_sub = "(EC / sysfs)"
+        elif caps.battery_present:
+            bat_val = "Unsupported"
+            bat_sub = "(Firmware Limited)"
+        else:
+            bat_val = "No Battery"
+            bat_sub = "(Continuous AC)"
+        self._diag_grid.addWidget(self._make_chip("Charge Limiter", bat_val, "🔋", bat_sub))
+
     def _on_startup_apply_toggled(self, checked: bool) -> None:
-        self.cfg["startup_apply"] = checked
-        save_config(self.cfg)
+        def _mutate(cfg):
+            cfg["startup_apply"] = checked
+            return cfg
+        self.cfg = update_config(_mutate)
 
     def _on_sync_power_toggled(self, checked: bool) -> None:
-        self.cfg["sync_system_power"] = checked
-        save_config(self.cfg)
+        def _mutate(cfg):
+            cfg["sync_system_power"] = checked
+            return cfg
+        self.cfg = update_config(_mutate)
         if checked:
-            prof = self.cfg.get("acpi_profile", 1)
-            sync_system_power(prof)
+            sync_system_power(self.cfg.get("acpi_profile", 1))
 
     def _on_restart_service_clicked(self) -> None:
         self.btn_restart_service.setEnabled(False)
         self.btn_restart_service.setText("Restarting...")
         try:
-            subprocess.run(["systemctl", "--user", "restart", "gigamate.service"], check=False)
+            # --no-block returns immediately so the GUI thread never waits for
+            # the unit to fully restart (which can take many seconds).
+            subprocess.run(
+                ["systemctl", "--user", "restart", "--no-block", "gigamate.service"],
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
         finally:
-            self.btn_restart_service.setEnabled(True)
-            self.btn_restart_service.setText("Restart Daemon")
-            self._refresh_service_status()
+            QTimer.singleShot(1500, self._finish_restart_service)
+
+    def _finish_restart_service(self) -> None:
+        self.btn_restart_service.setEnabled(True)
+        self.btn_restart_service.setText("Restart Daemon")
+        self._refresh_service_status()
 
     def _refresh_service_status(self) -> None:
-        try:
-            res = subprocess.run(
-                ["systemctl", "--user", "is-active", "gigamate.service"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            is_active = res.stdout.strip() == "active"
-        except Exception:
-            is_active = False
+        # Cache for 30 s so window activation does not spawn systemctl each time.
+        now = time.monotonic()
+        cache = getattr(self, "_service_status_cache", None)
+        if cache is not None and (now - cache[0]) < 30.0:
+            is_active = cache[1]
+        else:
+            try:
+                res = subprocess.run(
+                    ["systemctl", "--user", "is-active", "gigamate.service"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=2,
+                )
+                is_active = res.stdout.strip() == "active"
+            except Exception:
+                is_active = False
+            self._service_status_cache = (now, is_active)
 
         if is_active:
             self.service_status_label.setText("Daemon: ● Active (gigamate.service running)")
@@ -257,4 +289,8 @@ class SettingsPage(QWidget):
         self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", True))
         self.chk_sync_power.blockSignals(False)
 
-        self._refresh_service_status()
+        # Refresh the diagnostic chips too (driver/keyboard/battery hotplug).
+        self._populate_diag_chips()
+
+        # Defer the (blocking) systemctl probe so window activation stays snappy.
+        QTimer.singleShot(0, self._refresh_service_status)

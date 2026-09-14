@@ -20,6 +20,16 @@ def qapp():
     return app
 
 
+def _import_tray_app():
+    """Import the GTK tray app, skipping if the GUI stack is unavailable."""
+    pytest.importorskip("gi")
+    try:
+        from gigamate.tray import GigaMateTrayApp
+    except Exception as exc:  # gi.require_version / typelib failures
+        pytest.skip(f"GTK/AppIndicator stack unavailable: {exc}")
+    return GigaMateTrayApp
+
+
 @pytest.fixture(autouse=True)
 def isolate_config(tmp_path, monkeypatch):
     import gigamate.config as config_mod
@@ -171,12 +181,26 @@ def test_rgb_page_reload_from_config(qapp):
 
     assert "Active: Light Blue" in rgb.active_color_badge.text()
     assert rgb.brightness_buttons[1].isChecked()
+    # 5m is now a canonical step, so it is preserved exactly.
     assert rgb.idle_combo.currentData() == 300
+
+
+def test_rgb_page_idle_options_match_tray_steps(qapp):
+    """Center and tray must expose the same idle-timeout steps (gigamate.idle)."""
+    from gigamate.ui.main_window import MainWindow
+    from gigamate.idle import IDLE_TIMEOUT_STEPS
+
+    win = MainWindow()
+    rgb = win.page_rgb
+
+    canonical = [sec for sec, _ in IDLE_TIMEOUT_STEPS]
+    assert [sec for _, sec in rgb.idle_options] == canonical
+    assert 15 not in canonical
 
 
 def test_tray_sync_from_external_config():
     from unittest.mock import MagicMock, patch
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
 
     with patch.object(GigaMateTrayApp, "__init__", return_value=None):
         tray = GigaMateTrayApp()
@@ -266,7 +290,7 @@ def test_ensure_tray_running():
 
 
 def test_tray_on_quit_signals_center():
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
     from unittest.mock import patch, MagicMock
 
     with patch("gigamate.tray.load_config", return_value={}), \
@@ -302,7 +326,7 @@ def test_battery_page_reload_from_config(qapp):
 
 
 def test_tray_save_config_preserves_memory_keys():
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
     from unittest.mock import patch, MagicMock
 
     with patch.object(GigaMateTrayApp, "__init__", return_value=None):
@@ -317,15 +341,21 @@ def test_tray_save_config_preserves_memory_keys():
         tray._config = {"charge_limit": 65, "charge_limit_enabled": True}
         tray._get_config_mtime = MagicMock(return_value=100.0)
 
-        with patch("gigamate.tray.save_config") as mock_save, \
-             patch("gigamate.tray.load_config", return_value={"charge_limit": 80}):
+        captured = {}
+
+        def fake_update(mutate):
+            cfg = mutate({"charge_limit": 80})
+            captured.update(cfg)
+            return cfg
+
+        with patch("gigamate.tray.update_config", side_effect=fake_update) as mock_update:
             tray._save_config()
 
-            mock_save.assert_called_once()
-            saved = mock_save.call_args[0][0]
+            mock_update.assert_called_once()
             # Must preserve the charge limit set in memory (65), not revert to 80
-            assert saved["charge_limit"] == 65
-            assert saved["acpi_profile"] == 2
+            assert captured["charge_limit"] == 65
+            assert captured["acpi_profile"] == 2
+            assert captured["colour"] == "red"
 
 
 def test_settings_page(qapp):
@@ -605,16 +635,25 @@ def test_main_window_construction_does_not_write_hardware(qapp):
     """Guard against tests mutating real ACPI/USB/battery hardware.
 
     The shared conftest fixture must keep all hardware side effects inert when
-    the app applies persisted settings on launch.
+    the app applies persisted settings on launch. We assert both that the
+    guarded apply entry point actually ran and that no low-level write
+    primitive was reached.
     """
+    import gigamate.hardware as hardware
     from gigamate.ui.main_window import MainWindow
+
+    guarded_apply = hardware.apply_hardware_settings
 
     with patch("gigamate.protocol.set_static") as mock_set_static, \
          patch("gigamate.protocol.set_off") as mock_set_off, \
          patch("gigamate.battery.BatteryManager.set_charge_limit") as mock_set_charge, \
          patch("gigamate.acpi.AcpiController.set_profile") as mock_set_profile:
-        MainWindow()
+        win = MainWindow()
 
+        # The launch path must have exercised the guarded reapply hook...
+        assert win is not None
+        guarded_apply.assert_called_once()
+        # ...without ever reaching a real hardware write.
         mock_set_static.assert_not_called()
         mock_set_off.assert_not_called()
         mock_set_charge.assert_not_called()
@@ -627,7 +666,7 @@ def test_sync_all_from_config_invalidates_capabilities(qapp):
 
     win = MainWindow()
     with patch("gigamate.ui.main_window.invalidate_capabilities") as mock_invalidate:
-        win.sync_all_from_config()
+        win.sync_all_from_config(invalidate=True)
         mock_invalidate.assert_called_once()
 
 

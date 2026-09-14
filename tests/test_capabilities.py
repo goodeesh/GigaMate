@@ -277,3 +277,47 @@ def test_detect_system_capabilities_is_cached_until_invalidated():
         third = detect_system_capabilities()
         assert third is not first
         assert mock_ctrl_cls.call_count == 2
+
+
+def _probe_with(monkeypatch, product, vendor, kbd):
+    from unittest.mock import MagicMock, patch
+    from gigamate.acpi import AcpiCapabilities
+    from gigamate.battery import BatteryInfo
+    from gigamate.gpu import GpuState
+
+    mock_caps = AcpiCapabilities(backend="none")
+    mock_bat = BatteryInfo(present=True, charge_limit_supported=False)
+    mock_gpu = GpuState(present=False)
+    with patch("gigamate.capabilities.get_dmi_product_name", return_value=product), \
+         patch("gigamate.capabilities.get_dmi_vendor", return_value=vendor), \
+         patch("gigamate.capabilities.AcpiController") as ctrl_cls, \
+         patch("gigamate.capabilities.get_battery_manager") as bat_get, \
+         patch("gigamate.capabilities.detect_device", return_value=kbd), \
+         patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
+        ctrl_cls.return_value.available = False
+        ctrl_cls.return_value.capabilities = mock_caps
+        bat_get.return_value.is_available = True
+        bat_get.return_value.is_charge_limit_supported.return_value = False
+        bat_get.return_value.get_battery_info.return_value = mock_bat
+        from gigamate.capabilities import detect_system_capabilities
+        return detect_system_capabilities(refresh=True)
+
+
+def test_shared_usb_vendor_does_not_imply_gigabyte(monkeypatch):
+    """Holtek (0x04D9) peripherals must not mark a generic PC as Gigabyte."""
+    caps = _probe_with(monkeypatch, "Custom Desktop", "ASUSTeK COMPUTER INC.",
+                       (0x04D9, 0x1234))
+    assert caps.keyboard_detected is True
+    assert caps.is_gigabyte_laptop is False
+
+
+def test_primary_gigabyte_vid_implies_gigabyte(monkeypatch):
+    caps = _probe_with(monkeypatch, "Custom Desktop", "Some Vendor",
+                       (0x0414, 0x8105))
+    assert caps.is_gigabyte_laptop is True
+
+
+def test_giga_byte_vendor_string_is_recognized(monkeypatch):
+    caps = _probe_with(monkeypatch, "G5 KF", "GIGA-BYTE Technology", None)
+    assert caps.is_gigabyte_laptop is True

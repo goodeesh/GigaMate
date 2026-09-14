@@ -22,7 +22,7 @@ def _safe_apply_hardware_settings(*args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_hardware(monkeypatch):
+def _no_real_hardware(monkeypatch, tmp_path):
     """Replace hardware side-effect entry points with inert doubles."""
     # High-level reapplication used lazily by MainWindow and imported directly
     # by the sleep handler / tray.
@@ -30,15 +30,39 @@ def _no_real_hardware(monkeypatch):
     monkeypatch.setattr("gigamate.hardware.apply_hardware_settings", noop_apply, raising=False)
     monkeypatch.setattr("gigamate.sleep_handler.apply_hardware_settings", noop_apply, raising=False)
 
+    # Never migrate from a real legacy config file into the isolated config.
+    monkeypatch.setattr(
+        "gigamate.config._OLD_CONFIG_FILE",
+        tmp_path / "nonexistent-legacy-config.json",
+        raising=False,
+    )
+
     # UI-layer patches require PyQt6; skip them when the GUI stack is unavailable
     # so pure-python test modules can still run.
     try:
         import gigamate.ui.pages.dashboard_page  # noqa: F401
         import gigamate.ui.pages.rgb_page  # noqa: F401
         import gigamate.ui.pages.battery_page  # noqa: F401
+        import gigamate.ui.main_window  # noqa: F401
+        import gigamate.ui.pages.settings_page  # noqa: F401
     except Exception:
         yield
         return
+
+    # ── Power/GPU synchronization: must not touch real D-Bus/systemctl/sysfs ──
+    monkeypatch.setattr(
+        "gigamate.ui.pages.dashboard_page.sync_system_power", MagicMock(return_value=True), raising=False
+    )
+    monkeypatch.setattr(
+        "gigamate.ui.pages.settings_page.sync_system_power", MagicMock(return_value=True), raising=False
+    )
+
+    # ── IPC: use an isolated per-test socket/lock, never the live instance ──
+    sock = str(tmp_path / "gigamate-center-test.sock")
+    lock = str(tmp_path / "gigamate-center-test.lock")
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_PATH", sock, raising=False)
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_LOCK_PATH", lock, raising=False)
+    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_NAME", sock, raising=False)
 
     # ── Dashboard ACPI controller: populated, side-effect-free fake ──
     from gigamate.acpi import AcpiCapabilities, FanProfile, FanState
@@ -104,5 +128,33 @@ def _no_real_hardware(monkeypatch):
         lambda *args, **kwargs: fake_battery,
         raising=False,
     )
+
+    # ── GTK tray (optional): no real network check, system bus, or USB writes ──
+    try:
+        import gigamate.tray  # noqa: F401
+
+        monkeypatch.setattr(
+            "gigamate.tray.update_checker.check_for_updates",
+            MagicMock(return_value={"current": "0.0.0", "latest": None,
+                                    "update_available": False, "reachable": True}),
+            raising=False,
+        )
+        monkeypatch.setattr("gigamate.tray.get_keyboard", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr("gigamate.tray.set_static", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr("gigamate.tray.set_off", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr(
+            "gigamate.tray.apply_hardware_settings", MagicMock(return_value={}), raising=False
+        )
+        # Do not open a real system-bus sleep listener.
+        monkeypatch.setattr(
+            "gigamate.tray.get_sleep_handler", lambda *a, **k: MagicMock(), raising=False
+        )
+        tray_battery = MagicMock()
+        tray_battery.is_available = False
+        monkeypatch.setattr(
+            "gigamate.tray.get_battery_manager", lambda *a, **k: tray_battery, raising=False
+        )
+    except Exception:
+        pass
 
     yield

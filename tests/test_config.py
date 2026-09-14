@@ -115,3 +115,72 @@ def test_all_default_config_keys_roundtrip(isolated_config):
         assert key in loaded, f"key '{key}' was dropped by save()/load()"
         assert loaded[key] == expected, f"key '{key}' changed: {loaded[key]!r} != {expected!r}"
 
+
+def test_load_handles_non_dict_json(isolated_config):
+    """A valid-JSON non-object file must not crash load()."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text("[1, 2, 3]")
+    loaded = config_module.load()
+    assert loaded["colour"] == config_module.DEFAULT_CONFIG["colour"]
+
+
+def test_invalid_charge_limit_falls_back_to_default(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text('{"charge_limit": 10}')
+    assert config_module.load()["charge_limit"] == config_module.DEFAULT_CONFIG["charge_limit"]
+
+
+def test_invalid_acpi_profile_is_dropped(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text('{"acpi_profile": 9}')
+    assert config_module.load().get("acpi_profile") is None
+
+
+def test_save_warns_on_unknown_keys(isolated_config, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="gigamate.config"):
+        config_module.save({"colour": "red", "future_key": 1})
+    assert any("future_key" in rec.message for rec in caplog.records)
+
+
+def test_save_handles_bogus_brightness(isolated_config):
+    """save() must not raise on non-numeric brightness values."""
+    config_module.save({"brightness": "off"})
+    loaded = config_module.load()
+    assert loaded["brightness"] in (0, 1, 2)
+
+
+
+def test_save_handles_null_profile_id(isolated_config):
+    config_module.save({"profile_id": None})
+    loaded = config_module.load()
+    assert loaded["profile_id"] == config_module.DEFAULT_CONFIG["profile_id"]
+
+
+def test_update_config_is_read_modify_write(isolated_config):
+    config_module.save({"colour": "red", "idle_timeout_sec": 60})
+
+    def mutate(cfg):
+        cfg["colour"] = "blue"
+        return cfg
+
+    result = config_module.update_config(mutate)
+    assert result["colour"] == "blue"
+    reloaded = config_module.load()
+    assert reloaded["colour"] == "blue"
+    assert reloaded["idle_timeout_sec"] == 60
+
+
+def test_save_preserves_unknown_on_disk_keys(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text('{"colour": "red", "future_key": 42}')
+    config_module.save({"colour": "blue"})
+    data = json.loads(isolated_config.read_text())
+    assert data["colour"] == "blue"
+    assert data["future_key"] == 42
+
+
+def test_bak_recovery_when_primary_missing(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    (config_module.CONFIG_DIR / "config.json.bak").write_text('{"colour": "green"}')
+    assert config_module.load()["colour"] == "green"

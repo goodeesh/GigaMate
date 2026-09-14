@@ -9,6 +9,7 @@ to physical hardware across all lifecycle events:
 """
 
 import logging
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -16,17 +17,37 @@ from .config import DEFAULT_CONFIG, load as load_config, resolve_active_profile
 
 logger = logging.getLogger(__name__)
 
+# Reapplying hardware touches USB/ACPI/battery; serialize across the GUI thread
+# (launch) and the sleep-listener thread (resume) to avoid concurrent writes.
+_APPLY_LOCK = threading.Lock()
 
-def apply_hardware_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+
+def apply_hardware_settings(
+    cfg: Optional[Dict[str, Any]] = None,
+    force_keyboard: bool = False,
+) -> Dict[str, bool]:
     """Apply all persisted user settings to hardware with isolated error domains.
 
     If an individual subsystem fails (e.g. keyboard unplugged, or battery missing),
     the other subsystems continue to apply normally.
 
+    Args:
+        cfg: Configuration mapping; loaded from disk when omitted.
+        force_keyboard: Apply keyboard lighting even when ``startup_apply`` is
+            disabled (used to restore the backlight after resume).
+
     Returns:
         Dict[str, bool] indicating success/failure per subsystem:
         {"profile": bool, "battery": bool, "keyboard": bool}
     """
+    with _APPLY_LOCK:
+        return _apply_hardware_settings_locked(cfg, force_keyboard)
+
+
+def _apply_hardware_settings_locked(
+    cfg: Optional[Dict[str, Any]],
+    force_keyboard: bool,
+) -> Dict[str, bool]:
     if cfg is None:
         cfg = load_config()
 
@@ -41,24 +62,34 @@ def apply_hardware_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, b
     # ─────────────────────────────────────────────────────────────
     prof_val = cfg.get("acpi_profile")
     if prof_val is not None:
-        try:
-            from .acpi import AcpiController, FanProfile
-            from .gpu import sync_gpu_power
-            from .system_power import sync_system_power
+        from .acpi import AcpiController, FanProfile
 
-            ctrl = AcpiController()
-            if ctrl.available:
-                fp = FanProfile(int(prof_val))
-                if ctrl.set_profile(fp):
+        # Parse the persisted profile id in its own error domain so a bad value
+        # cannot suppress the system/GPU power sync below.
+        fp: Optional[FanProfile] = None
+        try:
+            fp = FanProfile(int(prof_val))
+        except (TypeError, ValueError):
+            logger.warning("Hardware sync: ignoring invalid acpi_profile %r", prof_val)
+
+        if fp is not None:
+            try:
+                ctrl = AcpiController()
+                if ctrl.available and ctrl.set_profile(fp):
                     results["profile"] = True
                     logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
+            except Exception as exc:
+                logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
 
-            # Always sync system power and GPU power according to saved profile
-            if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
-                sync_system_power(int(prof_val))
-            sync_gpu_power(int(prof_val))
-        except Exception as exc:
-            logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
+            # System power sync also synchronizes GPU power (Dynamic Boost /
+            # SmartShift); honour the user's sync_system_power preference.
+            try:
+                if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
+                    from .system_power import sync_system_power
+
+                    sync_system_power(int(prof_val))
+            except Exception as exc:
+                logger.warning(f"Hardware sync failed for system power: {exc}")
 
     # ─────────────────────────────────────────────────────────────
     # 2. Battery Care & Charging Limit
@@ -79,7 +110,7 @@ def apply_hardware_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, b
     # ─────────────────────────────────────────────────────────────
     # 3. Keyboard RGB Lighting
     # ─────────────────────────────────────────────────────────────
-    if cfg.get("startup_apply", DEFAULT_CONFIG["startup_apply"]):
+    if force_keyboard or cfg.get("startup_apply", DEFAULT_CONFIG["startup_apply"]):
         try:
             from .protocol import get_keyboard, set_off, set_static
 
@@ -100,7 +131,7 @@ def apply_hardware_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, b
                 if brightness == 0:
                     set_off(dev, profile)
                 else:
-                    if profile is not None and colour not in profile.colour_map:
+                    if profile is not None and profile.colour_map and colour not in profile.colour_map:
                         colour = next(iter(profile.colour_map))
                     set_static(dev, colour, brightness, profile)
                 results["keyboard"] = True

@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...battery import BatteryManager, get_battery_manager
-from ...config import load as load_config, save as save_config
+from ...config import load as load_config, update_config
 
 
 class BatteryPage(QWidget):
@@ -25,10 +25,15 @@ class BatteryPage(QWidget):
         self.battery_mgr = get_battery_manager()
         self._init_ui()
 
-        # Periodic refresh timer (every 3 seconds)
+        # Periodic refresh timer (every 3 seconds); only refreshes while visible.
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._refresh_battery_data)
+        self.timer.timeout.connect(self._on_battery_tick)
         self.timer.start(3000)
+
+    def _on_battery_tick(self) -> None:
+        """Timer entry point that skips work while the page is hidden."""
+        if self.isVisible():
+            self._refresh_battery_data()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -183,10 +188,11 @@ class BatteryPage(QWidget):
         try:
             success = self.battery_mgr.set_charge_limit(val)
             if success:
-                cfg = load_config()
-                cfg["charge_limit"] = val
-                cfg["charge_limit_enabled"] = True
-                save_config(cfg)
+                def _mutate(cfg):
+                    cfg["charge_limit"] = val
+                    cfg["charge_limit_enabled"] = True
+                    return cfg
+                update_config(_mutate)
                 self.limit_status_label.setText(f"✓ Battery charge threshold successfully set to {val}%")
                 self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px;")
             else:

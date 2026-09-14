@@ -76,6 +76,8 @@ IDLE_TIMEOUT_STEPS = [
     (30, "30 seconds"),
     (60, "1 minute"),
     (120, "2 minutes"),
+    (300, "5 minutes"),
+    (900, "15 minutes"),
 ]
 
 
@@ -161,12 +163,6 @@ def _is_input_device(sysfs_dir: str) -> bool:
     if ev and not (ev & 0x07):
         # No KEY/REL/ABS bits (e.g. lid switch EV=0x21 SW-only).
         return False
-    if _HAS_EVDEV and ev:
-        try:
-            from evdev import ecodes  # type: ignore
-            _ = ecodes.EV_KEY
-        except Exception:
-            pass
     return True
 
 
@@ -223,7 +219,6 @@ class IdleMonitor:
         self._last_activity = time.monotonic()
         self._idle = False
         self._last_dispatch = 0.0
-        self._fd_paths: Dict[int, str] = {}
 
     # ── properties ──
 
@@ -254,6 +249,10 @@ class IdleMonitor:
         """Start the background thread. False if no readable device."""
         if self.is_running:
             return True
+        # A previous stop() may have timed out joining a wedged thread; refuse
+        # to start a second worker in that case.
+        if self._thread is not None and self._thread.is_alive():
+            return False
         nodes = list_input_event_nodes()
         if not nodes:
             return False
@@ -297,19 +296,24 @@ class IdleMonitor:
                 pass
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+
+        thread_alive = self._thread is not None and self._thread.is_alive()
+        if not thread_alive:
             self._thread = None
-        if self._stop_pipe_r is not None:
-            try:
-                os.close(self._stop_pipe_r)
-            except OSError:
-                pass
-            self._stop_pipe_r = None
-        if self._stop_pipe_w is not None:
-            try:
-                os.close(self._stop_pipe_w)
-            except OSError:
-                pass
-            self._stop_pipe_w = None
+            # Only close the pipes once the worker is confirmed stopped; a
+            # wedged worker may still be selecting on the read end.
+            if self._stop_pipe_r is not None:
+                try:
+                    os.close(self._stop_pipe_r)
+                except OSError:
+                    pass
+                self._stop_pipe_r = None
+            if self._stop_pipe_w is not None:
+                try:
+                    os.close(self._stop_pipe_w)
+                except OSError:
+                    pass
+                self._stop_pipe_w = None
         with self._lock:
             self._idle = False
 
@@ -390,7 +394,6 @@ class IdleMonitor:
 
     def _worker(self) -> None:
         fds = self._open_all()
-        self._fd_paths = fds
         last_rescan = time.monotonic()
         try:
             while self._running:
@@ -453,7 +456,6 @@ class IdleMonitor:
                     last_rescan = now
                     self._close_all(fds)
                     fds = self._open_all()
-                    self._fd_paths = fds
                     if not fds:
                         # No devices (suspend/unplug): wait a bit, then retry.
                         try:
@@ -469,7 +471,6 @@ class IdleMonitor:
                             break
         finally:
             self._close_all(fds)
-            self._fd_paths = {}
             self._running = False
 
 
@@ -494,7 +495,7 @@ def mutter_idle_ms() -> Optional[int]:
             None, None, Gio.DBusCallFlags.NONE, 2000, None,
         )
         if res is not None:
-            return int(res.get_child_value(0).get_uint64() // 1000)
+            return int(res.get_child_value(0).get_uint64())
     except Exception:
         pass
     return None
@@ -521,7 +522,7 @@ def screensaver_idle_ms() -> Optional[int]:
                 None, None, Gio.DBusCallFlags.NONE, 2000, None,
             )
             if res is not None:
-                return int(res.get_child_value(0).get_uint32() * 1000)
+                return int(res.get_child_value(0).get_uint32())
         except Exception:
             continue
     return None
