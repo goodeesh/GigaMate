@@ -141,14 +141,12 @@ def load():
     if data is None:
         data = _read_json(CONFIG_DIR / "config.json.bak")
 
-    # Whether the active profile id was explicitly persisted (vs. the default).
-    has_stored_profile_id = isinstance(data, dict) and "profile_id" in data
-
     if data:
         if not isinstance(data, dict):
             logger.warning("config.json is not a JSON object; using defaults")
             return config
         _migrate_profile_id(data)
+        has_stored_profile_id = "profile_id" in data
         if "profile_id" in data:
             data["profile_id"] = _coerce_profile_id(data["profile_id"])
         if "brightness" in data:
