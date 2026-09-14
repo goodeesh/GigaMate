@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import threading
 
 from .paths import CONFIG_DIR
 from .profiles import detect_device, resolve_profile
@@ -17,12 +18,30 @@ _OLD_CONFIG_FILE = _OLD_CONFIG_DIR / "config.json"
 
 
 def _migrate_old_config():
-    """Migrate config from old gigabyte-keyboard-rgb location to new gigamate location."""
+    """Migrate config and custom profiles from old gigabyte-keyboard-rgb location to new gigamate location."""
     try:
         if _OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            _atomic_write_bytes(CONFIG_FILE, _OLD_CONFIG_FILE.read_bytes())
-            logger.info("Migrated settings from %s to %s", _OLD_CONFIG_DIR, CONFIG_DIR)
+            old_bytes = _OLD_CONFIG_FILE.read_bytes()
+            if old_bytes:
+                try:
+                    json.loads(old_bytes.decode("utf-8"))
+                    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_bytes(CONFIG_FILE, old_bytes)
+                    logger.info("Migrated settings from %s to %s", _OLD_CONFIG_DIR, CONFIG_DIR)
+                except Exception:
+                    logger.warning("Legacy config was malformed; ignoring")
+
+        old_profiles = _OLD_CONFIG_DIR / "profiles"
+        new_profiles = CONFIG_DIR / "profiles"
+        if old_profiles.is_dir():
+            new_profiles.mkdir(parents=True, exist_ok=True)
+            for p in old_profiles.glob("*.json"):
+                dest = new_profiles / p.name
+                if not dest.exists():
+                    try:
+                        _atomic_write_bytes(dest, p.read_bytes())
+                    except OSError:
+                        pass
     except (OSError, IOError) as exc:
         logger.warning("Could not migrate legacy config: %s", exc)
 
@@ -50,23 +69,29 @@ _BRIGHTNESS_LEGACY_MAP = {
 
 
 def _migrate_brightness(val):
+    if isinstance(val, bool):
+        return 1 if val else 0
     if isinstance(val, str):
-        if val in ("off", "0"):
+        val_clean = val.strip().lower().rstrip("%")
+        if val_clean in ("off", "0"):
             return 0
-        if val in ("dim", "1"):
+        if val_clean in ("dim", "1"):
             return 1
-        if val in ("full", "2"):
+        if val_clean in ("full", "2"):
             return 2
         try:
-            val = int(val)
+            val = float(val_clean)
         except (ValueError, TypeError):
             return 2
-    if isinstance(val, int):
-        if val in (0, 1, 2):
-            return val
-        for (lo, hi), mapped in _BRIGHTNESS_LEGACY_MAP.items():
-            if lo <= val <= hi:
-                return mapped
+    if isinstance(val, (int, float)):
+        v = int(val)
+        if v in (0, 1, 2):
+            return v
+        if v <= 12:
+            return 0
+        if v <= 62:
+            return 1
+        return 2
     return 2
 
 
@@ -92,9 +117,14 @@ def _migrate_colour(col):
 
 def _coerce_profile_id(value):
     """Return a valid [vid, pid] pair of ints, or the default."""
+    if isinstance(value, str) and ":" in value:
+        value = value.split(":", 1)
     try:
         if isinstance(value, (list, tuple)) and len(value) == 2:
-            return [int(value[0]), int(value[1])]
+            v0, v1 = value[0], value[1]
+            vid = v0 if isinstance(v0, int) else int(str(v0).strip(), 0 if str(v0).strip().startswith(("0x", "0X")) else 16)
+            pid = v1 if isinstance(v1, int) else int(str(v1).strip(), 0 if str(v1).strip().startswith(("0x", "0X")) else 16)
+            return [vid, pid]
     except (TypeError, ValueError):
         pass
     return list(DEFAULT_CONFIG["profile_id"])
@@ -141,6 +171,7 @@ def load():
     if data is None:
         data = _read_json(CONFIG_DIR / "config.json.bak")
 
+    has_stored_profile_id = False
     if data:
         if not isinstance(data, dict):
             logger.warning("config.json is not a JSON object; using defaults")
@@ -250,17 +281,20 @@ def update_config(mutator):
 
 def _atomic_write_bytes(path: Path, data: bytes) -> bool:
     """Write ``data`` to ``path`` atomically. Returns True on success."""
-    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     ok = False
     try:
-        with open(tmp, "wb") as fh:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             try:
                 fh.flush()
                 os.fsync(fh.fileno())
             except OSError:
                 pass
-        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
         ok = True
     except OSError as exc:
@@ -299,11 +333,12 @@ def _write_config(config):
             pass
 
     # Preserve keys written by a newer version so a downgrade-then-save does
-    # not silently discard them.
+    # not silently discard them, while dropping known obsolete keys.
+    _LEGACY_KEYS_TO_DROP = {"vid", "pid"}
     existing = _read_json(CONFIG_FILE)
     if isinstance(existing, dict):
         for key, value in existing.items():
-            if key not in safe:
+            if key not in safe and key not in _LEGACY_KEYS_TO_DROP:
                 safe[key] = value
 
     # Surface caller-supplied keys we deliberately do not persist.
@@ -314,16 +349,14 @@ def _write_config(config):
     if not _atomic_write_bytes(CONFIG_FILE, json.dumps(safe, indent=2).encode("utf-8") + b"\n"):
         return False
     try:
+        _atomic_write_bytes(CONFIG_DIR / "config.json.bak",
+                            json.dumps(safe, indent=2).encode("utf-8") + b"\n")
+    except OSError:
+        pass
+    try:
         os.chmod(CONFIG_FILE, 0o600)
     except OSError:
         pass
-    # Keep a durable, atomic, 0600 backup of the last good file.
-    try:
-        bak_data = CONFIG_FILE.read_bytes()
-    except OSError:
-        bak_data = None
-    if bak_data is not None:
-        _atomic_write_bytes(CONFIG_DIR / "config.json.bak", bak_data)
     try:
         dir_fd = os.open(CONFIG_DIR, os.O_RDONLY)
         try:
@@ -349,10 +382,13 @@ def apply_from_config(dev):
         return False
     from .protocol import set_static, set_off
     profile = resolve_active_profile()
+    if profile is None:
+        logger.info("No active keyboard profile resolved; skipping lighting apply")
+        return False
     brightness = cfg.get("brightness", 2)
     if brightness == 0:
         return set_off(dev, profile)
     colour = cfg.get("colour", DEFAULT_CONFIG["colour"])
-    if profile is not None and profile.colour_map and colour not in profile.colour_map:
+    if profile.colour_map and colour not in profile.colour_map:
         colour = next(iter(profile.colour_map))
     return set_static(dev, colour, brightness, profile)

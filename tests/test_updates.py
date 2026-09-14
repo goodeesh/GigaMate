@@ -383,6 +383,9 @@ class TestTagValidationAndPinning:
         assert is_newer("v3.0.0", "3.0.0b1") is True
         assert is_newer("v3.0.0b2", "3.0.0b1") is True
         assert is_newer("v3.0.0b1", "3.0.0") is False
+        assert is_newer("v3.0.0-rc.2", "3.0.0-rc.1") is True
+        assert is_newer("v3.0.0", "3.0.0-rc.2") is True
+        assert is_newer("v3.0.0-beta.1", "2.0.8") is True
 
     def test_install_script_url_pins_tag(self):
         url = updates.install_script_url("v1.2.3")

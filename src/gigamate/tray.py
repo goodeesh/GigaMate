@@ -23,8 +23,12 @@ from gi.repository import Gtk, GLib, Gio
 try:
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3
-except Exception:  # missing typelib — degrade to no tray indicator
-    AppIndicator3 = None
+except Exception:
+    try:
+        gi.require_version("AyatanaAppIndicator3", "0.1")
+        from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+    except Exception:  # missing typelib — degrade to no tray indicator
+        AppIndicator3 = None
 
 from pathlib import Path
 
@@ -281,6 +285,7 @@ class GigaMateTrayApp:
                     self._sync_power_item.set_active(new_sync_power)
 
             if getattr(self, "_battery_care_item", None) is not None:
+                self._battery_care_item.set_label(f"Battery Care (Cap at {new_limit}%)")
                 self._battery_care_item.set_active(new_limit_enabled and 40 <= new_limit < 100)
             self._battery_cap_limit = new_limit
         finally:
@@ -608,7 +613,8 @@ class GigaMateTrayApp:
             ok = False
 
         if ok:
-            self._config["charge_limit"] = target
+            if widget.get_active():
+                self._config["charge_limit"] = target
             self._config["charge_limit_enabled"] = widget.get_active()
             self._battery_dirty = True
             self._save_config()
@@ -1076,13 +1082,10 @@ class GigaMateTrayApp:
 
     def _start_status_polling(self) -> None:
         """Start the periodic status update timer."""
-        acpi_ok = self._acpi_controller is not None and self._acpi_controller.available
-        gpu_present = get_gpu_state().present
-        if acpi_ok or gpu_present:
-            self._update_status()
-            self._status_timer_id = GLib.timeout_add(
-                STATUS_POLL_INTERVAL_MS, self._update_status
-            )
+        self._update_status()
+        self._status_timer_id = GLib.timeout_add(
+            STATUS_POLL_INTERVAL_MS, self._update_status
+        )
 
     def _tray_icon_key(self, gpu=None) -> str:
         """Combine dGPU state with update badge into one of 6 icon keys."""
@@ -1676,13 +1679,22 @@ class GigaMateTrayApp:
 
 def main() -> None:
     """Entry point for the GigaMate tray application."""
+    if os.geteuid() == 0:
+        print(
+            "GigaMate Tray must be run as your desktop user, not root.\n"
+            "Running it with sudo would create root-owned settings and cannot "
+            "reach your user session. Re-run as your normal user.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     # Single-instance guard to prevent duplicate tray icons
     import fcntl
     from .paths import get_runtime_dir
     runtime_dir = get_runtime_dir()
-    lock_file_path = runtime_dir / "gigamate-tray.lock"
+    lock_file_path = runtime_dir / f"gigamate-tray-{os.getuid()}.lock"
     try:
         lock_fd = open(lock_file_path, "w")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

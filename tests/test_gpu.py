@@ -413,3 +413,24 @@ class TestAmdSmartShift:
         assert mon.sync_power(0) is True
         bias_file = mon._device / "smartshift_bias"
         assert bias_file.read_text().strip() == "-50"
+
+    def test_amd_3d_controller_without_boot_vga(self, tmp_path):
+        root = tmp_path / "pci"
+        dev = root / "0000:03:00.0"
+        dev.mkdir(parents=True)
+        (dev / "vendor").write_text("0x1002\n")
+        (dev / "class").write_text("0x030200\n")
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        gpu, vendor = mon._find_device()
+        assert gpu == dev
+        assert vendor == "amd"
+
+    def test_dynamic_boost_unsupported_proc_file(self, tmp_path):
+        root = _nvidia_gpu(tmp_path)
+        proc = tmp_path / "proc_nvidia"
+        gpu_power = proc / "gpus" / "0000:01:00.0" / "power"
+        gpu_power.parent.mkdir(parents=True)
+        gpu_power.write_text("Notebook Dynamic Boost:     Not Supported\n")
+        mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
+        mon.detect()
+        assert mon._check_dynamic_boost_supported() is False

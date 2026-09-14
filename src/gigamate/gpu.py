@@ -144,11 +144,10 @@ class NvidiaGpuMonitor:
                 if vendor == NVIDIA_VENDOR and nvidia is None:
                     nvidia = entry
                 elif vendor == AMD_VENDOR and amd is None:
-                    # Only accept AMD devices explicitly flagged as
-                    # non-boot (boot_vga=0). This excludes integrated
-                    # graphics (boot_vga=1); a missing flag is treated
-                    # conservatively as "not a dGPU".
-                    if self._read_text(entry / "boot_vga") == "0":
+                    # Accept AMD devices explicitly flagged as non-boot (boot_vga=0)
+                    # or 3D controllers (PCI class 0x0302xx) which do not have a boot_vga attribute.
+                    boot_vga = self._read_text(entry / "boot_vga")
+                    if boot_vga == "0" or (cls.startswith("0x0302") and boot_vga != "1"):
                         amd = entry
         except OSError:
             pass
@@ -179,16 +178,21 @@ class NvidiaGpuMonitor:
         # 1. Check /proc/driver/nvidia/gpus/*/power
         proc_root = self._proc_nvidia or Path("/proc/driver/nvidia")
         gpus_dir = proc_root / "gpus" if proc_root.name != "gpus" else proc_root
+        found_power_file = False
         if gpus_dir.is_dir():
             try:
                 for p in gpus_dir.iterdir():
                     power_file = p / "power"
                     if power_file.is_file():
+                        found_power_file = True
                         content = power_file.read_text(errors="ignore")
                         if "Notebook Dynamic Boost:     Supported" in content or "Notebook Dynamic Boost: Supported" in content:
                             return True
             except (OSError, IOError):
                 pass
+        # If procfs power files existed and none indicated Supported, treat as unsupported
+        if found_power_file:
+            return False
 
         # 2. Check if nvidia-powerd service unit or binary exists
         for unit_dir in [Path("/usr/lib/systemd/system"), Path("/etc/systemd/system")]:
@@ -361,7 +365,7 @@ _monitor = NvidiaGpuMonitor()
 
 
 def gpu_status_text(state: GpuState) -> str:
-    """Return a descriptive status string for a GpuState, e.g. 'Asleep (D3cold)'."""
+    """Human-readable GPU power status suitable for UI display."""
     if not state.present:
         return "Not present"
     status = state.status
@@ -370,6 +374,8 @@ def gpu_status_text(state: GpuState) -> str:
         return f"Asleep ({power})" if power else "Asleep"
     if status == "active":
         return f"Awake ({power})" if power else "Awake"
+    if status in ("suspending", "resuming"):
+        return f"{status.capitalize()} ({power})" if power else status.capitalize()
     if power:
         return f"Unknown ({power})"
     return "Unknown"
@@ -379,7 +385,14 @@ def gpu_short_status_text(state: GpuState) -> str:
     """Return a short status label: 'Asleep', 'Awake', 'Unknown', or 'Not present'."""
     if not state.present:
         return "Not present"
-    return {"suspended": "Asleep", "active": "Awake"}.get(state.status or "", "Unknown")
+    status = state.status or ""
+    if status == "suspended":
+        return "Asleep"
+    if status == "active":
+        return "Awake"
+    if status in ("suspending", "resuming"):
+        return status.capitalize()
+    return "Unknown"
 
 
 # Tray icon keys per (vendor, awake). Distinct files (not runtime rewrites)

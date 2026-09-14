@@ -114,14 +114,23 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         if any(token in dmi_upper for token in _GIGABYTE_PRODUCT_TOKENS):
             is_gigabyte = True
 
+    # 2. Battery Subsystem (queried early for chassis laptop vs desktop deduction)
+    bat_mgr = get_battery_manager()
+    bat_info = bat_mgr.get_battery_info()
+    battery_present = bat_mgr.is_available
+    charge_limit_supported = bat_mgr.is_charge_limit_supported()
+    battery_name = bat_info.name if battery_present else "None"
+
     # A Gigabyte *desktop* motherboard is not a Gigabyte laptop: chassis types
-    # 3..7 are desktop variants. Unknown/Other types do not disqualify.
+    # 3..7, 17, 23, 24 are desktop/server variants. Unknown/Other (1, 2) without battery are also desktop.
     if is_gigabyte:
         chassis = get_dmi_chassis_type()
-        if chassis is not None and 3 <= chassis <= 7:
+        if chassis is not None and (3 <= chassis <= 7 or chassis in (17, 23, 24)):
+            is_gigabyte = False
+        elif chassis in (1, 2) and not battery_present:
             is_gigabyte = False
 
-    # 2. ACPI Subsystem
+    # 3. ACPI Subsystem
     acpi_ctrl = AcpiController()
     acpi_avail = acpi_ctrl.available
     acpi_caps = acpi_ctrl.capabilities
@@ -137,13 +146,6 @@ def _probe_system_capabilities() -> HardwareCapabilities:
     detected_kbd = detect_device()
 
     acpi_missing = is_gigabyte and not acpi_avail
-
-    # 3. Battery Subsystem
-    bat_mgr = get_battery_manager()
-    bat_info = bat_mgr.get_battery_info()
-    battery_present = bat_mgr.is_available
-    charge_limit_supported = bat_mgr.is_charge_limit_supported()
-    battery_name = bat_info.name if battery_present else "None"
 
     # 4. Keyboard RGB Subsystem
     keyboard_detected = detected_kbd is not None

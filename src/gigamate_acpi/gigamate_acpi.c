@@ -17,6 +17,7 @@
 #include <linux/sysfs.h>
 #include <linux/stat.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 
 #define DRIVER_NAME "gigamate_acpi"
 #define DRIVER_VERSION "3.0.0"
@@ -31,7 +32,7 @@ static DEFINE_MUTEX(gigamate_acpi_mutex);
  * ACPI helpers
  * ──────────────────────────────────────────── */
 
-static int acpi_wmbc_read(u8 cmd)
+static int acpi_wmbc_read_locked(u8 cmd)
 {
 	union acpi_object args[3];
 	struct acpi_object_list input = { 3, args };
@@ -39,6 +40,9 @@ static int acpi_wmbc_read(u8 cmd)
 	acpi_status status;
 	union acpi_object *result;
 	int ret = -EIO;
+
+	if (!amw0_handle)
+		return -ENODEV;
 
 	args[0].type = ACPI_TYPE_INTEGER;
 	args[0].integer.value = 0;
@@ -54,14 +58,28 @@ static int acpi_wmbc_read(u8 cmd)
 	}
 
 	result = output.pointer;
-	if (result && result->type == ACPI_TYPE_INTEGER)
-		ret = (int)result->integer.value;
+	if (result && result->type == ACPI_TYPE_INTEGER) {
+		u64 v = result->integer.value;
+		if (v == 0xFFFFFFFFULL || v == (u64)-1LL)
+			ret = -ENODATA;
+		else
+			ret = (int)v;
+	}
 
 	kfree(result);
 	return ret;
 }
 
-static int acpi_wmbd_write(u8 cmd, u64 val)
+static int acpi_wmbc_read(u8 cmd)
+{
+	int ret;
+	mutex_lock(&gigamate_acpi_mutex);
+	ret = acpi_wmbc_read_locked(cmd);
+	mutex_unlock(&gigamate_acpi_mutex);
+	return ret;
+}
+
+static int acpi_wmbd_write_locked(u8 cmd, u64 val)
 {
 	union acpi_object args[3];
 	struct acpi_object_list input = { 3, args };
@@ -69,6 +87,9 @@ static int acpi_wmbd_write(u8 cmd, u64 val)
 	acpi_status status;
 	union acpi_object *result;
 	int ret = -EIO;
+
+	if (!amw0_handle)
+		return -ENODEV;
 
 	args[0].type = ACPI_TYPE_INTEGER;
 	args[0].integer.value = 0;
@@ -84,10 +105,24 @@ static int acpi_wmbd_write(u8 cmd, u64 val)
 	}
 
 	result = output.pointer;
-	if (result && result->type == ACPI_TYPE_INTEGER)
-		ret = (int)result->integer.value;
+	if (result && result->type == ACPI_TYPE_INTEGER) {
+		u64 v = result->integer.value;
+		if (v == 0xFFFFFFFFULL || v == (u64)-1LL)
+			ret = -ENODATA;
+		else
+			ret = (int)v;
+	}
 
 	kfree(result);
+	return ret;
+}
+
+static int acpi_wmbd_write(u8 cmd, u64 val)
+{
+	int ret;
+	mutex_lock(&gigamate_acpi_mutex);
+	ret = acpi_wmbd_write_locked(cmd, val);
+	mutex_unlock(&gigamate_acpi_mutex);
 	return ret;
 }
 
@@ -201,7 +236,7 @@ static ssize_t profile_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&gigamate_acpi_mutex);
-	ret = acpi_wmbd_write(0xED, val);
+	ret = acpi_wmbd_write_locked(0xED, val);
 	if (ret < 0) {
 		mutex_unlock(&gigamate_acpi_mutex);
 		return ret;
@@ -210,9 +245,9 @@ static ssize_t profile_store(struct device *dev,
 	mutex_unlock(&gigamate_acpi_mutex);
 	return count;
 }
-/* Make profile world-writable so non-root users can change it */
+/* Make profile user-writable via uaccess / plugdev */
 static struct device_attribute dev_attr_profile_writable = {
-	.attr = { .name = "profile", .mode = 0666 },
+	.attr = { .name = "profile", .mode = 0664 },
 	.show = profile_show,
 	.store = profile_store,
 };
@@ -229,8 +264,8 @@ static ssize_t charge_limit_show(struct device *dev,
 	int cached;
 
 	mutex_lock(&gigamate_acpi_mutex);
-	policy = acpi_wmbc_read(0x64);
-	stop = acpi_wmbc_read(0x65);
+	policy = acpi_wmbc_read_locked(0x64);
+	stop = acpi_wmbc_read_locked(0x65);
 
 	/* If policy query succeeded and is 0 (Standard), charge limit is 100% */
 	if (policy == 0) {
@@ -254,12 +289,7 @@ static ssize_t charge_limit_show(struct device *dev,
 	if (cached > 0 && cached <= 100)
 		return sysfs_emit(buf, "%d\n", cached);
 
-	/* Both EC queries failed and we have no cached value: report that the
-	 * attribute is unsupported instead of pretending the limit is 100%. */
-	if (policy < 0 && stop < 0)
-		return -ENODATA;
-
-	return sysfs_emit(buf, "100\n");
+	return -ENODATA;
 }
 
 static ssize_t charge_limit_store(struct device *dev,
@@ -279,8 +309,8 @@ static ssize_t charge_limit_store(struct device *dev,
 	if (val == 0 || val == 100) {
 		/* Standard policy: 0x64 = 0 (Standard), 0x65 = 100 */
 		pr_info(DRIVER_NAME ": Setting standard charging policy (100%%)\n");
-		ret1 = acpi_wmbd_write(0x64, 0);
-		ret2 = acpi_wmbd_write(0x65, 100);
+		ret1 = acpi_wmbd_write_locked(0x64, 0);
+		ret2 = acpi_wmbd_write_locked(0x65, 100);
 		if (ret1 < 0 || ret2 < 0) {
 			pr_err(DRIVER_NAME ": Failed to set standard charge policy (%d, %d)\n",
 			       ret1, ret2);
@@ -301,13 +331,13 @@ static ssize_t charge_limit_store(struct device *dev,
 	 * (0x64 = 4). If either fails, best-effort restore the standard policy
 	 * so the EC is not left in an inconsistent state. */
 	pr_info(DRIVER_NAME ": Setting custom charge limit: %lu%%\n", val);
-	ret2 = acpi_wmbd_write(0x65, val);
-	ret1 = acpi_wmbd_write(0x64, 4);
+	ret2 = acpi_wmbd_write_locked(0x65, val);
+	ret1 = acpi_wmbd_write_locked(0x64, 4);
 	if (ret2 < 0 || ret1 < 0) {
 		pr_err(DRIVER_NAME ": Failed to set charge limit (policy=%d, stop=%d); rolling back\n",
 		       ret1, ret2);
-		acpi_wmbd_write(0x65, 100);
-		acpi_wmbd_write(0x64, 0);
+		acpi_wmbd_write_locked(0x65, 100);
+		acpi_wmbd_write_locked(0x64, 0);
 		mutex_unlock(&gigamate_acpi_mutex);
 		return -EIO;
 	}
@@ -317,9 +347,9 @@ static ssize_t charge_limit_store(struct device *dev,
 	return count;
 }
 
-/* Make charge_limit world-writable so non-root users can change it */
+/* Make charge_limit user-writable via uaccess / plugdev */
 static struct device_attribute dev_attr_charge_limit_writable = {
-	.attr = { .name = "charge_limit", .mode = 0666 },
+	.attr = { .name = "charge_limit", .mode = 0664 },
 	.show = charge_limit_show,
 	.store = charge_limit_store,
 };
@@ -388,14 +418,24 @@ static int gigamate_acpi_probe(struct platform_device *pdev)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
 static void gigamate_acpi_remove(struct platform_device *pdev)
+#else
+static int gigamate_acpi_remove(struct platform_device *pdev)
+#endif
 {
 	const struct device_attribute **attr;
 
 	for (attr = gigamate_acpi_dev_attrs; *attr; attr++)
 		device_remove_file(&pdev->dev, *attr);
 
+	amw0_handle = NULL;
+	current_profile = -1;
+	current_charge_limit = -1;
 	pr_info(DRIVER_NAME ": module removed\n");
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+	return 0;
+#endif
 }
 
 static struct platform_driver gigamate_acpi_driver = {

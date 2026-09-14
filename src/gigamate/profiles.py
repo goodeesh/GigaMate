@@ -176,6 +176,7 @@ def all_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
 
 def detect_device() -> Optional[Tuple[int, int]]:
     try:
+        known = all_profiles()
         for dev in usb.core.find(find_all=True):
             if dev is None:
                 continue
@@ -184,8 +185,19 @@ def detect_device() -> Optional[Tuple[int, int]]:
                 pid = dev.idProduct
             except (AttributeError, usb.core.USBError, ValueError):
                 continue
-            if vid in GIGABYTE_VIDS:
+            if vid in (0x0414, 0x1044):
                 return (vid, pid)
+            if vid == 0x04D9:
+                # 0x04D9 is Holtek Semiconductor, widely used by generic mice/keyboards.
+                # Only treat as Gigabyte if (vid, pid) is in known profiles or manufacturer is GIGABYTE.
+                if (vid, pid) in known:
+                    return (vid, pid)
+                try:
+                    mfr = (dev.manufacturer or "").upper()
+                    if "GIGABYTE" in mfr:
+                        return (vid, pid)
+                except Exception:
+                    pass
         for dev in usb.core.find(find_all=True):
             if dev is None:
                 continue

@@ -73,8 +73,10 @@ def _apply_hardware_settings_locked(
             logger.warning("Hardware sync: ignoring invalid acpi_profile %r", prof_val)
 
         if fp is not None:
+            acpi_available = False
             try:
                 ctrl = AcpiController()
+                acpi_available = ctrl.available
                 if ctrl.available and ctrl.set_profile(fp):
                     results["profile"] = True
                     logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
@@ -82,14 +84,15 @@ def _apply_hardware_settings_locked(
                 logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
 
             # System power sync also synchronizes GPU power (Dynamic Boost /
-            # SmartShift); honour the user's sync_system_power preference.
-            try:
-                if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
-                    from .system_power import sync_system_power
+            # SmartShift); honour the user's sync_system_power preference when ACPI is available.
+            if acpi_available:
+                try:
+                    if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
+                        from .system_power import sync_system_power
 
-                    sync_system_power(int(prof_val))
-            except Exception as exc:
-                logger.warning(f"Hardware sync failed for system power: {exc}")
+                        sync_system_power(int(prof_val))
+                except Exception as exc:
+                    logger.warning(f"Hardware sync failed for system power: {exc}")
 
     # ─────────────────────────────────────────────────────────────
     # 2. Battery Care & Charging Limit
@@ -129,13 +132,14 @@ def _apply_hardware_settings_locked(
                 colour = cfg.get("colour", DEFAULT_CONFIG["colour"])
 
                 if brightness == 0:
-                    set_off(dev, profile)
+                    ok = set_off(dev, profile)
                 else:
                     if profile is not None and profile.colour_map and colour not in profile.colour_map:
                         colour = next(iter(profile.colour_map))
-                    set_static(dev, colour, brightness, profile)
-                results["keyboard"] = True
-                logger.info(f"Hardware sync: Keyboard lighting set to {colour} (brightness {brightness})")
+                    ok = set_static(dev, colour, brightness, profile)
+                results["keyboard"] = bool(ok)
+                if ok:
+                    logger.info(f"Hardware sync: Keyboard lighting set to {colour} (brightness {brightness})")
         except Exception as exc:
             logger.warning(f"Hardware sync failed for keyboard lighting: {exc}")
 

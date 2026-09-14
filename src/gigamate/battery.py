@@ -214,13 +214,20 @@ class BatteryManager:
         return None
 
     def set_charge_limit(self, limit: int) -> bool:
-        """Set maximum battery charge limit percentage (40..100, where 100 is standard/unlimited).
+        """Set maximum battery charge limit percentage (40..100, where 100 or 0 is standard/unlimited).
 
         Returns True on success, False otherwise.
         """
-        if limit is None or not (40 <= int(limit) <= 100):
+        if limit is None:
+            raise ValueError("Charge limit cannot be None")
+        try:
+            val = int(limit)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid charge limit value: {limit!r}")
+
+        if not (40 <= val <= 100):
             raise ValueError(f"Charge limit must be between 40 and 100 percent (got {limit})")
-        limit = int(limit)
+        limit = val
 
         # 1. Try GigaMate ACPI module
         acpi_file = self._acpi_sysfs_dir / "charge_limit"
@@ -231,17 +238,19 @@ class BatteryManager:
             except (OSError, PermissionError) as exc:
                 logger.warning(f"Failed to write to {acpi_file}: {exc}")
 
-        # 2. Try standard sysfs attribute
-        if self._battery_path:
-            std_file = self._battery_path / "charge_control_end_threshold"
+        # 2. Try standard sysfs attribute on all detected batteries
+        success = False
+        target_paths = self._battery_paths if self._battery_paths else ([self._battery_path] if self._battery_path else [])
+        for bpath in target_paths:
+            std_file = bpath / "charge_control_end_threshold"
             if std_file.exists():
                 try:
                     std_file.write_text(f"{limit}\n")
-                    return True
+                    success = True
                 except (OSError, PermissionError) as exc:
                     logger.warning(f"Failed to write to {std_file}: {exc}")
 
-        return False
+        return success
 
     def get_battery_info(self) -> BatteryInfo:
         """Return comprehensive snapshot of battery status and health."""
@@ -260,10 +269,17 @@ class BatteryManager:
             charge_limit_supported=self.is_charge_limit_supported(),
         )
 
-        if (self._acpi_sysfs_dir / "charge_limit").exists():
-            info.backend = "gigamate_acpi"
-        elif (self._battery_path / "charge_control_end_threshold").exists():
-            info.backend = "sysfs"
+        if self.is_charge_limit_supported():
+            acpi_file = self._acpi_sysfs_dir / "charge_limit"
+            if acpi_file.exists() and os.access(str(acpi_file), os.W_OK):
+                try:
+                    val = int(acpi_file.read_text().strip())
+                    if 0 < val <= 100:
+                        info.backend = "gigamate_acpi"
+                except (OSError, ValueError):
+                    pass
+            if info.backend == "none" and self._battery_path:
+                info.backend = "sysfs"
 
         def _read_int(filename: str) -> Optional[int]:
             p = self._battery_path / filename
@@ -287,17 +303,31 @@ class BatteryManager:
         info.status = _read_str("status") or "Unknown"
         info.cycle_count = _read_int("cycle_count")
 
-        # Health calculation: charge_full vs charge_full_design or energy_full vs energy_full_design
-        charge_now = _read_int("charge_now") or _read_int("energy_now")
-        charge_full = _read_int("charge_full") or _read_int("energy_full")
-        charge_full_design = _read_int("charge_full_design") or _read_int("energy_full_design")
+        # Health calculation: strictly match units (µAh vs µAh, or µWh vs µWh)
+        c_now = _read_int("charge_now")
+        c_full = _read_int("charge_full")
+        c_design = _read_int("charge_full_design")
+        e_now = _read_int("energy_now")
+        e_full = _read_int("energy_full")
+        e_design = _read_int("energy_full_design")
 
-        info.charge_now = charge_now
-        info.charge_full = charge_full
-        info.charge_full_design = charge_full_design
+        health = None
+        if c_full and c_design and c_design > 0:
+            health = (c_full / c_design) * 100.0
+            info.charge_now = c_now
+            info.charge_full = c_full
+            info.charge_full_design = c_design
+        elif e_full and e_design and e_design > 0:
+            health = (e_full / e_design) * 100.0
+            info.charge_now = e_now
+            info.charge_full = e_full
+            info.charge_full_design = e_design
+        else:
+            info.charge_now = c_now or e_now
+            info.charge_full = c_full or e_full
+            info.charge_full_design = c_design or e_design
 
-        if charge_full and charge_full_design and charge_full_design > 0:
-            health = (charge_full / charge_full_design) * 100.0
+        if health is not None:
             info.health_percent = round(min(100.0, max(0.0, health)), 1)
 
         return info

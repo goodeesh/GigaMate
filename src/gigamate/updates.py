@@ -47,10 +47,10 @@ STATE_FILE = CONFIG_DIR / "update_state.json"
 
 _TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 # Tag validation requires a leading 'v' (maintainer-pushed release tags).
-_VALID_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
+_VALID_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:[-.]?(a|b|rc|alpha|beta)[-.]?(\d+)?)?$")
 # Version parsing for comparison allows an optional 'v'.
-_PRERELEASE_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
-_PRE_RANK = {"a": 0, "b": 1, "rc": 2, "": 3}
+_PRERELEASE_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?(a|b|rc|alpha|beta)[-.]?(\d+)?)?$")
+_PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "rc": 2, "": 3}
 
 
 def parse_version(text: str) -> Tuple[int, int, int]:
@@ -197,6 +197,21 @@ def fetch_latest_version(timeout: int = FETCH_TIMEOUT_SEC,
         tag = ((tags[0] or {}).get("name") or "").strip()
         if is_valid_tag(tag):
             return tag
+
+    # Fallback: pyproject.toml on main via raw.githubusercontent.com (not API rate limited)
+    try:
+        req = urllib.request.Request(RAW_VERSION_URL, headers={"User-Agent": "GigaMate-update-check"})
+        with urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8", "replace")
+            m = re.search(r'version\s*=\s*"([^"]+)"', content)
+            if m:
+                v = m.group(1).strip()
+                tag = f"v{v}" if not v.startswith("v") else v
+                if is_valid_tag(tag):
+                    return tag
+    except Exception:
+        pass
+
     return None
 
 
@@ -338,18 +353,25 @@ def _download_verify_run(url: str, extra_args: str,
         '  actual="$(sha256sum "$tmp" | cut -d " " -f1)"; '
         '  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then '
         '    echo "install.sh checksum verification FAILED" >&2; '
-        '    rm -f "$tmp" "$tmp.sha256"; exit 1; fi; '
-        '  echo "Verified install.sh checksum."; '
+        '    rm -f "$tmp" "$tmp.sha256"; ok=0; '
+        '  else '
+        '    echo "Verified install.sh checksum."; '
+        '  fi; '
         'else '
         '  echo "WARNING: no checksum available for install.sh; proceeding unverified." >&2; '
         'fi; '
     )
     return (
-        'tmp="$(mktemp)" || exit 1; '
-        f'if ! curl -fL --proto "=https" -o "$tmp" {q_url}; then '
-        '  echo "Failed to download install.sh" >&2; rm -f "$tmp"; exit 1; fi; '
+        'tmp="$(mktemp)"; '
+        'ok=1; '
+        f'if [ -z "$tmp" ] || ! curl -fL --proto "=https" -o "$tmp" {q_url}; then '
+        '  echo "Failed to download install.sh" >&2; rm -f "$tmp"; ok=0; fi; '
+        'if [ "$ok" = 1 ]; then '
         + verify +
-        f'bash "$tmp" {extra_args}; rc=$?; '
+        '  if [ "$ok" = 1 ]; then '
+        f'    bash "$tmp" {extra_args}; rc=$?; '
+        '  fi; '
+        'fi; '
         'rm -f "$tmp" "$tmp.sha256"'
     )
 

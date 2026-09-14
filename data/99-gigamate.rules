@@ -9,11 +9,17 @@
 # On systems without logind, grant access via a dedicated group instead.
 
 # Primary Gigabyte keyboard controller.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # Shared/generic USB vendors historically used by Gigabyte keyboards.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="*", MODE="0660", TAG+="uaccess"
+# Restrict Holtek (04D9) to prevent keystroke sniffing on arbitrary external mice/keyboards.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
+# Battery charge limit and ACPI platform attributes
+SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}!="", MODE="0664", TAG+="uaccess"
+SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", ATTR{charge_limit}!="", MODE="0664", TAG+="uaccess"
+SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", ATTR{profile}!="", MODE="0664", TAG+="uaccess"

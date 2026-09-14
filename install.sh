@@ -208,8 +208,8 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev"
-            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev
+            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel"
+            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel
             sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyqt6 2>/dev/null || \
                 warn "python-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
@@ -223,25 +223,31 @@ install_system_deps() {
             fi
             ;;
         debian|ubuntu|pop|mint)
-            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev"
+            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-gtk-3.0 dkms python3-evdev python3-pip build-essential"
             sudo apt update
-            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-appindicator3-0.1 gir1.2-gtk-3.0 dkms python3-evdev
+            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-gtk-3.0 dkms python3-evdev python3-pip build-essential
+            sudo apt install -y gir1.2-ayatanaappindicator3-0.1 2>/dev/null || \
+                sudo apt install -y gir1.2-appindicator3-0.1 2>/dev/null || true
             sudo apt install -y python3-pyqt6 2>/dev/null || \
                 warn "python3-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             info "Installing kernel headers..."
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev"
-            sudo dnf install -y python3-pyusb python3-gobject gtk3 libappindicator-gtk3 dkms python3-evdev
+            info "Installing: python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip"
+            sudo dnf install -y python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip
+            sudo dnf install -y libayatana-appindicator-gtk3 2>/dev/null || \
+                sudo dnf install -y libappindicator-gtk3 2>/dev/null || true
             sudo dnf install -y python3-pyqt6 2>/dev/null || \
                 warn "python3-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             info "Installing kernel headers..."
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
-        suse|opensuse|sles)
-            info "Installing: python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev"
-            sudo zypper install -y python3-pyusb python3-gobject gtk3 libappindicator3 dkms python3-evdev
+        suse|opensuse*|sles)
+            info "Installing: python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip"
+            sudo zypper install -y python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip
+            sudo zypper install -y typelib-1_0-AyatanaAppIndicator3-0_1 2>/dev/null || \
+                sudo zypper install -y libappindicator3 2>/dev/null || true
             sudo zypper install -y python3-PyQt6 2>/dev/null || \
                 warn "python3-PyQt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             info "Installing kernel headers..."
@@ -485,7 +491,7 @@ install_python_pkg() {
 
     # Verify the Center (PyQt6) imports; a broken Qt install should be loud.
     if ! python3 -c "import gigamate.ui" 2>/dev/null && \
-       ! "$(PIPX_HOME:-$HOME/.local/share/pipx)/venvs/gigamate/bin/python" -c "import gigamate.ui" 2>/dev/null; then
+       ! "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python" -c "import gigamate.ui" 2>/dev/null; then
         warn "GigaMate Center (PyQt6) failed to import."
         warn "Tray and CLI still work; run 'pip install PyQt6' (or install your"
         warn "distro's PyQt6 package) to enable the graphical Center."

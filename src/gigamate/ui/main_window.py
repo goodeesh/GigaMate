@@ -101,6 +101,8 @@ class SingleInstanceServer(QObject):
             return
         client.disconnected.connect(client.deleteLater)
         client.readyRead.connect(lambda: self._on_ready_read(client))
+        if client.bytesAvailable() > 0:
+            self._on_ready_read(client)
 
     def _on_ready_read(self, client: QLocalSocket) -> None:
         try:
@@ -114,7 +116,6 @@ class SingleInstanceServer(QObject):
                 self.activate_window()
         finally:
             client.disconnectFromServer()
-            client.deleteLater()
 
     def activate_window(self) -> None:
         """Unminimize, raise, and bring the existing window to the front."""
@@ -449,9 +450,6 @@ def run_gui() -> None:
         )
         sys.exit(1)
 
-    # Ensure system tray background daemon runs together with Center
-    ensure_tray_running()
-
     # Check exclusive instance lock
     try:
         lock_file = open(IPC_LOCK_PATH, "a+")
@@ -466,14 +464,24 @@ def run_gui() -> None:
 
     if not is_primary:
         # Another instance is already running! Connect via socket and tell it to activate.
-        try:
-            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
-                s.settimeout(1.5)
-                s.connect(IPC_SOCKET_PATH)
-                s.sendall(b"ACTIVATE\n")
-        except Exception as exc:
-            logger.debug(f"Could not signal existing instance: {exc}")
+        cmd_msg = b"SETUP\n" if os.environ.get("GIGAMATE_FORCE_SETUP") else b"ACTIVATE\n"
+        start_time = time.monotonic()
+        while (time.monotonic() - start_time) < 1.5:
+            try:
+                with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                    s.settimeout(1.0)
+                    s.connect(IPC_SOCKET_PATH)
+                    s.sendall(cmd_msg)
+                    break
+            except (FileNotFoundError, ConnectionRefusedError, BlockingIOError):
+                time.sleep(0.1)
+            except Exception as exc:
+                logger.debug(f"Could not signal existing instance: {exc}")
+                break
         sys.exit(0)
+
+    # Ensure system tray background daemon runs together with Center
+    ensure_tray_running()
 
     app = QApplication.instance()
     is_external_app = app is not None

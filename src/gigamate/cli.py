@@ -1029,6 +1029,8 @@ def _subcommand_main() -> None:
         
 Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     )
+    parser.add_argument("--center", "-c", action="store_true", help="Launch GigaMate Center GUI")
+    parser.add_argument("--tray", "-t", action="store_true", help="Launch GigaMate System Tray daemon")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     # --- rgb subcommand ---
@@ -1146,6 +1148,13 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
 
     # Parse
     args = parser.parse_args()
+
+    if getattr(args, "center", False):
+        cmd_center(args)
+        return
+    if getattr(args, "tray", False):
+        cmd_tray(args)
+        return
 
     # Dispatch
     if args.command == "rgb":

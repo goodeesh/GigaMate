@@ -213,3 +213,55 @@ def test_charge_limit_requires_write_access(tmp_path: Path, monkeypatch):
     assert mgr.is_charge_limit_supported() is True
     monkeypatch.setattr(battery_module.os, "access", lambda p, m: False)
     assert mgr.is_charge_limit_supported() is False
+
+
+def test_battery_health_unit_matching(tmp_path: Path):
+    """Health calculation must strictly match charge (µAh) or energy (µWh) units."""
+    psy = tmp_path / "power_supply"
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "present").write_text("1\n")
+    (bat / "charge_full").write_text("4000000\n")
+    (bat / "charge_full_design").write_text("5000000\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    info = mgr.get_battery_info()
+    assert info.health_percent == 80.0
+
+    # Switch to energy units
+    (bat / "charge_full").unlink()
+    (bat / "charge_full_design").unlink()
+    (bat / "energy_full").write_text("45000000\n")
+    (bat / "energy_full_design").write_text("50000000\n")
+
+    info2 = mgr.get_battery_info()
+    assert info2.health_percent == 90.0
+
+    # Mixed units should NOT be divided into each other
+    (bat / "energy_full_design").unlink()
+    (bat / "charge_full_design").write_text("5000000\n")
+    info3 = mgr.get_battery_info()
+    assert info3.health_percent is None
+
+
+def test_dual_battery_charge_limit(tmp_path: Path):
+    """Charge limits are applied to all present batteries in a dual-battery system."""
+    psy = tmp_path / "power_supply"
+    bat0 = psy / "BAT0"
+    bat0.mkdir(parents=True)
+    (bat0 / "type").write_text("Battery\n")
+    (bat0 / "present").write_text("1\n")
+    (bat0 / "charge_control_end_threshold").write_text("100\n")
+
+    bat1 = psy / "BAT1"
+    bat1.mkdir(parents=True)
+    (bat1 / "type").write_text("Battery\n")
+    (bat1 / "present").write_text("1\n")
+    (bat1 / "charge_control_end_threshold").write_text("100\n")
+
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+    assert mgr.set_charge_limit(80) is True
+    assert (bat0 / "charge_control_end_threshold").read_text().strip() == "80"
+    assert (bat1 / "charge_control_end_threshold").read_text().strip() == "80"
+

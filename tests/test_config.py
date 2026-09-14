@@ -198,3 +198,77 @@ def test_write_failure_does_not_raise(isolated_config, monkeypatch):
     monkeypatch.setattr(config_module, "_atomic_write_bytes", lambda *a, **k: False)
     cfg = config_module.update_config(lambda c: {**c, "colour": "red"})
     assert cfg["colour"] == "red"
+
+
+def test_clean_install_no_config_file(tmp_path, monkeypatch):
+    """On a clean install where no config file exists, load() succeeds without UnboundLocalError."""
+    fresh_dir = tmp_path / "fresh_user" / "gigamate"
+    monkeypatch.setattr(config_module, "CONFIG_DIR", fresh_dir)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", fresh_dir / "config.json")
+    monkeypatch.setattr(config_module, "_OLD_CONFIG_FILE", tmp_path / "nonexistent.json")
+    monkeypatch.setattr(config_module, "_OLD_CONFIG_DIR", tmp_path / "nonexistent_dir")
+    monkeypatch.setattr(config_module, "detect_device", lambda: None)
+
+    cfg = config_module.load()
+    assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
+    assert cfg["brightness"] == config_module.DEFAULT_CONFIG["brightness"]
+    assert cfg["profile_id"] == list(config_module.DEFAULT_CONFIG["profile_id"])
+    assert cfg["onboarding_complete"] is False
+
+
+def test_empty_dict_config(isolated_config):
+    """Loading a config file containing empty dict '{}' falls back gracefully."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text("{}")
+    cfg = config_module.load()
+    assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
+
+
+def test_profile_id_coercion_formats():
+    """Verify _coerce_profile_id handles hex strings, colon notation, and lists."""
+    assert config_module._coerce_profile_id(["0x0414", "0x8105"]) == [1044, 33029]
+    assert config_module._coerce_profile_id(["0414", "8105"]) == [1044, 33029]
+    assert config_module._coerce_profile_id("0414:8105") == [1044, 33029]
+    assert config_module._coerce_profile_id("0x0414:0x8105") == [1044, 33029]
+    assert config_module._coerce_profile_id([1044, 33029]) == [1044, 33029]
+    # Invalid fallback
+    assert config_module._coerce_profile_id("invalid") == list(config_module.DEFAULT_CONFIG["profile_id"])
+    assert config_module._coerce_profile_id([123]) == list(config_module.DEFAULT_CONFIG["profile_id"])
+
+
+def test_brightness_migration_variants():
+    """Verify _migrate_brightness handles textual, percentage, and float values."""
+    assert config_module._migrate_brightness("off") == 0
+    assert config_module._migrate_brightness("OFF") == 0
+    assert config_module._migrate_brightness("0") == 0
+    assert config_module._migrate_brightness("dim") == 1
+    assert config_module._migrate_brightness("1") == 1
+    assert config_module._migrate_brightness("full") == 2
+    assert config_module._migrate_brightness("2") == 2
+    assert config_module._migrate_brightness("50%") == 1
+    assert config_module._migrate_brightness("10%") == 0
+    assert config_module._migrate_brightness("100%") == 2
+    assert config_module._migrate_brightness(0.0) == 0
+    assert config_module._migrate_brightness(1.5) == 1
+    assert config_module._migrate_brightness(True) == 1
+    assert config_module._migrate_brightness(False) == 0
+
+
+def test_legacy_profile_directory_migration(tmp_path, monkeypatch):
+    """Custom profiles from legacy directory are migrated into new config directory."""
+    old_dir = tmp_path / "old_config"
+    old_profiles = old_dir / "profiles"
+    old_profiles.mkdir(parents=True)
+    (old_profiles / "my_custom.json").write_text('{"name": "custom"}')
+
+    new_dir = tmp_path / "new_config"
+    monkeypatch.setattr(config_module, "_OLD_CONFIG_DIR", old_dir)
+    monkeypatch.setattr(config_module, "_OLD_CONFIG_FILE", old_dir / "config.json")
+    monkeypatch.setattr(config_module, "CONFIG_DIR", new_dir)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", new_dir / "config.json")
+
+    config_module._migrate_old_config()
+    target = new_dir / "profiles" / "my_custom.json"
+    assert target.exists()
+    assert json.loads(target.read_text()) == {"name": "custom"}
+
