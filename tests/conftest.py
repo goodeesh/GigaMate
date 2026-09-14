@@ -16,6 +16,21 @@ from unittest.mock import MagicMock
 import pytest
 
 
+def _try_import(name):
+    """Import *name*, returning None when an optional dependency is missing.
+
+    The UI layer needs PyQt6 (plus Qt system libraries) and the tray needs
+    ``gi``. Neither is guaranteed on CI, so patch targets living in those
+    modules must be skipped instead of failing every test at fixture setup.
+    """
+    import importlib
+
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
 def _safe_apply_hardware_settings(*args, **kwargs):
     return {"profile": False, "battery": False, "keyboard": False}
 
@@ -32,10 +47,17 @@ def _no_real_hardware(monkeypatch, tmp_path):
     monkeypatch.setattr(config_mod, "CONFIG_FILE", cfg_file)
     monkeypatch.setattr(config_mod, "_OLD_CONFIG_FILE", tmp_path / "no-legacy.json", raising=False)
     config_mod.save(dict(config_mod.DEFAULT_CONFIG))
-    # Names bound at import time in UI modules must be redirected too.
-    monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
-    monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
-    monkeypatch.setattr("gigamate.tray.CONFIG_FILE", cfg_file, raising=False)
+    # Names bound at import time in UI modules must be redirected too, but the
+    # UI/tray modules are optional (PyQt6/gi may be missing, e.g. on CI).
+    main_window_mod = _try_import("gigamate.ui.main_window")
+    onboarding_mod = _try_import("gigamate.ui.onboarding")
+    tray_mod = _try_import("gigamate.tray")
+    if main_window_mod is not None:
+        monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
+    if onboarding_mod is not None:
+        monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
+    if tray_mod is not None:
+        monkeypatch.setattr("gigamate.tray.CONFIG_FILE", cfg_file, raising=False)
 
     # ── User profiles isolation ──
     monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", tmp_path / "profiles", raising=False)
@@ -47,26 +69,29 @@ def _no_real_hardware(monkeypatch, tmp_path):
     # ── IPC: never touch the live instance's socket/lock ──
     sock = str(tmp_path / "gigamate-center-test.sock")
     lock = str(tmp_path / "gigamate-center-test.lock")
-    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_PATH", sock, raising=False)
-    monkeypatch.setattr("gigamate.ui.main_window.IPC_LOCK_PATH", lock, raising=False)
-    monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_NAME", sock, raising=False)
+    if main_window_mod is not None:
+        monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_PATH", sock, raising=False)
+        monkeypatch.setattr("gigamate.ui.main_window.IPC_LOCK_PATH", lock, raising=False)
+        monkeypatch.setattr("gigamate.ui.main_window.IPC_SOCKET_NAME", sock, raising=False)
 
     # ── Sleep/idle: no real devices, bus, or X11 handles ──
     monkeypatch.setattr("gigamate.sleep_handler.get_keyboard", lambda *a, **k: None, raising=False)
     monkeypatch.setattr("gigamate.sleep_handler.set_off", lambda *a, **k: True, raising=False)
     for fn in ("mutter_idle_ms", "screensaver_idle_ms", "x11_idle_ms"):
         monkeypatch.setattr(f"gigamate.idle.{fn}", lambda *a, **k: None, raising=False)
-    monkeypatch.setattr("gigamate.tray.resolve_profile", lambda *a, **k: None, raising=False)
+    if tray_mod is not None:
+        monkeypatch.setattr("gigamate.tray.resolve_profile", lambda *a, **k: None, raising=False)
 
     # ── High-level hardware reapplication ──
     noop_apply = MagicMock(side_effect=_safe_apply_hardware_settings)
     monkeypatch.setattr("gigamate.hardware.apply_hardware_settings", noop_apply, raising=False)
     monkeypatch.setattr("gigamate.sleep_handler.apply_hardware_settings", noop_apply, raising=False)
-    monkeypatch.setattr(
-        "gigamate.ui.onboarding.apply_hardware_settings",
-        MagicMock(return_value={"profile": True, "battery": True, "keyboard": True}),
-        raising=False,
-    )
+    if onboarding_mod is not None:
+        monkeypatch.setattr(
+            "gigamate.ui.onboarding.apply_hardware_settings",
+            MagicMock(return_value={"profile": True, "battery": True, "keyboard": True}),
+            raising=False,
+        )
 
     # ── Battery singleton (BatteryManager direct tests are unaffected) ──
     from gigamate.battery import BatteryInfo

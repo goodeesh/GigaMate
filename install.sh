@@ -491,8 +491,10 @@ install_python_pkg() {
     fi
 
     # Verify the Center (PyQt6) imports; a broken Qt install should be loud.
-    if ! python3 -c "import gigamate.ui" 2>/dev/null && \
-       ! "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python" -c "import gigamate.ui" 2>/dev/null; then
+    # NOTE: ``import gigamate.ui`` alone no longer implies Qt (the GUI entry
+    # point is lazily imported), so resolve ``run_gui`` to exercise Qt.
+    if ! python3 -c "from gigamate.ui import run_gui" 2>/dev/null && \
+       ! "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python" -c "from gigamate.ui import run_gui" 2>/dev/null; then
         warn "GigaMate Center (PyQt6) failed to import."
         warn "Tray and CLI still work; run 'pip install PyQt6' (or install your"
         warn "distro's PyQt6 package) to enable the graphical Center."
