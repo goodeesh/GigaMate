@@ -212,7 +212,7 @@ class RgbPage(QWidget):
 
     def _sync_idle_combo(self) -> None:
         """Select the combo entry matching the stored timeout (nearest step)."""
-        if not self.cfg.get("idle_off_enabled", True):
+        if not self.cfg.get("idle_off_enabled", False):
             target = IDLE_STEP_OFF
         else:
             target = nearest_idle_step(self.cfg.get("idle_timeout_sec", 60))

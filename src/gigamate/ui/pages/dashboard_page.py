@@ -110,9 +110,9 @@ class DashboardPage(QWidget):
         layout.addWidget(prof_card)
 
         # ── Live Telemetry Cards ──
-        telemetry_card = QFrame()
-        telemetry_card.setProperty("class", "Card")
-        t_layout = QVBoxLayout(telemetry_card)
+        self.telemetry_card = QFrame()
+        self.telemetry_card.setProperty("class", "Card")
+        t_layout = QVBoxLayout(self.telemetry_card)
         t_layout.setSpacing(14)
         t_title = QLabel("Real-Time Hardware Telemetry")
         t_title.setProperty("class", "CardTitle")
@@ -123,7 +123,8 @@ class DashboardPage(QWidget):
         grid.setVerticalSpacing(14)
 
         # Row 0: Thermals & GPU (CPU Temp & Discrete GPU)
-        grid.addWidget(self._make_stat_tile("CPU Temperature", "stat_cpu_temp", "🌡️", "stat_cpu_sub"), 0, 0)
+        self.cpu_tile = self._make_stat_tile("CPU Temperature", "stat_cpu_temp", "🌡️", "stat_cpu_sub")
+        grid.addWidget(self.cpu_tile, 0, 0)
         grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 1, 1, 2)
 
         # Row 1: Cooling Fans & Total Duty
@@ -136,7 +137,7 @@ class DashboardPage(QWidget):
         grid.addWidget(self.duty_tile, 1, 2)
 
         t_layout.addLayout(grid)
-        layout.addWidget(telemetry_card)
+        layout.addWidget(self.telemetry_card)
 
         layout.addStretch()
         self._refresh_telemetry()
@@ -215,6 +216,9 @@ class DashboardPage(QWidget):
 
         if self.acpi_ctrl.available:
             self.acpi_warning_box.setVisible(False)
+            self.telemetry_card.setVisible(True)
+            self.cpu_tile.setVisible(True)
+            self.duty_tile.setVisible(True)
             for btn in self._profile_buttons.values():
                 btn.setEnabled(True)
 
@@ -279,6 +283,13 @@ class DashboardPage(QWidget):
                 if duty_sub:
                     duty_sub.setText("Hardware Auto Curve")
         else:
+            # ACPI unavailable: hide the ACPI-dependent tiles instead of
+            # rendering a wall of "--"/"Unavailable" metrics.
+            self.cpu_tile.setVisible(False)
+            self.fan1_tile.setVisible(False)
+            self.fan2_tile.setVisible(False)
+            self.duty_tile.setVisible(False)
+
             # ACPI unavailable — show warning box and disable buttons
             sys_caps = detect_system_capabilities()
             self.acpi_warning_box.setVisible(True)
@@ -325,6 +336,11 @@ class DashboardPage(QWidget):
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
                     gpu_sub.setText("High Performance")
+
+        # When ACPI telemetry is unavailable the card only carries the GPU
+        # tile; hide it entirely if there is no discrete GPU either.
+        if not self.acpi_ctrl.available:
+            self.telemetry_card.setVisible(gpu.present)
 
         # Update profile buttons state
         if current_prof_id is None:

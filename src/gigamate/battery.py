@@ -158,25 +158,27 @@ class BatteryManager:
         return False
 
     def is_charge_limit_supported(self) -> bool:
-        """Whether setting battery charge limit is supported on this hardware.
+        """Whether this process can actually set a battery charge limit.
 
         The kernel module always creates the ``charge_limit`` attribute, so we
-        must actually read it: ``-ENODATA`` (EC has no charge registers) or a
-        permission/parse failure means the limit is unsupported.
+        must read it (``-ENODATA`` means the EC is unsupported). For the
+        standard kernel attribute we also require write access — on most
+        non-Gigabyte laptops it is root-only, so we report unsupported rather
+        than offering a control that will fail on apply.
         """
         # 1. GigaMate ACPI sysfs module attribute
         acpi_file = self._acpi_sysfs_dir / "charge_limit"
         if acpi_file.exists():
             try:
                 val = int(acpi_file.read_text().strip())
-                return 0 < val <= 100
+                return 0 < val <= 100 and os.access(str(acpi_file), os.W_OK)
             except (OSError, ValueError):
                 return False
 
         # 2. Linux standard kernel charge_control_end_threshold
         if self._battery_path:
             std_file = self._battery_path / "charge_control_end_threshold"
-            if std_file.exists():
+            if std_file.exists() and os.access(str(std_file), os.W_OK):
                 try:
                     int(std_file.read_text().strip())
                     return True

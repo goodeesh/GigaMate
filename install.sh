@@ -400,16 +400,20 @@ build_kernel_module() {
         warn "Reboot, choose 'Enroll key from disk' in the MOK manager, and select mok.pub."
     fi
 
-    # Auto-load on boot
+    # Auto-load on boot only when the module actually bound to an AMW0 device;
+    # otherwise it would fail on every boot on unsupported hardware.
     local load_conf="/etc/modules-load.d/gigamate_acpi.conf"
-    if [ ! -f "$load_conf" ]; then
-        echo "gigamate_acpi" | sudo tee "$load_conf" > /dev/null
-        info "Module will auto-load on boot."
-    fi
-
-    if [ -d /sys/devices/platform/gigamate_acpi ] || \
-       find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
-        info "Kernel module installed successfully."
+    if [ -d /sys/devices/platform/gigamate_acpi ]; then
+        if [ ! -f "$load_conf" ]; then
+            echo "gigamate_acpi" | sudo tee "$load_conf" > /dev/null
+            info "Module will auto-load on boot."
+        fi
+        info "Kernel module installed and bound successfully."
+    elif find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
+        info "Kernel module installed."
+        warn "Module did not bind to an AMW0 device — this laptop may be unsupported."
+        warn "Skipping boot auto-load so modprobe does not fail on every boot."
+        [ -f "$load_conf" ] && sudo rm -f "$load_conf" 2>/dev/null || true
     else
         warn "Kernel module was NOT installed for the running kernel."
         warn "Fan/power features will be unavailable until a build succeeds."
@@ -444,10 +448,10 @@ install_python_pkg() {
             # trusting it; otherwise fall back to pip --user.
             local venv_py="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python"
             if [ -x "$venv_py" ] && "$venv_py" -c \
-                "import gi, usb; import gigamate.tray, gigamate.idle" 2>/dev/null; then
-                info "Installed via pipx (verified: gi + tray imports OK)"
+                "import gi, usb; import gigamate.tray, gigamate.idle, gigamate.ui" 2>/dev/null; then
+                info "Installed via pipx (verified: gi + tray + Center imports OK)"
             else
-                warn "pipx venv verification failed (gi/tray import) — falling back to pip --user"
+                warn "pipx venv verification failed (gi/tray/Center import) — falling back to pip --user"
                 pipx uninstall gigamate 2>/dev/null || true
                 pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
                 pip install --user "$script_dir"
@@ -463,6 +467,14 @@ install_python_pkg() {
         pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
         pip install --user "$script_dir"
         info "Installed via pip --user"
+    fi
+
+    # Verify the Center (PyQt6) imports; a broken Qt install should be loud.
+    if ! python3 -c "import gigamate.ui" 2>/dev/null && \
+       ! "$(PIPX_HOME:-$HOME/.local/share/pipx)/venvs/gigamate/bin/python" -c "import gigamate.ui" 2>/dev/null; then
+        warn "GigaMate Center (PyQt6) failed to import."
+        warn "Tray and CLI still work; run 'pip install PyQt6' (or install your"
+        warn "distro's PyQt6 package) to enable the graphical Center."
     fi
 }
 
@@ -499,6 +511,26 @@ configure_gpu_power() {
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     header "Configuring GPU power management"
+
+    # Only relevant on genuine Gigabyte laptops (DMI vendor).
+    local is_gigabyte=false
+    if [ -r /sys/class/dmi/id/sys_vendor ] && \
+       grep -qiE "gigabyte|aorus|giga-byte" /sys/class/dmi/id/sys_vendor; then
+        is_gigabyte=true
+    fi
+    if [ "$is_gigabyte" != true ]; then
+        info "Non-Gigabyte hardware; skipping GPU power configuration."
+        return
+    fi
+
+    # AMD SmartShift bias access is Gigabyte-only too.
+    local ss_src="$script_dir/data/99-gigamate-smartshift.rules"
+    local ss_dst="/etc/udev/rules.d/99-gigamate-smartshift.rules"
+    if [ -f "$ss_src" ]; then
+        sudo cp "$ss_src" "$ss_dst" 2>/dev/null || true
+        sudo udevadm control --reload-rules 2>/dev/null || true
+        info "Installed SmartShift udev rule: $ss_dst"
+    fi
 
     # Install polkit rule for nvidia-powerd if polkit rules dir exists
     local polkit_dir="/etc/polkit-1/rules.d"
@@ -552,6 +584,12 @@ install_service() {
     mkdir -p "$(dirname "$service_dst")"
     cp "$service_src" "$service_dst"
 
+    # Point the unit at the actual installed tray binary.
+    local tray_bin
+    tray_bin="$(command -v gigamate-tray 2>/dev/null || true)"
+    [ -n "$tray_bin" ] || tray_bin="$HOME/.local/bin/gigamate-tray"
+    sed -i "s|^ExecStart=.*|ExecStart=${tray_bin}|" "$service_dst" 2>/dev/null || true
+
     systemctl --user daemon-reload 2>/dev/null || true
     systemctl --user enable gigamate.service 2>/dev/null || true
     # restart (not enable --now): also restarts a stale already-running tray
@@ -576,6 +614,18 @@ install_desktop_entry() {
     cp "$desktop_src" "$apps_dir/gigamate.desktop"
     if [ -f "$script_dir/data/gigamate-center.desktop" ]; then
         cp "$script_dir/data/gigamate-center.desktop" "$apps_dir/gigamate-center.desktop"
+    fi
+
+    # Point launchers at the actual installed binaries (PATH may not include
+    # ~/.local/bin when the session launches a .desktop file).
+    local center_bin cli_bin
+    center_bin="$(command -v gigamate-center 2>/dev/null || true)"
+    cli_bin="$(command -v gigamate 2>/dev/null || true)"
+    if [ -n "$center_bin" ] && [ -f "$apps_dir/gigamate-center.desktop" ]; then
+        sed -i "s|^Exec=.*|Exec=${center_bin}|" "$apps_dir/gigamate-center.desktop" 2>/dev/null || true
+    fi
+    if [ -n "$cli_bin" ]; then
+        sed -i "s|^Exec=.*|Exec=${cli_bin} center|" "$apps_dir/gigamate.desktop" 2>/dev/null || true
     fi
     info "App menu entries: $apps_dir/gigamate.desktop & gigamate-center.desktop"
 
@@ -629,6 +679,15 @@ migrate_config() {
 
 main() {
     parse_args "$@"
+
+    if [ "$(id -u)" = "0" ]; then
+        if [ -n "${SUDO_USER:-}" ]; then
+            warn "Run this as your normal user, not via sudo (it elevates only the"
+            warn "steps that need root). Continuing, but user files may be root-owned."
+        else
+            warn "Running as root; GigaMate is a per-user install. Prefer your normal user."
+        fi
+    fi
 
     if [ "$DO_CHECK" = true ]; then
         do_check
@@ -698,9 +757,11 @@ main() {
         has_acpi_call=true
         echo "  ✅ Keyboard RGB     — gigamate rgb"
         echo "  ⚠️  Fan & Power      — using acpi_call backend"
+    elif find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
+        echo "  ⚠️  Fan & Power      — unavailable on this hardware (no AMW0 device)"
+        echo "      The kernel module built, but this is not a supported Gigabyte model."
     else
-        echo "  ✅ Keyboard RGB     — gigamate rgb"
-        echo "  ⚠️  Fan & Power      — not available (no ACPI kernel module)"
+        echo "  ⚠️  Fan & Power      — not available (kernel headers/module missing)"
         echo "      Install linux-headers and re-run install.sh to enable."
     fi
 

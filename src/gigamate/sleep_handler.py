@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .config import resolve_active_profile
+from .config import load as load_config, resolve_active_profile
 from .hardware import apply_hardware_settings
 from .protocol import get_keyboard, set_off
 
@@ -184,14 +184,20 @@ class SleepHandler:
         """Dispatch clean hardware transitions before sleep and after wake."""
         if going_to_sleep:
             logger.info("System entering sleep: turning off RGB and cleaning state...")
+            # Only touch the keyboard when the user opted into startup control;
+            # otherwise we would change a backlight we do not manage.
             try:
-                # 1. Turn off RGB
-                dev = get_keyboard()
-                if dev is not None:
-                    profile = resolve_active_profile()
-                    set_off(dev, profile)
-            except Exception as exc:
-                logger.warning(f"Could not turn off RGB on sleep: {exc}")
+                cfg = load_config()
+            except Exception:
+                cfg = {}
+            if cfg.get("startup_apply", False):
+                try:
+                    dev = get_keyboard()
+                    if dev is not None:
+                        profile = resolve_active_profile()
+                        set_off(dev, profile)
+                except Exception as exc:
+                    logger.warning(f"Could not turn off RGB on sleep: {exc}")
 
             try:
                 self._dispatch_hook(self._on_suspend_hook)
@@ -204,7 +210,9 @@ class SleepHandler:
             time.sleep(0.5)
 
             try:
-                apply_hardware_settings(force_keyboard=True)
+                # apply_hardware_settings honours the opt-in flags
+                # (startup_apply / charge_limit_enabled / sync_system_power).
+                apply_hardware_settings()
             except Exception as exc:
                 logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
 

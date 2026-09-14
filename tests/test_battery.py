@@ -196,3 +196,20 @@ def test_set_charge_limit_rejects_zero_and_out_of_range(tmp_path: Path):
     for bad in (0, 39, 101, None):
         with pytest.raises(ValueError):
             mgr.set_charge_limit(bad)
+
+
+def test_charge_limit_requires_write_access(tmp_path: Path, monkeypatch):
+    """Standard sysfs nodes that are root-only must report unsupported."""
+    import gigamate.battery as battery_module
+    psy = tmp_path / "power_supply"
+    bat = psy / "BAT0"
+    bat.mkdir(parents=True)
+    (bat / "type").write_text("Battery\n")
+    (bat / "present").write_text("1\n")
+    (bat / "charge_control_end_threshold").write_text("80\n")
+    mgr = BatteryManager(power_supply_dir=psy, acpi_sysfs_dir=tmp_path / "empty")
+
+    monkeypatch.setattr(battery_module.os, "access", lambda p, m: True)
+    assert mgr.is_charge_limit_supported() is True
+    monkeypatch.setattr(battery_module.os, "access", lambda p, m: False)
+    assert mgr.is_charge_limit_supported() is False

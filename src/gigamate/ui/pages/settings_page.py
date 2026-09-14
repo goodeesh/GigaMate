@@ -111,6 +111,11 @@ class SettingsPage(QWidget):
         self.btn_restart_service.clicked.connect(self._on_restart_service_clicked)
         svc_row.addWidget(self.btn_restart_service)
 
+        self.btn_setup = QPushButton("Run Setup Again")
+        self.btn_setup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_setup.clicked.connect(self._on_run_setup_clicked)
+        svc_row.addWidget(self.btn_setup)
+
         svc_layout.addLayout(svc_row)
         layout.addWidget(service_card)
 
@@ -228,6 +233,15 @@ class SettingsPage(QWidget):
         self.cfg = update_config(_mutate)
         if checked:
             sync_system_power(self.cfg.get("acpi_profile", 1))
+
+    def _on_run_setup_clicked(self) -> None:
+        """Re-open the first-run setup wizard."""
+        try:
+            from ..onboarding import OnboardingWizard
+            OnboardingWizard(self).exec()
+        except Exception:
+            pass
+        self.reload_from_config()
 
     def _on_restart_service_clicked(self) -> None:
         self.btn_restart_service.setEnabled(False)

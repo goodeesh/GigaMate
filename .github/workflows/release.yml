@@ -31,5 +31,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
+          extra=()
+          case "$TAG" in
+            *a[0-9]*|*b[0-9]*|*rc[0-9]*) extra+=(--prerelease) ;;
+          esac
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --generate-notes "${extra[@]}"
           gh release upload "$TAG" install.sh.sha256 gigamate.tar.gz.sha256 --clobber

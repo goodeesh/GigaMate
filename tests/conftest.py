@@ -157,4 +157,11 @@ def _no_real_hardware(monkeypatch, tmp_path):
     except Exception:
         pass
 
+    # ── Onboarding wizard: never write to real hardware ──
+    monkeypatch.setattr(
+        "gigamate.ui.onboarding.apply_hardware_settings",
+        MagicMock(return_value={"profile": True, "battery": True, "keyboard": True}),
+        raising=False,
+    )
+
     yield

@@ -27,10 +27,6 @@ from .profiles import (
 # on non-Gigabyte machines (e.g. a Dell G5 or Acer Aspire A515).
 _GIGABYTE_PRODUCT_TOKENS = ("GIGABYTE", "AORUS", "AERO")
 _GIGABYTE_VENDOR_TOKENS = ("GIGABYTE", "GIGA-BYTE", "AORUS")
-# Only 0x0414 (Giga-Byte Technology) uniquely identifies Gigabyte hardware.
-# 0x04D9 (Holtek) and 0x1044 (Chu Yuen) are shared/generic USB vendors and
-# must not, on their own, mark a machine as a Gigabyte laptop.
-_GIGABYTE_KEYBOARD_VENDOR_ID = 0x0414
 
 # Capability probing touches USB HID, ACPI and power-supply sysfs, so cache the
 # result to avoid re-scanning on every UI refresh tick.
@@ -128,11 +124,9 @@ def _probe_system_capabilities() -> HardwareCapabilities:
     if acpi_backend == "module":
         is_gigabyte = True
 
-    # If the keyboard has the primary Gigabyte VID, it's a Gigabyte laptop.
-    # Shared VIDs (Holtek 0x04D9 / Chu Yuen 0x1044) are not sufficient proof.
+    # A Gigabyte keyboard VID alone does not make the *laptop* Gigabyte (an
+    # external keyboard on a desktop must not trigger thermal-control advice).
     detected_kbd = detect_device()
-    if detected_kbd and detected_kbd[0] == _GIGABYTE_KEYBOARD_VENDOR_ID:
-        is_gigabyte = True
 
     acpi_missing = is_gigabyte and not acpi_avail
 

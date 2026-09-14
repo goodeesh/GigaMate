@@ -173,6 +173,7 @@ def test_rgb_page_reload_from_config(qapp):
     cfg = load_config()
     cfg["colour"] = "light_blue"
     cfg["brightness"] = 1
+    cfg["idle_off_enabled"] = True
     cfg["idle_timeout_sec"] = 300
     save_config(cfg)
 
@@ -674,3 +675,94 @@ def test_sync_all_from_config_invalidates_capabilities(qapp):
 
 
 
+
+
+def _onboarding_caps():
+    from gigamate.capabilities import HardwareCapabilities
+    return HardwareCapabilities(
+        product_name="GIGABYTE AERO",
+        is_gigabyte_laptop=True,
+        acpi_available=False,
+        acpi_backend="none",
+        acpi_driver_loaded=False,
+        acpi_driver_missing=True,
+        has_power_profiles=False,
+        has_temperature=False,
+        has_fan_rpm=False,
+        fan_count=2,
+        battery_present=True,
+        charge_limit_supported=True,
+        battery_name="BAT0",
+        keyboard_detected=True,
+        keyboard_profile_loaded=True,
+        keyboard_profile_name="X",
+        keyboard_vid_pid=(0x0414, 0x8105),
+        has_dgpu=True,
+        gpu_name="NVIDIA GPU",
+    )
+
+
+def test_onboarding_new_user_writes_optin(qapp):
+    from gigamate.ui.onboarding import OnboardingWizard
+    from gigamate.config import load as load_config
+
+    with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=_onboarding_caps()), \
+         patch("gigamate.ui.onboarding.has_user_config", return_value=False):
+        wiz = OnboardingWizard()
+        assert wiz.mode == "new"
+        wiz.p_battery.enable_chk.setChecked(True)
+        wiz.p_battery.limit_slider.setValue(70)
+        wiz.p_idle.enable_chk.setChecked(True)
+        wiz.p_rgb.apply_chk.setChecked(True)
+        wiz._apply_choices(complete=True)
+
+    cfg = load_config()
+    assert cfg["onboarding_complete"] is True
+    assert cfg["charge_limit_enabled"] is True
+    assert cfg["charge_limit"] == 70
+    assert cfg["idle_off_enabled"] is True
+    assert cfg["startup_apply"] is True
+
+
+def test_onboarding_upgrade_mode_marks_complete(qapp):
+    from gigamate.ui.onboarding import OnboardingWizard
+    from gigamate.config import load as load_config
+
+    with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=_onboarding_caps()), \
+         patch("gigamate.ui.onboarding.has_user_config", return_value=True):
+        wiz = OnboardingWizard()
+        assert wiz.mode == "upgrade"
+        # Skip must still record completion (never nags again).
+        wiz.reject()
+
+    assert load_config()["onboarding_complete"] is True
+
+
+def test_onboarding_disable_battery_resets_cap(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.ui.onboarding import OnboardingWizard
+    from gigamate.config import update_config
+
+    # Pre-existing cap enabled at 70%.
+    update_config(lambda c: {**c, "charge_limit_enabled": True, "charge_limit": 70})
+
+    mock_mgr = MagicMock()
+    mock_mgr.set_charge_limit.return_value = True
+    with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=_onboarding_caps()), \
+         patch("gigamate.ui.onboarding.has_user_config", return_value=True), \
+         patch("gigamate.battery.get_battery_manager", return_value=mock_mgr):
+        wiz = OnboardingWizard()
+        wiz.p_battery.initializePage()
+        wiz.p_battery.enable_chk.setChecked(False)
+        wiz.accept()
+
+    mock_mgr.set_charge_limit.assert_any_call(100)
+
+
+def test_run_gui_refuses_root(qapp):
+    from unittest.mock import patch
+    from gigamate.ui import main_window
+
+    with patch.object(main_window.os, "geteuid", return_value=0):
+        with pytest.raises(SystemExit):
+            main_window.run_gui()

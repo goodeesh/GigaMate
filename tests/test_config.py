@@ -43,8 +43,13 @@ def test_save_ignores_invalid_acpi_profile(isolated_config):
 
 def test_idle_defaults(isolated_config):
     loaded = config_module.load()
-    assert loaded["idle_off_enabled"] is True
+    # Hardware-mutating behaviours are opt-in by default.
+    assert loaded["idle_off_enabled"] is False
     assert loaded["idle_timeout_sec"] == 60
+    assert loaded["charge_limit_enabled"] is False
+    assert loaded["startup_apply"] is False
+    assert loaded["sync_system_power"] is False
+    assert loaded["onboarding_complete"] is False
 
 
 def test_idle_roundtrip(isolated_config):

@@ -29,14 +29,17 @@ def _migrate_old_config():
 DEFAULT_CONFIG = {
     "colour": "light_purple",
     "brightness": 2,
-    "startup_apply": True,
+    # Hardware-mutating behaviours are opt-in; onboarding enables them.
+    "startup_apply": False,
     "profile_id": [0x0414, 0x8105],
-    "idle_off_enabled": True,
+    "idle_off_enabled": False,
     "idle_timeout_sec": 60,
     "charge_limit": 80,
-    "charge_limit_enabled": True,
-    "sync_system_power": True,
+    "charge_limit_enabled": False,
+    "sync_system_power": False,
     "last_brightness": 2,
+    # Set once the first-run setup has been shown (so it never nags again).
+    "onboarding_complete": False,
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -269,15 +272,16 @@ def _write_config(config):
     safe = {
         "colour": config.get("colour", DEFAULT_CONFIG["colour"]),
         "brightness": _migrate_brightness(config.get("brightness", DEFAULT_CONFIG["brightness"])),
-        "startup_apply": bool(config.get("startup_apply", True)),
+        "startup_apply": bool(config.get("startup_apply", DEFAULT_CONFIG["startup_apply"])),
         "profile_id": _coerce_profile_id(config.get("profile_id", DEFAULT_CONFIG["profile_id"])),
-        "idle_off_enabled": bool(config.get("idle_off_enabled", True)),
+        "idle_off_enabled": bool(config.get("idle_off_enabled", DEFAULT_CONFIG["idle_off_enabled"])),
         "idle_timeout_sec": _migrate_idle_timeout(
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
         "charge_limit": _coerce_charge_limit(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
         "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
+        "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:

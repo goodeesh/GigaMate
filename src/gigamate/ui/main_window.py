@@ -29,7 +29,7 @@ from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import DARK_THEME
 from ..capabilities import detect_system_capabilities, invalidate_capabilities
-from ..config import CONFIG_FILE
+from ..config import CONFIG_FILE, load as load_config
 from ..paths import ICON_PATHS, get_runtime_ipc_paths
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,9 @@ class SingleInstanceServer(QObject):
             msg = bytes(client.readAll()).decode("utf-8", errors="ignore").strip()
             if "QUIT" in msg:
                 QApplication.quit()
+            elif "SETUP" in msg:
+                self.activate_window()
+                self.window.show_onboarding()
             elif "ACTIVATE" in msg:
                 self.activate_window()
         finally:
@@ -145,6 +148,34 @@ class MainWindow(QMainWindow):
         self.config_timer = QTimer(self)
         self.config_timer.timeout.connect(self._check_config_mtime)
         self.config_timer.start(1000)
+
+        # First-run setup, deferred until the window/event loop is up.
+        QTimer.singleShot(0, self._maybe_show_onboarding)
+
+    def _maybe_show_onboarding(self) -> None:
+        """Show the first-run wizard once (new installs and 2.0.x upgrades)."""
+        # Never block headless/test runs.
+        if os.environ.get("QT_QPA_PLATFORM", "").startswith("offscreen"):
+            return
+        if os.environ.get("GIGAMATE_SKIP_ONBOARDING"):
+            return
+        force = bool(os.environ.get("GIGAMATE_FORCE_SETUP"))
+        if not force:
+            try:
+                if load_config().get("onboarding_complete"):
+                    return
+            except Exception:
+                return
+        self.show_onboarding()
+
+    def show_onboarding(self) -> None:
+        """Open the setup wizard (first run, or invoked from tray/Settings)."""
+        try:
+            from .onboarding import OnboardingWizard
+            OnboardingWizard(self).exec()
+            self.sync_all_from_config(invalidate=True)
+        except Exception as exc:
+            logger.warning(f"Onboarding failed to run: {exc}")
 
     def _init_ui(self) -> None:
         central_widget = QWidget()
@@ -398,6 +429,15 @@ def ensure_tray_running() -> None:
 
 def run_gui() -> None:
     """Entry point for GigaMate Center GUI."""
+    if os.geteuid() == 0:
+        print(
+            "GigaMate Center must be run as your desktop user, not root.\n"
+            "Running it with sudo would create root-owned settings and cannot "
+            "reach your user session. Re-run as your normal user.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Ensure system tray background daemon runs together with Center
     ensure_tray_running()
 

@@ -312,10 +312,12 @@ def test_shared_usb_vendor_does_not_imply_gigabyte(monkeypatch):
     assert caps.is_gigabyte_laptop is False
 
 
-def test_primary_gigabyte_vid_implies_gigabyte(monkeypatch):
+def test_gigabyte_keyboard_on_desktop_is_not_a_gigabyte_laptop(monkeypatch):
+    """A Gigabyte keyboard VID alone must not mark the machine as a Gigabyte laptop."""
     caps = _probe_with(monkeypatch, "Custom Desktop", "Some Vendor",
                        (0x0414, 0x8105))
-    assert caps.is_gigabyte_laptop is True
+    assert caps.keyboard_detected is True
+    assert caps.is_gigabyte_laptop is False
 
 
 def test_giga_byte_vendor_string_is_recognized(monkeypatch):

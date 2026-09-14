@@ -144,6 +144,33 @@ for per-distro manual steps.
 
 Settings migrate automatically from `~/.config/gigabyte-keyboard-rgb/` on first run.
 
+### Upgrading from 2.0.x
+
+Your existing keyboard/startup/idle settings are kept. GigaMate 3.0 adds GigaMate
+Center, battery care and suspend/resume handling; the new features are **opt-in**
+and configured on first launch of the Center (you can re-run setup any time from
+Settings → *Run Setup Again*). The first update hop is performed by the old 2.0.x
+updater (`curl … install.sh | bash`), which is not checksum-verified; subsequent
+updates use the pinned, checksum-verified updater. GigaMate Center requires
+PyQt6 (installed automatically; on older distros it may come from pip).
+
+---
+
+## First-run setup
+
+On first launch, GigaMate Center runs a short setup wizard. Nothing on your
+hardware is changed until you choose it:
+
+- Keyboard colour/brightness and whether to apply it at startup
+- Idle backlight auto-off
+- Battery charge limit (only where supported)
+- System power-profile sync (only on supported Gigabyte laptops)
+
+Unsupported hardware (non-Gigabyte, no kernel module, no compatible keyboard,
+or no battery limit) is clearly reported and the corresponding options are
+skipped. Existing 2.0.x users get an "upgrade" variant that preserves their
+settings and only offers the new features.
+
 ---
 
 ## How It Works

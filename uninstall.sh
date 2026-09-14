@@ -85,6 +85,12 @@ if [ -f /etc/udev/rules.d/99-gigamate.rules ]; then
     info "udev rule removed."
 fi
 
+if [ -f /etc/udev/rules.d/99-gigamate-smartshift.rules ]; then
+    sudo rm -f /etc/udev/rules.d/99-gigamate-smartshift.rules
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    info "Removed SmartShift udev rule."
+fi
+
 # Also clean up old udev rule
 if [ -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules ]; then
     sudo rm -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules

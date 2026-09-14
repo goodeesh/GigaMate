@@ -1,0 +1,5 @@
+# GigaMate — AMD SmartShift bias access (Gigabyte laptops only).
+#
+# Installed only on genuine Gigabyte laptops. Grants the active session user
+# write access to the dGPU's smartshift_bias without exposing it to every user.
+SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", ATTR{smartshift_bias}!="", MODE="0660", TAG+="uaccess"

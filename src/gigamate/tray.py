@@ -18,8 +18,13 @@ from typing import Optional, Dict, List
 import gi
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("AppIndicator3", "0.1")
-from gi.repository import Gtk, GLib, Gio, AppIndicator3
+from gi.repository import Gtk, GLib, Gio
+
+try:
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3
+except Exception:  # missing typelib — degrade to no tray indicator
+    AppIndicator3 = None
 
 from pathlib import Path
 
@@ -50,10 +55,13 @@ from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
 import subprocess
 import shutil
+import logging
 from .battery import get_battery_manager
 from .sleep_handler import get_sleep_handler
 from .hardware import apply_hardware_settings
 from . import updates as update_checker
+
+logger = logging.getLogger(__name__)
 
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
@@ -110,7 +118,7 @@ class GigaMateTrayApp:
         self._hotkey_listener: Optional[HotkeyListener] = None
 
         # Keyboard idle auto-off state
-        self._idle_enabled = bool(self._config.get("idle_off_enabled", True))
+        self._idle_enabled = bool(self._config.get("idle_off_enabled", False))
         self._idle_timeout = clamp_timeout(
             self._config.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC))
         self._idle_dimmed = False
@@ -227,7 +235,7 @@ class GigaMateTrayApp:
         new_colour = new_cfg.get("colour")
         new_bright = new_cfg.get("brightness")
         new_profile = new_cfg.get("acpi_profile")
-        new_idle_off = new_cfg.get("idle_off_enabled", True)
+        new_idle_off = new_cfg.get("idle_off_enabled", False)
         new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
         new_startup = new_cfg.get("startup_apply", True)
         new_sync_power = new_cfg.get("sync_system_power", True)
@@ -465,6 +473,12 @@ class GigaMateTrayApp:
         if self._menu is not None:
             self._menu.show_all()
 
+        if AppIndicator3 is None:
+            # No AppIndicator typelib: the daemon still runs (hotkeys, sleep,
+            # config monitoring) but cannot show a tray icon.
+            logger.warning("AppIndicator3 not available; running without a tray icon.")
+            return
+
         if self._indicator is None:
             icon_dir = str(Path(APP_ICON_PATH).parent)
             self._indicator = AppIndicator3.Indicator.new_with_path(
@@ -523,6 +537,26 @@ class GigaMateTrayApp:
         except Exception:
             pass
 
+    def _on_run_setup(self, *_widget) -> None:
+        """Open GigaMate Center's setup wizard (works even if already onboarded)."""
+        sock_path = get_runtime_ipc_paths()[0]
+        try:
+            import socket as py_socket
+            if os.path.exists(sock_path):
+                with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                    s.settimeout(0.8)
+                    s.connect(sock_path)
+                    s.sendall(b"SETUP\n")
+                    return
+        except Exception:
+            pass
+        try:
+            env = dict(os.environ)
+            env["GIGAMATE_FORCE_SETUP"] = "1"
+            subprocess.Popen(["gigamate", "center"], env=env, start_new_session=True)
+        except Exception:
+            pass
+
     def _append_battery_section(self) -> None:
         """Add battery info and charge limit toggle."""
         mgr = get_battery_manager()
@@ -537,7 +571,7 @@ class GigaMateTrayApp:
         self._menu.append(bat_header)
 
         if mgr.is_charge_limit_supported():
-            limit_enabled = self._config.get("charge_limit_enabled", True)
+            limit_enabled = self._config.get("charge_limit_enabled", False)
             try:
                 limit = int(self._config.get("charge_limit", 80))
             except (TypeError, ValueError):
@@ -771,6 +805,10 @@ class GigaMateTrayApp:
         reload_item = Gtk.MenuItem(label="Reload profiles")
         reload_item.connect("activate", self._on_reload)
         self._menu.append(reload_item)
+
+        setup_item = Gtk.MenuItem(label="Set up GigaMate…")
+        setup_item.connect("activate", self._on_run_setup)
+        self._menu.append(setup_item)
 
         # Offer calibration whenever a keyboard controller was detected but may
         # not yet be mapped (or to re-calibrate an existing model).

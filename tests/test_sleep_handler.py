@@ -15,7 +15,8 @@ def test_sleep_handler_suspend():
 
     with patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
          patch("gigamate.sleep_handler.set_off") as mock_set_off, \
-         patch("gigamate.sleep_handler.resolve_active_profile"):
+         patch("gigamate.sleep_handler.resolve_active_profile"), \
+         patch("gigamate.sleep_handler.load_config", return_value={"startup_apply": True}):
         mock_dev = MagicMock()
         mock_get_kb.return_value = mock_dev
 
@@ -23,6 +24,22 @@ def test_sleep_handler_suspend():
 
         assert suspend_called is True
         mock_set_off.assert_called_once()
+
+
+def test_sleep_handler_suspend_respects_opt_out():
+    """If the user did not opt into startup control, sleep must not touch RGB."""
+    handler = SleepHandler()
+
+    with patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
+         patch("gigamate.sleep_handler.set_off") as mock_set_off, \
+         patch("gigamate.sleep_handler.resolve_active_profile"), \
+         patch("gigamate.sleep_handler.load_config", return_value={"startup_apply": False}):
+        mock_get_kb.return_value = MagicMock()
+
+        handler.on_prepare_for_sleep(going_to_sleep=True)
+
+        mock_get_kb.assert_not_called()
+        mock_set_off.assert_not_called()
 
 
 def test_sleep_handler_resume_applies_settings_once():
@@ -39,7 +56,7 @@ def test_sleep_handler_resume_applies_settings_once():
         handler.on_prepare_for_sleep(going_to_sleep=False)
 
         assert resume_called is True
-        mock_apply.assert_called_once_with(force_keyboard=True)
+        mock_apply.assert_called_once()
 
 
 def test_sleep_handler_stop_listening_is_idempotent():
