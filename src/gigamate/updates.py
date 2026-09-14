@@ -34,7 +34,7 @@ RELEASE_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 # Fallback when no GitHub Release exists yet (only tags pushed).
 TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=1"
 RAW_VERSION_URL = (
-    f"https://raw.githubusercontent.com/{REPO}/main/pyproject.toml"
+    f"https://raw.githubusercontent.com/{REPO}/main/src/gigamate/__init__.py"
 )
 # Last-resort bootstrap ref used only when no valid release tag is known.
 INSTALL_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.sh"
@@ -198,12 +198,12 @@ def fetch_latest_version(timeout: int = FETCH_TIMEOUT_SEC,
         if is_valid_tag(tag):
             return tag
 
-    # Fallback: pyproject.toml on main via raw.githubusercontent.com (not API rate limited)
+    # Fallback: __init__.py on main via raw.githubusercontent.com (not API rate limited)
     try:
         req = urllib.request.Request(RAW_VERSION_URL, headers={"User-Agent": "GigaMate-update-check"})
         with urlopen(req, timeout=timeout) as resp:
             content = resp.read().decode("utf-8", "replace")
-            m = re.search(r'version\s*=\s*"([^"]+)"', content)
+            m = re.search(r'(?:__version__|version)\s*=\s*["\']([^"\']+)["\']', content)
             if m:
                 v = m.group(1).strip()
                 tag = f"v{v}" if not v.startswith("v") else v
@@ -364,6 +364,7 @@ def _download_verify_run(url: str, extra_args: str,
     return (
         'tmp="$(mktemp)"; '
         'ok=1; '
+        'rc=1; '
         f'if [ -z "$tmp" ] || ! curl -fL --proto "=https" -o "$tmp" {q_url}; then '
         '  echo "Failed to download install.sh" >&2; rm -f "$tmp"; ok=0; fi; '
         'if [ "$ok" = 1 ]; then '

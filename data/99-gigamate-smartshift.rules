@@ -2,4 +2,4 @@
 #
 # Installed only on genuine Gigabyte laptops. Grants write access to the
 # dGPU's smartshift_bias sysfs attribute.
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", TEST=="smartshift_bias", RUN+="/bin/chmod 0664 $sys$devpath/smartshift_bias"
+SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", TEST=="smartshift_bias", RUN+="/bin/chmod 0666 $sys$devpath/smartshift_bias"

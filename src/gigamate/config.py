@@ -101,7 +101,7 @@ _LEGACY_COLOUR_MAP = {
 
 
 def _migrate_colour(col):
-    if not col:
+    if not col or not isinstance(col, str):
         return DEFAULT_CONFIG["colour"]
     col = col.lower().replace(" ", "_")
     if col in _LEGACY_COLOUR_MAP:
@@ -245,7 +245,7 @@ def save(config):
     lock_file = _open_config_lock()
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
-        _write_config(config)
+        return _write_config(config)
     finally:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -310,7 +310,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> bool:
 
 def _write_config(config):
     safe = {
-        "colour": config.get("colour", DEFAULT_CONFIG["colour"]),
+        "colour": _migrate_colour(config.get("colour", DEFAULT_CONFIG["colour"])),
         "brightness": _migrate_brightness(config.get("brightness", DEFAULT_CONFIG["brightness"])),
         "startup_apply": bool(config.get("startup_apply", DEFAULT_CONFIG["startup_apply"])),
         "profile_id": _coerce_profile_id(config.get("profile_id", DEFAULT_CONFIG["profile_id"])),

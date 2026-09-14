@@ -247,7 +247,7 @@ static ssize_t profile_store(struct device *dev,
 }
 /* Make profile user-writable via uaccess / plugdev */
 static struct device_attribute dev_attr_profile_writable = {
-	.attr = { .name = "profile", .mode = 0664 },
+	.attr = { .name = "profile", .mode = 0666 },
 	.show = profile_show,
 	.store = profile_store,
 };
@@ -349,7 +349,7 @@ static ssize_t charge_limit_store(struct device *dev,
 
 /* Make charge_limit user-writable via uaccess / plugdev */
 static struct device_attribute dev_attr_charge_limit_writable = {
-	.attr = { .name = "charge_limit", .mode = 0664 },
+	.attr = { .name = "charge_limit", .mode = 0666 },
 	.show = charge_limit_show,
 	.store = charge_limit_store,
 };

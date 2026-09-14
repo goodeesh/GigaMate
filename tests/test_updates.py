@@ -196,11 +196,27 @@ class TestBuildCommand:
         cmd = build_update_command()
         assert "--update" in cmd[-1] and "--yes" in cmd[-1]
         assert "install.sh" in cmd[-1]
+        assert "rc=1" in cmd[-1]
 
     def test_update_command_logs_to_file(self, tmp_path):
         log = tmp_path / "update.log"
         cmd = updates.build_update_command(log_file=log)
         assert str(log) in cmd[-1] and "2>&1" in cmd[-1]
+
+    def test_fetch_latest_version_raw_fallback(self):
+        import urllib.error
+        def fake_urlopen(req, timeout=5):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "raw.githubusercontent.com" in url:
+                class Resp:
+                    def __enter__(self): return self
+                    def __exit__(self, *a): pass
+                    def read(self): return b'__version__ = "3.1.0"\n'
+                return Resp()
+            raise urllib.error.HTTPError(url, 403, "rate limited", {}, None)
+
+        ver = updates.fetch_latest_version(urlopen=fake_urlopen)
+        assert ver == "v3.1.0"
 
 
 class TestAdminStatus:

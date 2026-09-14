@@ -20,6 +20,5 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 
 # Battery charge limit and ACPI platform attributes
-SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}!="", MODE="0664", TAG+="uaccess"
-SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", ATTR{charge_limit}!="", MODE="0664", TAG+="uaccess"
-SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", ATTR{profile}!="", MODE="0664", TAG+="uaccess"
+SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}!="", RUN+="/bin/chmod 0666 $sys$devpath/charge_control_end_threshold"
+SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", RUN+="/bin/chmod 0666 /sys/devices/platform/gigamate_acpi/profile /sys/devices/platform/gigamate_acpi/charge_limit"

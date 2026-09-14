@@ -272,3 +272,13 @@ def test_legacy_profile_directory_migration(tmp_path, monkeypatch):
     assert target.exists()
     assert json.loads(target.read_text()) == {"name": "custom"}
 
+
+def test_non_string_colour_gracefully_handled(isolated_config):
+    """Non-string colour types in config file do not crash load()."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    for bad_colour in (123, True, False, ["red"], {"col": "red"}, None):
+        isolated_config.write_text(json.dumps({"colour": bad_colour}))
+        cfg = config_module.load()
+        assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
+
+
