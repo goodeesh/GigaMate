@@ -194,12 +194,15 @@ class TestAcpiController:
         ctrl = AcpiController(backend="mock")
         assert ctrl.available is True
 
-    def test_read_state_no_backend(self, monkeypatch):
+    def test_read_state_no_backend(self, monkeypatch, tmp_path):
         monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
-        # Make ModuleBackend and AcpiCallBackend both fail by pointing to nonexistent paths
-        # This is tricky to test without mocking — just ensure no crash
-        # We'll test with an invalid backend name instead
-        pass
+        monkeypatch.setattr(acpi_module, "GIGAMATE_ACPI_SYSFS", tmp_path / "no-sysfs")
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", tmp_path / "no-proc")
+        ctrl = AcpiController()
+        assert ctrl.available is False
+        assert ctrl.read_state() is None
+        assert ctrl.set_profile(FanProfile.BALANCED) is False
+        assert ctrl.get_profile() is None
 
     def test_invalid_backend_name(self):
         with pytest.raises(ValueError):
@@ -232,13 +235,26 @@ class TestAcpiCallBackendDetection:
         caps = AcpiCallBackend().detect()
         assert caps.backend == "none"
 
+    def test_present_writable_proc_file_without_probe_answers(self, monkeypatch, tmp_path):
+        proc = tmp_path / "call"
+        proc.write_text("0x0\n")
+        monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", proc)
+        monkeypatch.setattr(os, "access", lambda path, mode: True)
+        # No WMBC query returns a value -> not a usable backend.
+        monkeypatch.setattr(AcpiCallBackend, "_wmbc_read", lambda self, cmd: None)
+        caps = AcpiCallBackend().detect()
+        assert caps.backend == "none"
+
     def test_present_writable_proc_file_reports_acpi_call(self, monkeypatch, tmp_path):
         proc = tmp_path / "call"
         proc.write_text("0x0\n")
         monkeypatch.setattr(acpi_module, "PROC_ACPI_CALL", proc)
         monkeypatch.setattr(os, "access", lambda path, mode: True)
+        # The interface answers a WMBC query -> usable acpi_call backend.
+        monkeypatch.setattr(AcpiCallBackend, "_wmbc_read", lambda self, cmd: 42)
         caps = AcpiCallBackend().detect()
         assert caps.backend == "acpi_call"
+        assert caps.has_power_profiles is True
 
     def test_no_backend_auto_detect_returns_unavailable(self, monkeypatch, tmp_path):
         monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)

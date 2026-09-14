@@ -228,6 +228,17 @@ def get_dmi_vendor() -> Optional[str]:
     return None
 
 
+def get_dmi_chassis_type() -> Optional[int]:
+    """Read the SMBIOS chassis type from sysfs, or None on failure."""
+    chassis_file = Path("/sys/class/dmi/id/chassis_type")
+    try:
+        if chassis_file.is_file():
+            return int(chassis_file.read_text().strip())
+    except (OSError, ValueError, PermissionError):
+        pass
+    return None
+
+
 
 def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[DeviceProfile]:
     if vid is None or pid is None:

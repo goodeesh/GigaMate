@@ -48,19 +48,32 @@ parse_args() {
 latest_github_tag() {
     local tag=""
     if command -v curl &>/dev/null; then
-        tag="$(curl -sSL --max-time 10 "https://api.github.com/repos/${REPO}/tags?per_page=1" \
-            | grep -o '"name": *"v[0-9][^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        # Prefer the latest *stable* release; fall back to the newest tag.
+        tag="$(curl -sSL --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep -o '"tag_name": *"v[0-9][^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        if [ -z "$tag" ]; then
+            tag="$(curl -sSL --max-time 10 "https://api.github.com/repos/${REPO}/tags?per_page=1" \
+                | grep -o '"name": *"v[0-9][^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        fi
     elif command -v python3 &>/dev/null; then
         tag="$(python3 -c "
 import json, urllib.request
-try:
-    r = urllib.request.urlopen('https://api.github.com/repos/${REPO}/tags?per_page=1', timeout=10)
-    tags = json.load(r)
-    print(tags[0]['name'] if tags else '')
-except Exception:
-    print('')" 2>/dev/null || true)"
+for url in ('https://api.github.com/repos/${REPO}/releases/latest',
+            'https://api.github.com/repos/${REPO}/tags?per_page=1'):
+    try:
+        r = urllib.request.urlopen(url, timeout=10)
+        data = json.load(r)
+        name = data.get('tag_name') if isinstance(data, dict) else (data[0]['name'] if data else '')
+        if name:
+            print(name); break
+    except Exception:
+        continue
+" 2>/dev/null || true)"
     fi
-    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+    # Accept stable tags; a prerelease only when the caller explicitly asked.
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$tag"
+    elif [ -n "${REQUESTED_TAG:-}" ] && [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
         echo "$tag"
     fi
 }
@@ -155,7 +168,8 @@ detect_distro() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         ID_LIKE="${ID_LIKE:-$ID}"
-        echo "$ID_LIKE" | tr '[:upper:]' '[:lower:]'
+        # ID_LIKE may list multiple tokens (e.g. "ubuntu debian"); use the first.
+        echo "$ID_LIKE" | tr '[:upper:]' '[:lower:]' | awk '{print $1}'
     elif command -v pacman &>/dev/null; then
         echo "arch"
     elif command -v apt &>/dev/null; then
@@ -195,14 +209,14 @@ install_system_deps() {
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
             info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev"
-            sudo pacman -S --needed python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev
-            sudo pacman -S --needed python-pyqt6 2>/dev/null || \
+            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev
+            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyqt6 2>/dev/null || \
                 warn "python-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
                 local headers_pkg
                 headers_pkg="$(arch_headers_pkg)"
                 info "Installing kernel headers for $(uname -r): $headers_pkg"
-                sudo pacman -S --needed "$headers_pkg" 2>/dev/null || \
+                sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} "$headers_pkg" 2>/dev/null || \
                     warn "Could not install $headers_pkg — install headers matching: $(uname -r)"
             else
                 info "Kernel headers for $(uname -r) already present."
@@ -246,7 +260,7 @@ install_system_deps() {
                 info "--yes given, continuing non-interactively."
                 return 0
             fi
-            read -rp "Continue with pip install anyway? [y/N] " ans
+            read -rp "Continue with pip install anyway? [y/N] " ans || ans=""
             if [[ ! "$ans" =~ ^[yY] ]]; then
                 exit 1
             fi
@@ -529,6 +543,7 @@ configure_gpu_power() {
     if [ -f "$ss_src" ]; then
         sudo cp "$ss_src" "$ss_dst" 2>/dev/null || true
         sudo udevadm control --reload-rules 2>/dev/null || true
+        sudo udevadm trigger --subsystem-match=pci 2>/dev/null || true
         info "Installed SmartShift udev rule: $ss_dst"
     fi
 
@@ -681,12 +696,13 @@ main() {
     parse_args "$@"
 
     if [ "$(id -u)" = "0" ]; then
-        if [ -n "${SUDO_USER:-}" ]; then
-            warn "Run this as your normal user, not via sudo (it elevates only the"
-            warn "steps that need root). Continuing, but user files may be root-owned."
-        else
-            warn "Running as root; GigaMate is a per-user install. Prefer your normal user."
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+            info "Re-running install as ${SUDO_USER} (per-user install)..."
+            exec sudo -u "$SUDO_USER" -H bash "${BASH_SOURCE[0]}" "$@"
         fi
+        error "Do not run install.sh as root / via sudo."
+        error "Run it as your normal user — it elevates only the steps that need root."
+        exit 1
     fi
 
     if [ "$DO_CHECK" = true ]; then

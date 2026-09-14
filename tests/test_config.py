@@ -188,4 +188,7 @@ def test_save_preserves_unknown_on_disk_keys(isolated_config):
 def test_bak_recovery_when_primary_missing(isolated_config):
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
     (config_module.CONFIG_DIR / "config.json.bak").write_text('{"colour": "green"}')
+    # Remove the primary so load() must fall back to the backup.
+    if isolated_config.exists():
+        isolated_config.unlink()
     assert config_module.load()["colour"] == "green"

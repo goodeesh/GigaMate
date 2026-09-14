@@ -48,6 +48,7 @@ def test_detect_system_capabilities_full_gigabyte():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="GIGABYTE AERO X16"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="GIGABYTE"), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=(0x0414, 0x8105)), \
@@ -88,6 +89,7 @@ def test_detect_system_capabilities_uncalibrated_keyboard():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="AORUS 15X"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="GIGABYTE"), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=(0x0414, 0x9999)), \
@@ -121,6 +123,7 @@ def test_detect_system_capabilities_missing_acpi_driver():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="GIGABYTE G5 KF"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="GIGABYTE"), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
@@ -155,6 +158,7 @@ def test_detect_system_capabilities_generic_desktop():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="Custom Desktop"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="ASUSTeK COMPUTER INC."), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
@@ -189,6 +193,7 @@ def test_detect_system_capabilities_rejects_lookalike_model_name():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="Dell G5 5500"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="Dell Inc."), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
@@ -220,6 +225,7 @@ def test_detect_system_capabilities_uses_dmi_vendor():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="G5 KF"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="GIGABYTE"), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
@@ -251,6 +257,7 @@ def test_detect_system_capabilities_is_cached_until_invalidated():
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="Custom Desktop"), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value="ASUSTeK COMPUTER INC."), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
@@ -290,6 +297,7 @@ def _probe_with(monkeypatch, product, vendor, kbd):
     mock_gpu = GpuState(present=False)
     with patch("gigamate.capabilities.get_dmi_product_name", return_value=product), \
          patch("gigamate.capabilities.get_dmi_vendor", return_value=vendor), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=None), \
          patch("gigamate.capabilities.AcpiController") as ctrl_cls, \
          patch("gigamate.capabilities.get_battery_manager") as bat_get, \
          patch("gigamate.capabilities.detect_device", return_value=kbd), \
@@ -323,3 +331,29 @@ def test_gigabyte_keyboard_on_desktop_is_not_a_gigabyte_laptop(monkeypatch):
 def test_giga_byte_vendor_string_is_recognized(monkeypatch):
     caps = _probe_with(monkeypatch, "G5 KF", "GIGA-BYTE Technology", None)
     assert caps.is_gigabyte_laptop is True
+
+
+def test_gigabyte_desktop_board_is_not_a_laptop(monkeypatch):
+    """A Gigabyte desktop motherboard must not be treated as a Gigabyte laptop."""
+    from unittest.mock import patch
+    from gigamate.acpi import AcpiCapabilities
+    from gigamate.battery import BatteryInfo
+    from gigamate.gpu import GpuState
+    from gigamate.capabilities import detect_system_capabilities
+
+    with patch("gigamate.capabilities.get_dmi_product_name", return_value="X570 AORUS"), \
+         patch("gigamate.capabilities.get_dmi_vendor", return_value="GIGABYTE"), \
+         patch("gigamate.capabilities.get_dmi_chassis_type", return_value=3), \
+         patch("gigamate.capabilities.AcpiController") as c, \
+         patch("gigamate.capabilities.get_battery_manager") as b, \
+         patch("gigamate.capabilities.detect_device", return_value=None), \
+         patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.get_gpu_state", return_value=GpuState(present=False)):
+        c.return_value.available = False
+        c.return_value.capabilities = AcpiCapabilities(backend="none")
+        b.return_value.is_available = False
+        b.return_value.is_charge_limit_supported.return_value = False
+        b.return_value.get_battery_info.return_value = BatteryInfo(present=False)
+        caps = detect_system_capabilities(refresh=True)
+
+    assert caps.is_gigabyte_laptop is False

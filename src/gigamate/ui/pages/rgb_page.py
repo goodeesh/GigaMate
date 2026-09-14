@@ -266,7 +266,8 @@ class RgbPage(QWidget):
             self.color_buttons[col_key] = btn
             grid.addWidget(btn, idx // 4, idx % 4)
 
-        # 12th Slot: Quick "Turn Off" button to complete symmetrical 4x3 grid
+        # "Turn Off" goes in the next free cell so it never overlaps a colour
+        # when a profile exposes 12+ colours.
         btn_off = QPushButton("  Turn Off")
         btn_off.setIcon(make_color_swatch_icon("#4a5568", 14))
         btn_off.setIconSize(QSize(14, 14))
@@ -276,7 +277,8 @@ class RgbPage(QWidget):
         btn_off.clicked.connect(self._turn_off_backlight)
         self.color_buttons["off"] = btn_off
         self._palette_info["off"] = ("Turn Off", "#4a5568")
-        grid.addWidget(btn_off, 11 // 4, 11 % 4)
+        off_idx = len(colour_keys)
+        grid.addWidget(btn_off, off_idx // 4, off_idx % 4)
 
         self._palette_layout.addLayout(grid)
 
@@ -364,10 +366,16 @@ class RgbPage(QWidget):
                 set_static(dev, colour, brightness, profile)
 
     def _turn_off_backlight(self) -> None:
-        curr = self.cfg.get("brightness", 2)
-        if curr > 0:
-            self.cfg["last_brightness"] = curr
-        self._set_brightness(0)
+        def _mutate(cfg):
+            curr = int(cfg.get("brightness", 2))
+            if curr > 0:
+                cfg["last_brightness"] = curr
+            cfg["brightness"] = 0
+            return cfg
+
+        self.cfg = update_config(_mutate)
+        self._apply_hardware()
+        self._highlight_active()
 
     def _highlight_active(self) -> None:
         b_level = self.cfg.get("brightness", 2)

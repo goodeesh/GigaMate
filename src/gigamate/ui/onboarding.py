@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 from ..capabilities import detect_system_capabilities
 from ..config import CONFIG_FILE, load as load_config, update_config
 from ..hardware import apply_hardware_settings
-from ..idle import IDLE_TIMEOUT_STEPS
+from ..idle import IDLE_TIMEOUT_STEPS, nearest_idle_step
 from ..protocol import COLOUR_MAP
 from ..config import resolve_active_profile
 
@@ -61,7 +61,11 @@ class _WelcomePage(QWizardPage):
     def initializePage(self) -> None:
         w = self.wizard()
         caps = w.caps
-        if w.mode == "upgrade":
+        if w.rerun:
+            self.setTitle("GigaMate Setup")
+            intro = ("Update your GigaMate preferences. Existing settings are kept "
+                     "and everything below is optional.")
+        elif w.mode == "upgrade":
             self.setTitle("GigaMate 3.0 — what's new")
             intro = ("Your existing settings have been kept. GigaMate 3.0 adds "
                      "GigaMate Center (this app), battery charge limits, and "
@@ -152,7 +156,8 @@ class _IdlePage(QWizardPage):
         cfg = w.cfg
         supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
         self.enable_chk.setChecked(bool(cfg.get("idle_off_enabled", False)))
-        tidx = self.timeout_combo.findData(int(cfg.get("idle_timeout_sec", 60)))
+        tidx = self.timeout_combo.findData(
+            nearest_idle_step(int(cfg.get("idle_timeout_sec", 60))))
         if tidx >= 0:
             self.timeout_combo.setCurrentIndex(tidx)
         self.enable_chk.setEnabled(supported)
@@ -197,6 +202,9 @@ class _BatteryPage(QWizardPage):
         if supported:
             self.notice.setText("Capping charge at 80% significantly reduces "
                                 "lithium-ion wear.")
+        elif not w.caps.battery_present:
+            self.notice.setText("No battery detected (running on AC power); "
+                                "charge limiting does not apply.")
         else:
             self.notice.setText("Charge limiting is not supported by this laptop's "
                                 "firmware/EC. Battery health monitoring still works.")
@@ -256,6 +264,8 @@ class OnboardingWizard(QWizard):
         self.cfg = load_config()
         self.caps = detect_system_capabilities()
         self.mode = "upgrade" if has_user_config() else "new"
+        # A deliberate re-run (already onboarded) gets neutral copy, not "what's new".
+        self.rerun = bool(self.cfg.get("onboarding_complete", False))
 
         self.setWindowTitle("GigaMate Setup")
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
@@ -286,6 +296,9 @@ class OnboardingWizard(QWizard):
                 cfg["charge_limit"] = int(self.p_battery.limit_slider.value())
             if caps.acpi_available:
                 cfg["sync_system_power"] = self.p_power.sync_chk.isChecked()
+                if cfg["sync_system_power"] and cfg.get("acpi_profile") is None:
+                    # Sync needs a fan profile to map from; Balanced by default.
+                    cfg["acpi_profile"] = 1
             cfg["onboarding_complete"] = True
             return cfg
 

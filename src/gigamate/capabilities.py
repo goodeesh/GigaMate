@@ -17,6 +17,7 @@ from .battery import get_battery_manager
 from .gpu import get_gpu_state
 from .profiles import (
     detect_device,
+    get_dmi_chassis_type,
     get_dmi_product_name,
     get_dmi_vendor,
     resolve_profile,
@@ -112,6 +113,13 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         dmi_upper = raw_dmi.upper()
         if any(token in dmi_upper for token in _GIGABYTE_PRODUCT_TOKENS):
             is_gigabyte = True
+
+    # A Gigabyte *desktop* motherboard is not a Gigabyte laptop: chassis types
+    # 3..7 are desktop variants. Unknown/Other types do not disqualify.
+    if is_gigabyte:
+        chassis = get_dmi_chassis_type()
+        if chassis is not None and 3 <= chassis <= 7:
+            is_gigabyte = False
 
     # 2. ACPI Subsystem
     acpi_ctrl = AcpiController()

@@ -37,6 +37,9 @@ def isolate_config(tmp_path, monkeypatch):
     cfg_file = cfg_dir / "config.json"
     monkeypatch.setattr(config_mod, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(config_mod, "CONFIG_FILE", cfg_file)
+    # main_window/onboarding bound CONFIG_FILE at import; redirect them too.
+    monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
+    monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
     # Start each test with DEFAULT_CONFIG
     config_mod.save(dict(config_mod.DEFAULT_CONFIG))
 
@@ -340,6 +343,7 @@ def test_tray_save_config_preserves_memory_keys():
         tray._idle_timeout = 60
         tray._current_acpi_profile = 2
         tray._config = {"charge_limit": 65, "charge_limit_enabled": True}
+        tray._battery_dirty = True  # simulate a tray-originated battery change
         tray._get_config_mtime = MagicMock(return_value=100.0)
 
         captured = {}

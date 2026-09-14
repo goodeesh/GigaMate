@@ -1,5 +1,7 @@
 """Tests for the discrete GPU power state monitor (gpu.py)."""
 
+from unittest.mock import patch
+
 from gigamate.gpu import (
     GpuState,
     NvidiaGpuMonitor,
@@ -340,8 +342,10 @@ class TestDynamicBoost:
         proc.mkdir(parents=True)
 
         mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
-        # Without service unit or proc support, returns false
-        assert mon._check_dynamic_boost_supported() is False or True  # Depends on host system files
+        # No /proc power file and no service unit/binary anywhere → unsupported.
+        with patch("pathlib.Path.is_file", return_value=False), \
+             patch("pathlib.Path.exists", return_value=False):
+            assert mon._check_dynamic_boost_supported() is False
 
     def test_sync_power_nvidia_gaming_starts_powerd(self, tmp_path, monkeypatch):
         root = _nvidia_gpu(tmp_path)

@@ -24,7 +24,7 @@ def test_apply_hardware_settings_full():
          patch("gigamate.battery.get_battery_manager") as mock_get_bat, \
          patch("gigamate.protocol.get_keyboard") as mock_get_kb, \
          patch("gigamate.protocol.set_static") as mock_set_static, \
-         patch("gigamate.config.resolve_active_profile"):
+         patch("gigamate.hardware.resolve_active_profile", return_value=None):
 
         mock_ctrl = MagicMock()
         mock_ctrl.available = True

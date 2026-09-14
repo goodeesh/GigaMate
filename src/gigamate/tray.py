@@ -101,17 +101,18 @@ class GigaMateTrayApp:
         self._current_colour = self._config.get("colour", "light_purple")
         self._current_brightness = self._config.get("brightness", 2)
         self._startup_item: Optional[Gtk.CheckMenuItem] = None
-        self._startup_apply = self._config.get("startup_apply", True)
-        self._sync_system_power = self._config.get("sync_system_power", True)
+        self._startup_apply = self._config.get("startup_apply", False)
+        self._sync_system_power = self._config.get("sync_system_power", False)
         self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
         self._battery_care_item: Optional[Gtk.CheckMenuItem] = None
+        self._battery_dirty = False
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
         self._acpi_caps: Optional[AcpiCapabilities] = None
         self._profile_items: Dict[int, Gtk.RadioMenuItem] = {}
         self._status_items: List[Gtk.MenuItem] = []
-        self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile", 1)
+        self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
         self._status_timer_id: Optional[int] = None
 
         # Hotkey listener state
@@ -237,10 +238,10 @@ class GigaMateTrayApp:
         new_profile = new_cfg.get("acpi_profile")
         new_idle_off = new_cfg.get("idle_off_enabled", False)
         new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
-        new_startup = new_cfg.get("startup_apply", True)
-        new_sync_power = new_cfg.get("sync_system_power", True)
+        new_startup = new_cfg.get("startup_apply", False)
+        new_sync_power = new_cfg.get("sync_system_power", False)
         new_limit = new_cfg.get("charge_limit", 80)
-        new_limit_enabled = new_cfg.get("charge_limit_enabled", True)
+        new_limit_enabled = new_cfg.get("charge_limit_enabled", False)
 
         old_building = self._building
         self._building = True
@@ -281,6 +282,7 @@ class GigaMateTrayApp:
 
             if getattr(self, "_battery_care_item", None) is not None:
                 self._battery_care_item.set_active(new_limit_enabled and 40 <= new_limit < 100)
+            self._battery_cap_limit = new_limit
         finally:
             self._building = old_building
 
@@ -508,6 +510,10 @@ class GigaMateTrayApp:
 
     def _on_resume_hook(self) -> None:
         """Called after the machine wakes."""
+        # If the backlight was idle-dimmed before suspend, restore it first;
+        # _init_idle() would otherwise clear the flag and leave it dark.
+        if self._idle_dimmed:
+            self._on_idle_active()
         self._init_idle()
 
     def _append_center_item(self) -> None:
@@ -604,6 +610,7 @@ class GigaMateTrayApp:
         if ok:
             self._config["charge_limit"] = target
             self._config["charge_limit_enabled"] = widget.get_active()
+            self._battery_dirty = True
             self._save_config()
         else:
             # Revert the checkbox without re-entering this handler.
@@ -1538,6 +1545,10 @@ class GigaMateTrayApp:
 
     def _on_quit(self, *args) -> None:
         """Save config and quit (restore backlight if idle-dimmed)."""
+        # Re-entrancy guard: SIGTERM/SIGINT and the menu can both fire.
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
         # Close GigaMate Center window if open
         try:
             import socket as py_socket
@@ -1576,6 +1587,18 @@ class GigaMateTrayApp:
             except Exception:
                 pass
             self._update_timer_id = None
+        if self._keyboard_retry_timer_id is not None:
+            try:
+                GLib.source_remove(self._keyboard_retry_timer_id)
+            except Exception:
+                pass
+            self._keyboard_retry_timer_id = None
+        if self._config_monitor is not None:
+            try:
+                self._config_monitor.cancel()
+            except Exception:
+                pass
+            self._config_monitor = None
         Gtk.main_quit()
 
     # ────────────────────────────────────────────
@@ -1593,13 +1616,16 @@ class GigaMateTrayApp:
             cfg["idle_timeout_sec"] = self._idle_timeout
             if self._current_acpi_profile is not None:
                 cfg["acpi_profile"] = self._current_acpi_profile
-            if "charge_limit" in self._config:
-                cfg["charge_limit"] = self._config["charge_limit"]
-            if "charge_limit_enabled" in self._config:
-                cfg["charge_limit_enabled"] = self._config["charge_limit_enabled"]
+            # Only write the battery keys when the tray originated the change;
+            # otherwise a stale snapshot could clobber a Center/CLI update.
+            if getattr(self, "_battery_dirty", False):
+                cfg["charge_limit"] = self._config.get("charge_limit", cfg.get("charge_limit"))
+                cfg["charge_limit_enabled"] = self._config.get(
+                    "charge_limit_enabled", cfg.get("charge_limit_enabled"))
             return cfg
 
         self._config = update_config(_mutate)
+        self._battery_dirty = False
         self._last_config_mtime = self._get_config_mtime()
 
     def _apply_on_startup(self) -> None:

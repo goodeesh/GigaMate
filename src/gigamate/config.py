@@ -21,7 +21,7 @@ def _migrate_old_config():
     try:
         if _OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            CONFIG_FILE.write_text(_OLD_CONFIG_FILE.read_text(), encoding="utf-8")
+            _atomic_write_bytes(CONFIG_FILE, _OLD_CONFIG_FILE.read_bytes())
             logger.info("Migrated settings from %s to %s", _OLD_CONFIG_DIR, CONFIG_DIR)
     except (OSError, IOError) as exc:
         logger.warning("Could not migrate legacy config: %s", exc)
@@ -246,8 +246,10 @@ def update_config(mutator):
         lock_file.close()
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
+def _atomic_write_bytes(path: Path, data: bytes) -> bool:
+    """Write ``data`` to ``path`` atomically. Returns True on success."""
     tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    ok = False
     try:
         with open(tmp, "wb") as fh:
             fh.write(data)
@@ -258,14 +260,16 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
                 pass
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
-    except OSError:
-        pass
+        ok = True
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", path, exc)
     finally:
         if tmp.exists():
             try:
                 tmp.unlink()
             except OSError:
                 pass
+    return ok
 
 
 def _write_config(config):
@@ -305,13 +309,19 @@ def _write_config(config):
     if dropped:
         logger.warning("config.save() ignored unknown keys: %s", ", ".join(dropped))
 
-    _atomic_write_bytes(CONFIG_FILE, json.dumps(safe, indent=2).encode("utf-8") + b"\n")
+    if not _atomic_write_bytes(CONFIG_FILE, json.dumps(safe, indent=2).encode("utf-8") + b"\n"):
+        return False
     try:
         os.chmod(CONFIG_FILE, 0o600)
     except OSError:
         pass
-    # Keep a durable, atomic, 0600 backup of the previous good file.
-    _atomic_write_bytes(CONFIG_DIR / "config.json.bak", CONFIG_FILE.read_bytes())
+    # Keep a durable, atomic, 0600 backup of the last good file.
+    try:
+        bak_data = CONFIG_FILE.read_bytes()
+    except OSError:
+        bak_data = None
+    if bak_data is not None:
+        _atomic_write_bytes(CONFIG_DIR / "config.json.bak", bak_data)
     try:
         dir_fd = os.open(CONFIG_DIR, os.O_RDONLY)
         try:
@@ -320,6 +330,7 @@ def _write_config(config):
             os.close(dir_fd)
     except OSError:
         pass
+    return True
 
 
 def resolve_active_profile():

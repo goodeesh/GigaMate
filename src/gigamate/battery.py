@@ -171,9 +171,10 @@ class BatteryManager:
         if acpi_file.exists():
             try:
                 val = int(acpi_file.read_text().strip())
-                return 0 < val <= 100 and os.access(str(acpi_file), os.W_OK)
+                if 0 < val <= 100 and os.access(str(acpi_file), os.W_OK):
+                    return True
             except (OSError, ValueError):
-                return False
+                pass  # fall through to the standard attribute
 
         # 2. Linux standard kernel charge_control_end_threshold
         if self._battery_path:

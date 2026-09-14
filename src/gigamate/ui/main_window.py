@@ -71,17 +71,23 @@ class SingleInstanceServer(QObject):
             return None
         try:
             sock = py_socket.socket(fileno=dupfd)
+        except OSError:
             try:
-                creds = sock.getsockopt(
-                    py_socket.SOL_SOCKET, py_socket.SO_PEERCRED,
-                    struct.calcsize("3i"),
-                )
-                _pid, uid, _gid = struct.unpack("3i", creds)
-                return uid
-            finally:
-                sock.close()
+                os.close(dupfd)
+            except OSError:
+                pass
+            return None
+        try:
+            creds = sock.getsockopt(
+                py_socket.SOL_SOCKET, py_socket.SO_PEERCRED,
+                struct.calcsize("3i"),
+            )
+            _pid, uid, _gid = struct.unpack("3i", creds)
+            return uid
         except OSError:
             return None
+        finally:
+            sock.close()
 
     def _handle_connection(self) -> None:
         client = self.server.nextPendingConnection()
@@ -154,13 +160,13 @@ class MainWindow(QMainWindow):
 
     def _maybe_show_onboarding(self) -> None:
         """Show the first-run wizard once (new installs and 2.0.x upgrades)."""
-        # Never block headless/test runs.
-        if os.environ.get("QT_QPA_PLATFORM", "").startswith("offscreen"):
-            return
-        if os.environ.get("GIGAMATE_SKIP_ONBOARDING"):
-            return
         force = bool(os.environ.get("GIGAMATE_FORCE_SETUP"))
         if not force:
+            # Never block headless/test runs.
+            if os.environ.get("QT_QPA_PLATFORM", "").startswith("offscreen"):
+                return
+            if os.environ.get("GIGAMATE_SKIP_ONBOARDING"):
+                return
             try:
                 if load_config().get("onboarding_complete"):
                     return
@@ -170,12 +176,17 @@ class MainWindow(QMainWindow):
 
     def show_onboarding(self) -> None:
         """Open the setup wizard (first run, or invoked from tray/Settings)."""
+        if getattr(self, "_setup_open", False):
+            return  # never stack two wizards
+        self._setup_open = True
         try:
             from .onboarding import OnboardingWizard
             OnboardingWizard(self).exec()
             self.sync_all_from_config(invalidate=True)
         except Exception as exc:
             logger.warning(f"Onboarding failed to run: {exc}")
+        finally:
+            self._setup_open = False
 
     def _init_ui(self) -> None:
         central_widget = QWidget()
@@ -442,7 +453,11 @@ def run_gui() -> None:
     ensure_tray_running()
 
     # Check exclusive instance lock
-    lock_file = open(IPC_LOCK_PATH, "a+")
+    try:
+        lock_file = open(IPC_LOCK_PATH, "a+")
+    except OSError as exc:
+        print(f"Could not open runtime lock {IPC_LOCK_PATH}: {exc}", file=sys.stderr)
+        sys.exit(1)
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         is_primary = True

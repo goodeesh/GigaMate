@@ -201,7 +201,7 @@ class DashboardPage(QWidget):
 
         # sync_system_power() also synchronizes GPU power (Dynamic Boost /
         # SmartShift); honour the user's preference like the tray and Settings.
-        if cfg.get("sync_system_power", True):
+        if cfg.get("sync_system_power", False):
             sync_system_power(profile.value)
 
         if profile in self._profile_buttons:
@@ -219,11 +219,12 @@ class DashboardPage(QWidget):
             self.telemetry_card.setVisible(True)
             self.cpu_tile.setVisible(True)
             self.duty_tile.setVisible(True)
-            for btn in self._profile_buttons.values():
-                btn.setEnabled(True)
 
             # Fan count awareness
             caps = self.acpi_ctrl.capabilities
+            # Only offer profile switching when the backend actually exposes it.
+            for btn in self._profile_buttons.values():
+                btn.setEnabled(bool(caps.has_power_profiles))
             fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
             fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
             if not caps.has_fan_rpm:
@@ -345,7 +346,7 @@ class DashboardPage(QWidget):
         # Update profile buttons state
         if current_prof_id is None:
             cfg = load_config()
-            current_prof_id = cfg.get("acpi_profile", 1)
+            current_prof_id = cfg.get("acpi_profile")
 
         for prof, btn in self._profile_buttons.items():
             btn.setChecked(current_prof_id == prof.value)

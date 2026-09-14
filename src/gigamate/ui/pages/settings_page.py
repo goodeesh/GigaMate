@@ -57,7 +57,7 @@ class SettingsPage(QWidget):
         chk_box1 = QVBoxLayout()
         chk_box1.setSpacing(4)
         self.chk_startup_apply = QCheckBox("Apply hardware preferences automatically on login / startup")
-        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
+        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", False))
         self.chk_startup_apply.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_startup_apply.toggled.connect(self._on_startup_apply_toggled)
 
@@ -73,7 +73,7 @@ class SettingsPage(QWidget):
         chk_box2 = QVBoxLayout()
         chk_box2.setSpacing(4)
         self.chk_sync_power = QCheckBox("Synchronize system power profile with fan profile")
-        self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", True))
+        self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", False))
         self.chk_sync_power.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_sync_power.toggled.connect(self._on_sync_power_toggled)
 
@@ -229,6 +229,10 @@ class SettingsPage(QWidget):
     def _on_sync_power_toggled(self, checked: bool) -> None:
         def _mutate(cfg):
             cfg["sync_system_power"] = checked
+            # Choosing to sync implies a profile to sync from; default to
+            # Balanced if the user has never picked one.
+            if checked and cfg.get("acpi_profile") is None:
+                cfg["acpi_profile"] = 1
             return cfg
         self.cfg = update_config(_mutate)
         if checked:
@@ -296,11 +300,11 @@ class SettingsPage(QWidget):
         self.cfg = load_config()
 
         self.chk_startup_apply.blockSignals(True)
-        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", True))
+        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", False))
         self.chk_startup_apply.blockSignals(False)
 
         self.chk_sync_power.blockSignals(True)
-        self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", True))
+        self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", False))
         self.chk_sync_power.blockSignals(False)
 
         # Refresh the diagnostic chips too (driver/keyboard/battery hotplug).

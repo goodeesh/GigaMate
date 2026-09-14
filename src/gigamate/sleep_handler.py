@@ -64,11 +64,15 @@ class SleepHandler:
             # Never start a second worker over a wedged one.
             if self._listener_thread is not None and self._listener_thread.is_alive():
                 return False
+            # Reserve the slot before the (slower) preflight so two concurrent
+            # callers cannot both start a listener.
+            self._listening = True
 
         try:
             from gi.repository import Gio
         except ImportError:
             logger.debug("PyGObject Gio unavailable; sleep handling disabled.")
+            self._listening = False
             return False
 
         # One-time preflight so a transient bus failure is reported honestly
@@ -77,11 +81,11 @@ class SleepHandler:
             Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
         except Exception as exc:
             logger.warning(f"Could not connect to the system bus for sleep handling: {exc}")
+            self._listening = False
             return False
 
         with self._lock:
             self._stop_event.clear()
-            self._listening = True
             self._listener_thread = threading.Thread(
                 target=self._run_dbus_listener,
                 daemon=True,

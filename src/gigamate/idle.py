@@ -522,7 +522,8 @@ def screensaver_idle_ms() -> Optional[int]:
                 None, None, Gio.DBusCallFlags.NONE, 2000, None,
             )
             if res is not None:
-                return int(res.get_child_value(0).get_uint32())
+                # GetSessionIdleTime is in seconds; callers expect milliseconds.
+                return int(res.get_child_value(0).get_uint32() * 1000)
         except Exception:
             continue
     return None

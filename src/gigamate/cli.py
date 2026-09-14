@@ -124,10 +124,7 @@ def cmd_rgb_static(args) -> None:
     label = BRIGHTNESS_LABELS.get(level, f"level-{level}")
     if ok:
         try:
-            cfg = load_config()
-            cfg["colour"] = colour
-            cfg["brightness"] = level
-            save_config(cfg)
+            update_config(lambda c: {**c, "colour": colour, "brightness": level})
         except Exception:
             pass
         print(f"Set to {colour} ({label})")
@@ -145,9 +142,12 @@ def cmd_rgb_off(args) -> None:
         sys.exit(1)
     set_off(dev, profile)
     try:
-        cfg = load_config()
-        cfg["brightness"] = 0
-        save_config(cfg)
+        def _mut(c):
+            if int(c.get("brightness", 2)) > 0:
+                c["last_brightness"] = c["brightness"]
+            c["brightness"] = 0
+            return c
+        update_config(_mut)
     except Exception:
         pass
     print("Keyboard backlight turned off.")
@@ -395,6 +395,19 @@ def cmd_profile_show(args) -> None:
     print(f"Power Profile: {pname}  ({profile_val.value})")
 
 
+def _record_profile_and_sync(val: int) -> None:
+    """Persist the chosen profile; sync system power only if the user opted in."""
+    try:
+        cfg = update_config(lambda c: {**c, "acpi_profile": val})
+    except Exception:
+        cfg = {}
+    if cfg.get("sync_system_power", False):
+        try:
+            sync_system_power(val)
+        except Exception:
+            pass
+
+
 def cmd_profile_set(args, name: str) -> None:
     """Set power profile by name or number."""
     ctrl = AcpiController()
@@ -408,13 +421,7 @@ def cmd_profile_set(args, name: str) -> None:
         if 0 <= val <= 3:
             fp = FanProfile(val)
             if ctrl.set_profile(fp):
-                sync_system_power(val)
-                try:
-                    cfg = load_config()
-                    cfg["acpi_profile"] = val
-                    save_config(cfg)
-                except Exception:
-                    pass
+                _record_profile_and_sync(val)
                 profile = resolve_profile(args.vid, args.pid)
                 pname = _profile_name(fp, profile)
                 print(f"Power profile set to: {pname}  ({val})")
@@ -429,13 +436,7 @@ def cmd_profile_set(args, name: str) -> None:
     try:
         fp = FanProfile.from_name(name)
         if ctrl.set_profile(fp):
-            sync_system_power(fp.value)
-            try:
-                cfg = load_config()
-                cfg["acpi_profile"] = fp.value
-                save_config(cfg)
-            except Exception:
-                pass
+            _record_profile_and_sync(fp.value)
             profile = resolve_profile(args.vid, args.pid)
             pname = _profile_name(fp, profile)
             print(f"Power profile set to: {pname}  ({fp.value})")
@@ -484,13 +485,7 @@ def cmd_profile_cycle(args) -> None:
     fp = FanProfile(next_profile_id)
 
     if ctrl.set_profile(fp):
-        sync_system_power(next_profile_id)
-        try:
-            cfg = load_config()
-            cfg["acpi_profile"] = next_profile_id
-            save_config(cfg)
-        except Exception:
-            pass
+        _record_profile_and_sync(next_profile_id)
         entry = p_data.get(str(next_profile_id), {})
         pname = entry.get("name", f"Profile {next_profile_id}")
         desc = entry.get("desc", "")

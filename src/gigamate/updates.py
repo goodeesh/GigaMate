@@ -357,13 +357,16 @@ def _download_verify_run(url: str, extra_args: str,
 def manual_update_instructions(tag: Optional[str] = None) -> str:
     """Checksum-verified, no-pipe update command for an administrator."""
     ref = tag or _pinned_ref()
+    q_sha = shlex.quote(install_script_sha256_url(ref))
     return (
         "Ask an administrator to run this in a terminal:\n"
         f"  curl -fL {install_script_url(ref)} -o /tmp/gigamate-install.sh\n"
-        f"  curl -fL {install_script_sha256_url(ref)} -o /tmp/gigamate-install.sh.sha256 2>/dev/null && "
-        "(cd /tmp && sha256sum -c gigamate-install.sh.sha256) || "
-        'echo "WARNING: no checksum available; proceeding unverified"\n'
-        "  bash /tmp/gigamate-install.sh --update"
+        f"  if curl -fL {q_sha} -o /tmp/gigamate-install.sh.sha256 2>/dev/null; then\n"
+        "    [ \"$(sha256sum /tmp/gigamate-install.sh | cut -d' ' -f1)\" = "
+        "\"$(cut -d' ' -f1 /tmp/gigamate-install.sh.sha256)\" ] || "
+        "{ echo 'install.sh checksum FAILED'; exit 1; }\n"
+        "  else echo 'WARNING: no checksum available; proceeding unverified'; fi\n"
+        f"  bash /tmp/gigamate-install.sh --update --tag {shlex.quote(ref)}"
     )
 
 
@@ -513,7 +516,7 @@ def build_terminal_update_command(
     """
     ref = tag or _pinned_ref()
     snippet = _download_verify_run(
-        install_script_url(ref), "--update --yes",
+        install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
         sha_url=install_script_sha256_url(ref) or None)
     inner = f"{snippet}; exec bash"
     detect_fn = detect if detect is not None else (
@@ -583,7 +586,7 @@ def build_update_command(log_file: Path = UPDATE_LOG_FILE,
     """
     ref = tag or _pinned_ref()
     snippet = _download_verify_run(
-        install_script_url(ref), "--update --yes",
+        install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
         sha_url=install_script_sha256_url(ref) or None)
     log_q = shlex.quote(str(log_file))
     return ["bash", "-c", f"{{ {snippet}; exit $rc; }} >{log_q} 2>&1"]

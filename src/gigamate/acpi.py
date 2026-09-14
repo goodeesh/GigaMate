@@ -223,6 +223,9 @@ class AcpiCallBackend(AcpiBackend):
         # active profile). If the AMW0 WMI interface answers WMBC queries at
         # all, WMBD profile control is assumed available.
         caps.has_power_profiles = interface_ok
+        if not interface_ok:
+            # /proc/acpi/call present but nothing answered: not a usable backend.
+            return AcpiCapabilities(backend="none")
 
         return caps
 
@@ -269,8 +272,8 @@ class AcpiCallBackend(AcpiBackend):
             value = int(result, 0)
         except (ValueError, TypeError):
             return None
-        # acpi_call uses all-ones as an error sentinel.
-        if value in (-1, 0xFFFFFFFF):
+        # acpi_call uses all-ones as an error sentinel (32- and 64-bit).
+        if value in (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
             return None
         return value
 
