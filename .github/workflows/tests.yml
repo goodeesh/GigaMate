@@ -26,7 +26,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libxkbcommon-x11-0 \
-            python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1
+            python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1 \
+            python3-usb python3-evdev
 
       - name: Install dependencies
         run: |
