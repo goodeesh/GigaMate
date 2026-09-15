@@ -7,17 +7,23 @@
 #
 # NOTE: this relies on systemd-logind (standard on Arch/Fedora/Debian/Ubuntu).
 # On systems without logind, grant access via a dedicated group instead.
+#
+# IMPORTANT: the ACL is applied by udev's "uaccess" builtin, which
+# 73-seat-late.rules only queues for devices whose TAG+="uaccess" is already
+# set *before* that file runs. Rules here are numbered 99- and therefore run
+# later, so we must queue the builtin ourselves — tagging alone is not enough
+# and silently leaves the device inaccessible (USBError: Access denied).
 
 # Primary Gigabyte keyboard controller.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
 
 # Shared/generic USB vendors historically used by Gigabyte keyboards.
 # Restrict Holtek (04D9) to prevent keystroke sniffing on arbitrary external mice/keyboards.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
 
 # Battery charge limit and ACPI platform attributes
 SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}!="", RUN+="/bin/chmod 0666 $sys$devpath/charge_control_end_threshold"
