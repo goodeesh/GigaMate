@@ -450,19 +450,27 @@ install_python_pkg() {
 
     # Uninstall old package first if present
     pip uninstall -y gigabyte-keyboard-rgb 2>/dev/null || true
+    # Remove an earlier pip --user install of gigamate so its ~/.local/bin
+    # scripts cannot conflict with the pipx symlinks we are about to create
+    # (a previous version may have fallen back to pip --user).
+    pip uninstall -y --break-system-packages gigamate 2>/dev/null || \
+    pip uninstall -y gigamate 2>/dev/null || true
 
     info "Installing gigamate with pip..."
     if command -v pipx &>/dev/null; then
         # The tray needs system packages (PyGObject/gi), which are not
-        # installable into an isolated venv. Recreate the venv with
-        # system site packages when it lacks them (pipx cannot retrofit
-        # the flag onto an existing venv — it must be recreated).
-        local venv_cfg="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/pyvenv.cfg"
-        if [ -f "$venv_cfg" ] && ! grep -q "system-site-packages = true" "$venv_cfg"; then
-            info "Recreating pipx venv with system site packages (for PyGObject)..."
-            pipx uninstall gigamate 2>/dev/null || true
+        # installable into an isolated venv, so install with
+        # --system-site-packages. pipx backed by uv cannot recreate an
+        # existing venv for `install --force` ("A virtual environment
+        # already exists"), so remove any existing venv first — this makes
+        # every upgrade install cleanly via pipx instead of silently
+        # falling back to pip --user.
+        local venv_dir="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate"
+        if [ -d "$venv_dir" ]; then
+            info "Removing existing pipx venv for a clean reinstall..."
+            pipx uninstall gigamate >/dev/null 2>&1 || rm -rf "$venv_dir"
         fi
-        if pipx install "$script_dir" --force --system-site-packages; then
+        if pipx install "$script_dir" --system-site-packages; then
             # pipx can report success yet produce a venv that cannot run
             # the tray (e.g. isolated from system PyGObject). Verify the
             # venv interpreter imports the system-bound modules before
