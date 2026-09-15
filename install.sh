@@ -408,7 +408,7 @@ build_kernel_module() {
     # Secure Boot: DKMS signs the module with its own key, which must be
     # enrolled once or the module will not load after a reboot.
     local sb_enabled=false
-    if command -v mokutil &>/dev/null && mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
+    if command -v mokutil &>/dev/null && [[ "$(mokutil --sb-state 2>/dev/null || true)" == *nabled* ]]; then
         sb_enabled=true
     elif [ -f /sys/kernel/security/lockdown ] && grep -q '\[\(integrity\|confidentiality\)\]' /sys/kernel/security/lockdown 2>/dev/null; then
         sb_enabled=true
@@ -430,7 +430,7 @@ build_kernel_module() {
             info "Module will auto-load on boot."
         fi
         info "Kernel module installed and bound successfully."
-    elif find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
+    elif [ -n "$(find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' -print -quit 2>/dev/null)" ]; then
         info "Kernel module installed."
         warn "Module did not bind to an AMW0 device — this laptop may be unsupported."
         warn "Skipping boot auto-load so modprobe does not fail on every boot."
@@ -782,7 +782,7 @@ main() {
         has_acpi_call=true
         echo "  ✅ Keyboard RGB     — gigamate rgb"
         echo "  ⚠️  Fan & Power      — using acpi_call backend"
-    elif find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' 2>/dev/null | grep -q .; then
+    elif [ -n "$(find "/lib/modules/$(uname -r)" -name 'gigamate_acpi.ko*' -print -quit 2>/dev/null)" ]; then
         echo "  ⚠️  Fan & Power      — unavailable on this hardware (no AMW0 device)"
         echo "      The kernel module built, but this is not a supported Gigabyte model."
     else
