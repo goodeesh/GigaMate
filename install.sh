@@ -673,9 +673,14 @@ install_desktop_entry() {
     fi
     rm -f "$icon_dir/gigabyte-keyboard-rgb.svg" 2>/dev/null || true
 
-    # Refresh caches
-    if command -v gtk-update-icon-cache &>/dev/null; then
-        gtk-update-icon-cache -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+    # Refresh caches. Without an index.theme, gtk-update-icon-cache refuses to
+    # run and a stale icon-theme.cache can shadow freshly installed icons, so
+    # remove it in that case and let GTK rescan the directory.
+    local icon_root="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+    if command -v gtk-update-icon-cache &>/dev/null && [ -f "$icon_root/index.theme" ]; then
+        gtk-update-icon-cache -f "$icon_root" 2>/dev/null || true
+    else
+        rm -f "$icon_root/icon-theme.cache" 2>/dev/null || true
     fi
     if command -v update-desktop-database &>/dev/null; then
         update-desktop-database "$apps_dir" 2>/dev/null || true
@@ -758,9 +763,11 @@ main() {
     # Migrate the old config/profiles *before* starting the tray: the tray
     # creates ~/.config/gigamate on launch, which would otherwise make
     # migrate_config take the "both exist" branch and skip user profiles.
+    # Install icons/desktop entries *before* (re)starting the tray so an
+    # upgraded tray loads the new icon assets rather than the previous ones.
     migrate_config
-    install_service
     install_desktop_entry
+    install_service
 
     if [ "$DO_UPDATE" = true ]; then
         # install_service already restarted the tray; just drop the cached
