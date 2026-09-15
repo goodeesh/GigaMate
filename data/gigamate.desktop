@@ -2,8 +2,9 @@
 Type=Application
 Name=GigaMate
 Comment=Gigabyte laptop management — keyboard RGB, fan monitor, power profiles
-Exec=gigamate-tray
+Exec=gigamate center
 Icon=gigamate
 Terminal=false
+NoDisplay=true
 Categories=Settings;X-Hardware;
 Keywords=gigabyte;aero;aorus;keyboard;rgb;fan;acpi;gimate;

@@ -196,11 +196,27 @@ class TestBuildCommand:
         cmd = build_update_command()
         assert "--update" in cmd[-1] and "--yes" in cmd[-1]
         assert "install.sh" in cmd[-1]
+        assert "rc=1" in cmd[-1]
 
     def test_update_command_logs_to_file(self, tmp_path):
         log = tmp_path / "update.log"
         cmd = updates.build_update_command(log_file=log)
         assert str(log) in cmd[-1] and "2>&1" in cmd[-1]
+
+    def test_fetch_latest_version_raw_fallback(self):
+        import urllib.error
+        def fake_urlopen(req, timeout=5):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "raw.githubusercontent.com" in url:
+                class Resp:
+                    def __enter__(self): return self
+                    def __exit__(self, *a): pass
+                    def read(self): return b'__version__ = "3.1.0"\n'
+                return Resp()
+            raise urllib.error.HTTPError(url, 403, "rate limited", {}, None)
+
+        ver = updates.fetch_latest_version(urlopen=fake_urlopen)
+        assert ver == "v3.1.0"
 
 
 class TestAdminStatus:
@@ -371,3 +387,68 @@ class TestMenuItemLabel:
 
     def test_available_has_no_version(self):
         assert updates.menu_item_label(True) == "Update available"
+
+
+class TestTagValidationAndPinning:
+    def test_prerelease_tags_are_valid(self):
+        assert is_valid_tag("v3.0.0b1") is True
+        assert is_valid_tag("v3.0.0rc1") is True
+        assert is_valid_tag("3.0.0b1") is False  # tags require a leading 'v'
+
+    def test_prerelease_ordering(self):
+        assert is_newer("v3.0.0", "3.0.0b1") is True
+        assert is_newer("v3.0.0b2", "3.0.0b1") is True
+        assert is_newer("v3.0.0b1", "3.0.0") is False
+        assert is_newer("v3.0.0-rc.2", "3.0.0-rc.1") is True
+        assert is_newer("v3.0.0", "3.0.0-rc.2") is True
+        assert is_newer("v3.0.0-beta.1", "2.0.8") is True
+
+    def test_install_script_url_pins_tag(self):
+        url = updates.install_script_url("v1.2.3")
+        assert "/v1.2.3/install.sh" in url
+        # Invalid/empty tag falls back to main (documented last resort).
+        assert "/main/install.sh" in updates.install_script_url(None)
+
+    def test_update_command_uses_pinned_url_and_safe_curl(self):
+        cmd = build_update_command(tag="v1.2.3")
+        body = cmd[-1]
+        assert "/v1.2.3/install.sh" in body
+        assert "-fL" in body and '--proto "=https"' in body
+        assert "sha256sum" in body
+
+    def test_update_command_never_pipes_to_shell(self):
+        body = build_update_command(tag="v1.2.3")[-1]
+        assert "| bash" not in body
+
+
+def test_manual_update_instructions_not_piped():
+    text = updates.manual_update_instructions("v1.2.3")
+    assert "| bash" not in text
+    assert "v1.2.3" in text
+
+
+def test_install_script_sha256_url():
+    assert updates.install_script_sha256_url("v1.2.3").endswith("/v1.2.3/install.sh.sha256")
+    assert updates.install_script_sha256_url("main") == ""
+
+
+def test_save_state_is_atomic_and_locked(tmp_path):
+    state_file = tmp_path / "update_state.json"
+    updates.save_state({"last_check_ts": 123, "latest_known": "v1.2.3"}, state_file)
+    assert updates.load_state(state_file)["latest_known"] == "v1.2.3"
+    # No leftover temp files.
+    assert not list(tmp_path.glob("*.tmp.*"))
+
+
+def test_update_state_merge_preserves_dismissal(tmp_path):
+    state_file = tmp_path / "update_state.json"
+    updates.save_state({"dismissed_version": "v1.0.0"}, state_file)
+
+    def _merge(state):
+        state["latest_known"] = "v2.0.0"
+        return state
+
+    merged = updates.update_update_state(_merge, state_file)
+    assert merged["dismissed_version"] == "v1.0.0"
+    assert merged["latest_known"] == "v2.0.0"
+    assert updates.load_state(state_file)["dismissed_version"] == "v1.0.0"

@@ -11,7 +11,7 @@ Usage:
     gigamate profile [name]                    Show/set power profile
     gigamate profile contribute                Pull Request instructions
     gigamate detect [--acpi]                   Detect hardware
-    gigamate calibrate [rgb|acpi|--all]        Run calibration
+    gigamate calibrate [rgb|acpi|all]        Run calibration
     gigamate version                           Show version
     gigamate update [--check] [--yes]          Check for / install updates
 
@@ -44,7 +44,7 @@ from .profiles import (
     DeviceProfile,
     get_dmi_product_name,
 )
-from .config import load as load_config, save as save_config
+from .config import load as load_config, save as save_config, update_config
 from .acpi import (
     AcpiController,
     FanProfile,
@@ -123,6 +123,10 @@ def cmd_rgb_static(args) -> None:
     ok = set_static(dev, colour, level, profile, args.interface)
     label = BRIGHTNESS_LABELS.get(level, f"level-{level}")
     if ok:
+        try:
+            update_config(lambda c: {**c, "colour": colour, "brightness": level})
+        except Exception:
+            pass
         print(f"Set to {colour} ({label})")
     else:
         print("Failed to send command", file=sys.stderr)
@@ -137,12 +141,41 @@ def cmd_rgb_off(args) -> None:
         print("Keyboard not found")
         sys.exit(1)
     set_off(dev, profile)
+    try:
+        def _mut(c):
+            if int(c.get("brightness", 2)) > 0:
+                c["last_brightness"] = c["brightness"]
+            c["brightness"] = 0
+            return c
+        update_config(_mut)
+    except Exception:
+        pass
     print("Keyboard backlight turned off.")
 
 
 def cmd_rgb_detect(args) -> None:
     """Scan for compatible Gigabyte keyboards."""
     print_detect()
+
+
+def cmd_rgb_idle(args) -> None:
+    """Configure keyboard backlight idle auto-off (tray/GUI read this config)."""
+    from .idle import clamp_timeout
+
+    if args.value == "off":
+        def _mutate(cfg):
+            cfg["idle_off_enabled"] = False
+            return cfg
+        print("Keyboard idle auto-off disabled.")
+    else:
+        sec = clamp_timeout(int(args.value))
+
+        def _mutate(cfg):
+            cfg["idle_off_enabled"] = True
+            cfg["idle_timeout_sec"] = sec
+            return cfg
+        print(f"Keyboard idle auto-off set to {sec} seconds.")
+    update_config(_mutate)
 
 
 def cmd_rgb_cycle(args) -> None:
@@ -288,7 +321,11 @@ def cmd_status(args) -> None:
                 print()
     else:
         print(f"  ACPI:  ❌ Not available")
-        print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
+        from .capabilities import detect_system_capabilities
+        if detect_system_capabilities().is_gigabyte_laptop:
+            print("     Re-run install.sh to build and load the bundled gigamate_acpi module.")
+        else:
+            print("     This is not a supported Gigabyte laptop; fan/power control is unavailable.")
         print()
 
     # Discrete GPU state
@@ -312,6 +349,9 @@ def cmd_gpu_status(args) -> None:
     """
     gpu = get_gpu_state()
     if not gpu.present:
+        print("GigaMate — Discrete GPU")
+        print()
+        print("  No discrete GPU detected (integrated graphics only).")
         return
     print("GigaMate — Discrete GPU")
     print()
@@ -359,6 +399,19 @@ def cmd_profile_show(args) -> None:
     print(f"Power Profile: {pname}  ({profile_val.value})")
 
 
+def _record_profile_and_sync(val: int) -> None:
+    """Persist the chosen profile; sync system power only if the user opted in."""
+    try:
+        cfg = update_config(lambda c: {**c, "acpi_profile": val})
+    except Exception:
+        cfg = {}
+    if cfg.get("sync_system_power", False):
+        try:
+            sync_system_power(val)
+        except Exception:
+            pass
+
+
 def cmd_profile_set(args, name: str) -> None:
     """Set power profile by name or number."""
     ctrl = AcpiController()
@@ -372,7 +425,7 @@ def cmd_profile_set(args, name: str) -> None:
         if 0 <= val <= 3:
             fp = FanProfile(val)
             if ctrl.set_profile(fp):
-                sync_system_power(val)
+                _record_profile_and_sync(val)
                 profile = resolve_profile(args.vid, args.pid)
                 pname = _profile_name(fp, profile)
                 print(f"Power profile set to: {pname}  ({val})")
@@ -387,7 +440,7 @@ def cmd_profile_set(args, name: str) -> None:
     try:
         fp = FanProfile.from_name(name)
         if ctrl.set_profile(fp):
-            sync_system_power(fp.value)
+            _record_profile_and_sync(fp.value)
             profile = resolve_profile(args.vid, args.pid)
             pname = _profile_name(fp, profile)
             print(f"Power profile set to: {pname}  ({fp.value})")
@@ -436,7 +489,7 @@ def cmd_profile_cycle(args) -> None:
     fp = FanProfile(next_profile_id)
 
     if ctrl.set_profile(fp):
-        sync_system_power(next_profile_id)
+        _record_profile_and_sync(next_profile_id)
         entry = p_data.get(str(next_profile_id), {})
         pname = entry.get("name", f"Profile {next_profile_id}")
         desc = entry.get("desc", "")
@@ -754,7 +807,7 @@ def cmd_update(args) -> None:
     if admin in ("denied", "no-sudo"):
         print(f"Administrator rights required (status: {admin}).")
         print("The driver steps need sudo, which is not available for you.")
-        print(update_checker.MANUAL_UPDATE_INSTRUCTIONS)
+        print(update_checker.manual_update_instructions())
         sys.exit(1)
     cmd = update_checker.build_update_command()
     print("Running background update (install.sh --update)...")
@@ -891,6 +944,75 @@ def _legacy_main() -> None:
     cmd_legacy(args)
 
 
+def cmd_center(args) -> None:
+    """Launch GigaMate Center GUI."""
+    try:
+        from .ui.main_window import run_gui
+        run_gui()
+    except ImportError as exc:
+        print(f"Error launching GigaMate Center: {exc}", file=sys.stderr)
+        print("Ensure PyQt6 is installed: sudo pacman -S python-pyqt6", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_tray(args) -> None:
+    """Launch GigaMate System Tray daemon."""
+    from .tray import main as tray_main
+    tray_main()
+
+
+def cmd_battery(args) -> None:
+    """Show battery status or set charge limit."""
+    from .battery import get_battery_manager
+    mgr = get_battery_manager()
+    if not mgr.is_available:
+        print("No battery detected on this system.", file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "limit", None) is not None:
+        try:
+            val = int(args.limit)
+            if mgr.set_charge_limit(val):
+                def _mutate(cfg):
+                    cfg["charge_limit"] = val
+                    cfg["charge_limit_enabled"] = True
+                    return cfg
+                update_config(_mutate)
+                print(f"Battery charge threshold set to {val}%.")
+            else:
+                print("Failed to set battery charge threshold (unsupported on this firmware).", file=sys.stderr)
+                sys.exit(1)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    info = mgr.get_battery_info()
+    print("Battery Information:")
+    print(f"  Device:         {info.name}")
+    print(f"  Capacity:       {info.capacity}%")
+    print(f"  Status:         {info.status}")
+    print(f"  Power Source:   {'AC Mains' if info.ac_online else 'Battery'}")
+    if info.health_percent is not None:
+        print(f"  Health:         {info.health_percent:.1f}%")
+    if info.cycle_count is not None:
+        print(f"  Cycle Count:    {info.cycle_count}")
+    if info.charge_limit_supported:
+        limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
+        print(f"  Charge Limit:   {limit_str} (Backend: {info.backend})")
+    else:
+        print("  Charge Limit:   Unsupported by current kernel/firmware")
+
+    if getattr(args, "status", False):
+        print(f"  Backend:        {info.backend or 'none'}")
+        if info.charge_now is not None:
+            print(f"  Charge Now:     {info.charge_now}")
+        if info.charge_full is not None:
+            print(f"  Charge Full:    {info.charge_full}")
+        if info.charge_full_design is not None:
+            print(f"  Design Full:    {info.charge_full_design}")
+
+
 def _subcommand_main() -> None:
     """New subcommand-based parser (gigamate <subcommand> ...)."""
     parser = argparse.ArgumentParser(
@@ -907,6 +1029,8 @@ def _subcommand_main() -> None:
         
 Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     )
+    parser.add_argument("--center", "-c", action="store_true", help="Launch GigaMate Center GUI")
+    parser.add_argument("--tray", "-t", action="store_true", help="Launch GigaMate System Tray daemon")
     sub = parser.add_subparsers(dest="command", help="Sub-command")
 
     # --- rgb subcommand ---
@@ -945,6 +1069,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     cal_rgb_parser = rgb_sub.add_parser("calibrate", help="Interactive RGB calibration")
     cal_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     cal_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+
+    # rgb idle
+    idle_parser = rgb_sub.add_parser(
+        "idle", help="Keyboard backlight idle auto-off timeout")
+    idle_parser.add_argument("value", choices=["off", "10", "30", "60", "120", "300", "900"],
+                             help="'off' or a timeout in seconds")
 
     # --- status subcommand ---
     status_parser = sub.add_parser("status", help="Show hardware status")
@@ -1003,8 +1133,28 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
     gpu_sub.add_parser("status", help="Show discrete GPU power state")
 
+    # --- battery subcommand ---
+    battery_parser = sub.add_parser("battery", help="Battery health and charge threshold limiter")
+    battery_parser.add_argument("--limit", "-l", type=int, default=None,
+                                help="Set max charge limit (40..100)")
+    battery_parser.add_argument("--status", action="store_true",
+                                help="Show detailed battery status")
+
+    # --- center / gui subcommand ---
+    sub.add_parser("center", aliases=["gui"], help="Open GigaMate Center GUI")
+
+    # --- tray subcommand ---
+    sub.add_parser("tray", help="Start GigaMate System Tray daemon")
+
     # Parse
     args = parser.parse_args()
+
+    if getattr(args, "center", False):
+        cmd_center(args)
+        return
+    if getattr(args, "tray", False):
+        cmd_tray(args)
+        return
 
     # Dispatch
     if args.command == "rgb":
@@ -1024,6 +1174,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         cmd_version(args)
     elif args.command == "update":
         cmd_update(args)
+    elif args.command == "battery":
+        cmd_battery(args)
+    elif args.command in ("center", "gui"):
+        cmd_center(args)
+    elif args.command == "tray":
+        cmd_tray(args)
     elif args.command == "gpu":
         if args.gpu_action in ("status", None):
             cmd_gpu_status(args)
@@ -1032,8 +1188,11 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             print("Example: gigamate gpu status")
             sys.exit(1)
     else:
-        parser.print_help()
-        sys.exit(1)
+        if len(sys.argv) == 1:
+            cmd_center(args)
+        else:
+            parser.print_help()
+            sys.exit(1)
 
 
 def _dispatch_rgb(args) -> None:
@@ -1051,8 +1210,10 @@ def _dispatch_rgb(args) -> None:
         cmd_rgb_reset(args)
     elif action == "calibrate":
         cmd_rgb_calibrate(args)
+    elif action == "idle":
+        cmd_rgb_idle(args)
     else:
-        print("RGB actions: static, off, detect, cycle, reset, calibrate")
+        print("RGB actions: static, off, detect, cycle, reset, calibrate, idle")
         print("Example: gigamate rgb static purple")
         sys.exit(1)
 
@@ -1096,12 +1257,21 @@ def _dispatch_calibrate(args) -> None:
     elif action == "acpi":
         cmd_calibrate_acpi(args)
     elif action == "all":
-        # Run both calibrations
+        # Run both calibrations; a missing RGB keyboard must not abort the
+        # ACPI half (and vice-versa).
         print("=== RGB Calibration ===")
-        cmd_calibrate_rgb(args)
+        try:
+            cmd_calibrate_rgb(args)
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                print("Skipping RGB calibration (no compatible keyboard detected).", file=sys.stderr)
         print()
         print("=== ACPI Calibration ===")
-        cmd_calibrate_acpi(args)
+        try:
+            cmd_calibrate_acpi(args)
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                print("Skipping ACPI calibration.", file=sys.stderr)
         print()
         print("Combined calibration complete.")
         print("Run 'gigamate profile contribute' to share your profile.")

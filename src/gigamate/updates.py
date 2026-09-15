@@ -14,6 +14,7 @@ Design for battery efficiency:
 Stdlib only (urllib + json), gi-free so tests run without PyGObject.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -33,8 +34,9 @@ RELEASE_LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 # Fallback when no GitHub Release exists yet (only tags pushed).
 TAGS_URL = f"https://api.github.com/repos/{REPO}/tags?per_page=1"
 RAW_VERSION_URL = (
-    f"https://raw.githubusercontent.com/{REPO}/main/pyproject.toml"
+    f"https://raw.githubusercontent.com/{REPO}/main/src/gigamate/__init__.py"
 )
+# Last-resort bootstrap ref used only when no valid release tag is known.
 INSTALL_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.sh"
 
 CHECK_INTERVAL_SEC = 24 * 3600  # daily + startup
@@ -44,7 +46,11 @@ FETCH_TIMEOUT_SEC = 5
 STATE_FILE = CONFIG_DIR / "update_state.json"
 
 _TAG_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-_VALID_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+# Tag validation requires a leading 'v' (maintainer-pushed release tags).
+_VALID_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:[-.]?(a|b|rc|alpha|beta)[-.]?(\d+)?)?$")
+# Version parsing for comparison allows an optional 'v'.
+_PRERELEASE_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-.]?(a|b|rc|alpha|beta)[-.]?(\d+)?)?$")
+_PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "rc": 2, "": 3}
 
 
 def parse_version(text: str) -> Tuple[int, int, int]:
@@ -55,16 +61,27 @@ def parse_version(text: str) -> Tuple[int, int, int]:
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
+def _version_key(text: str) -> Tuple[int, int, int, int, int]:
+    """Comparable key including pre-release ordering (a < b < rc < final)."""
+    m = _PRERELEASE_VERSION_RE.match((text or "").strip())
+    if not m:
+        raise ValueError(f"Invalid version: {text!r}")
+    pre = m.group(4) or ""
+    pre_num = int(m.group(5)) if m.group(5) else 0
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            _PRE_RANK[pre], pre_num)
+
+
 def is_newer(latest: str, current: str) -> bool:
-    """True if latest > current (both 'vX.Y.Z' or 'X.Y.Z')."""
+    """True if latest > current (handles pre-release suffixes)."""
     try:
-        return parse_version(latest) > parse_version(current)
+        return _version_key(latest) > _version_key(current)
     except ValueError:
         return False
 
 
 def is_valid_tag(tag: str) -> bool:
-    """Only maintainer-pushed release tags count (vX.Y.Z exactly)."""
+    """Only maintainer-pushed release tags count (vX.Y.Z[, aN|bN|rcN])."""
     return bool(_VALID_TAG_RE.match((tag or "").strip()))
 
 
@@ -95,11 +112,57 @@ def load_state(state_file: Path = STATE_FILE) -> Dict:
 
 
 def save_state(state: Dict, state_file: Path = STATE_FILE) -> None:
+    """Atomically persist update state, serialized across processes."""
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text(json.dumps(state, indent=2) + "\n")
+        lock_path = state_file.with_name(state_file.name + ".lock")
+        lock = open(lock_path, "a+")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _save_state_locked(state, state_file)
+        finally:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock.close()
     except OSError:
         pass
+
+
+def _save_state_locked(state: Dict, state_file: Path) -> None:
+    """Write state assuming the file lock is already held."""
+    tmp = state_file.with_name(state_file.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, state_file)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def update_update_state(mutator, state_file: Path = STATE_FILE) -> Dict:
+    """Atomically read-modify-write the update state under the file lock."""
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_name(state_file.name + ".lock")
+    lock = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load_state(state_file)
+        result = mutator(state)
+        if isinstance(result, dict):
+            state = result
+        _save_state_locked(state, state_file)
+        return state
+    finally:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
 
 
 def _http_get_json(url: str, timeout: int,
@@ -160,6 +223,21 @@ def fetch_latest_version(timeout: int = FETCH_TIMEOUT_SEC,
         tag = ((tags[0] or {}).get("name") or "").strip()
         if is_valid_tag(tag):
             return tag
+
+    # Fallback: __init__.py on main via raw.githubusercontent.com (not API rate limited)
+    try:
+        req = urllib.request.Request(RAW_VERSION_URL, headers={"User-Agent": "GigaMate-update-check"})
+        with urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8", "replace")
+            m = re.search(r'(?:__version__|version)\s*=\s*["\']([^"\']+)["\']', content)
+            if m:
+                v = m.group(1).strip()
+                tag = f"v{v}" if not v.startswith("v") else v
+                if is_valid_tag(tag):
+                    return tag
+    except Exception:
+        pass
+
     return None
 
 
@@ -184,7 +262,7 @@ def check_for_updates(force: bool = False,
     if not force and not should_check(now, state.get("last_check_ts")):
         latest = cached_latest if isinstance(cached_latest, str) else None
         dismissed = state.get("dismissed_version")
-        avail = bool(latest and is_newer(latest.lstrip("v"), current)
+        avail = bool(latest and is_newer(latest, current)
                      and dismissed != latest)
         return {"current": current, "latest": latest,
                 "update_available": avail, "checked_now": False,
@@ -192,14 +270,17 @@ def check_for_updates(force: bool = False,
 
     latest = fetch_latest_version(timeout=timeout, urlopen=urlopen)
     reachable = latest is not None or _http_reachable(urlopen)
-    state["last_check_ts"] = now
-    if latest:
-        state["latest_known"] = latest
-    save_state(state, state_file)
+    # Merge under the file lock so a concurrent tray/CLI dismiss is preserved.
+    def _merge(state):
+        state["last_check_ts"] = now
+        if latest:
+            state["latest_known"] = latest
+        return state
+    state = update_update_state(_merge, state_file)
 
     known = latest or (cached_latest if isinstance(cached_latest, str) else None)
     dismissed = state.get("dismissed_version")
-    avail = bool(known and is_newer(known.lstrip("v"), current)
+    avail = bool(known and is_newer(known, current)
                  and dismissed != known)
     return {"current": current, "latest": known,
             "update_available": avail, "checked_now": latest is not None,
@@ -207,17 +288,18 @@ def check_for_updates(force: bool = False,
 
 
 def dismiss_version(tag: str, state_file: Path = STATE_FILE) -> None:
-    state = load_state(state_file)
-    state["dismissed_version"] = tag
-    save_state(state, state_file)
+    def _dismiss(state):
+        state["dismissed_version"] = tag
+        return state
+    update_update_state(_dismiss, state_file)
 
 
 def undismiss(state_file: Path = STATE_FILE) -> None:
     """Clear a dismissal (e.g. after a failed update) so the badge returns."""
-    state = load_state(state_file)
-    if "dismissed_version" in state:
-        del state["dismissed_version"]
-        save_state(state, state_file)
+    def _undismiss(state):
+        state.pop("dismissed_version", None)
+        return state
+    update_update_state(_undismiss, state_file)
 
 
 def admin_status(run: Callable = subprocess.run) -> str:
@@ -253,10 +335,96 @@ def admin_status(run: Callable = subprocess.run) -> str:
 
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
 
-MANUAL_UPDATE_INSTRUCTIONS = (
-    "Ask an administrator to run this in a terminal:\n"
-    f"  curl -sSL {INSTALL_URL} | bash -s -- --update"
-)
+
+def install_script_url(tag: Optional[str] = None) -> str:
+    """Return the install.sh URL pinned to a release tag.
+
+    Falls back to ``main`` only when no valid tag is known (e.g. a repo with
+    no releases yet); callers should pass a discovered ``vX.Y.Z`` tag.
+    """
+    ref = (tag or "").strip()
+    if not is_valid_tag(ref):
+        ref = "main"
+    return f"https://raw.githubusercontent.com/{REPO}/{ref}/install.sh"
+
+
+def install_script_sha256_url(tag: Optional[str] = None) -> str:
+    """Release-asset URL for the install.sh checksum (published by CI)."""
+    ref = (tag or "").strip()
+    if not is_valid_tag(ref):
+        return ""
+    return f"https://github.com/{REPO}/releases/download/{ref}/install.sh.sha256"
+
+
+def _pinned_ref() -> str:
+    """Best-known release tag from cached update state, else ``main``."""
+    try:
+        tag = load_state().get("latest_known")
+    except Exception:
+        tag = None
+    return tag if isinstance(tag, str) and is_valid_tag(tag) else "main"
+
+
+def _download_verify_run(url: str, extra_args: str,
+                         sha_url: Optional[str] = None) -> str:
+    """Shell snippet: download (fail on HTTP error), verify, then run.
+
+    The download never pipes straight into a shell: it is written to a temp
+    file, the published ``install.sh.sha256`` release asset is verified when
+    available, and only then executed with ``bash``. Privileged steps inside
+    install.sh elevate individually, so the updater itself must not run as
+    root (that would break the user-level pip/systemd steps).
+    """
+    q_url = shlex.quote(url)
+    q_sha = shlex.quote(sha_url or "")
+    verify = (
+        f'if [ -n {q_sha} ] && curl -fL --proto "=https" -o "$tmp.sha256" {q_sha} 2>/dev/null; then '
+        '  expected="$(cut -d " " -f1 "$tmp.sha256" | head -n1)"; '
+        '  actual="$(sha256sum "$tmp" | cut -d " " -f1)"; '
+        '  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then '
+        '    echo "install.sh checksum verification FAILED" >&2; '
+        '    rm -f "$tmp" "$tmp.sha256"; ok=0; '
+        '  else '
+        '    echo "Verified install.sh checksum."; '
+        '  fi; '
+        'else '
+        '  echo "WARNING: no checksum available for install.sh; proceeding unverified." >&2; '
+        'fi; '
+    )
+    return (
+        'tmp="$(mktemp)"; '
+        'ok=1; '
+        'rc=1; '
+        f'if [ -z "$tmp" ] || ! curl -fL --proto "=https" -o "$tmp" {q_url}; then '
+        '  echo "Failed to download install.sh" >&2; rm -f "$tmp"; ok=0; fi; '
+        'if [ "$ok" = 1 ]; then '
+        + verify +
+        '  if [ "$ok" = 1 ]; then '
+        f'    bash "$tmp" {extra_args}; rc=$?; '
+        '  fi; '
+        'fi; '
+        'rm -f "$tmp" "$tmp.sha256"'
+    )
+
+
+def manual_update_instructions(tag: Optional[str] = None) -> str:
+    """Checksum-verified, no-pipe update command for an administrator."""
+    ref = tag or _pinned_ref()
+    q_url = shlex.quote(install_script_url(ref))
+    q_sha = shlex.quote(install_script_sha256_url(ref))
+    return (
+        "Ask an administrator to run this in a terminal:\n"
+        "  tmp=\"$(mktemp /tmp/gigamate-install.XXXXXX.sh)\"\n"
+        f"  curl -fL --proto \"=https\" --max-time 60 {q_url} -o \"$tmp\" || "
+        "{ echo 'download failed'; rm -f \"$tmp\"; exit 1; }\n"
+        f"  if curl -fL --proto \"=https\" --max-time 30 {q_sha} -o \"$tmp.sha256\" 2>/dev/null; then\n"
+        "    [ \"$(sha256sum \"$tmp\" | cut -d' ' -f1)\" = "
+        "\"$(cut -d' ' -f1 \"$tmp.sha256\")\" ] || "
+        "{ echo 'install.sh checksum FAILED'; exit 1; }\n"
+        "  else echo 'WARNING: no checksum available; proceeding unverified'; fi\n"
+        f"  bash \"$tmp\" --update --tag {shlex.quote(ref)}"
+    )
+
 
 
 def _capture_stdout(argv: list, timeout: int = 10,
@@ -393,7 +561,8 @@ def build_terminal_update_command(
         desktop: str = "",
         which: Callable[[str], Optional[str]] = shutil.which,
         detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
-        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+        env: Optional[Mapping[str, str]] = None,
+        tag: Optional[str] = None) -> Optional[list]:
     """Argv opening the user's terminal running the update, else None.
 
     Prefers the desktop's configured default terminal (KDE/GNOME/$TERMINAL/
@@ -401,8 +570,11 @@ def build_terminal_update_command(
     emulators. The update runs inside with the shell kept afterwards so
     output stays visible.
     """
-    inner = (f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes;"
-             f" exec bash")
+    ref = tag or _pinned_ref()
+    snippet = _download_verify_run(
+        install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
+        sha_url=install_script_sha256_url(ref) or None)
+    inner = f"{snippet}; exec bash"
     detect_fn = detect if detect is not None else (
         lambda: _default_detect(env, which))
     try:
@@ -461,14 +633,16 @@ def menu_item_label(update_available: bool) -> str:
     return "Update available" if update_available else "Check for updates"
 
 
-def build_update_command(log_file: Path = UPDATE_LOG_FILE) -> list:
+def build_update_command(log_file: Path = UPDATE_LOG_FILE,
+                         tag: Optional[str] = None) -> list:
     """Argv the tray spawns in background to self-update non-interactively.
 
     Output goes to ``log_file`` so silent background failures stay
     diagnosable (the tray shows the path when the updater exits non-zero).
     """
-    # Piped through bash -s -- so it works without a local checkout;
-    # install.sh bootstraps the latest tag itself (see --update).
-    return ["bash", "-c",
-            f"curl -sSL {INSTALL_URL} | bash -s -- --update --yes"
-            f" >{shlex.quote(str(log_file))} 2>&1"]
+    ref = tag or _pinned_ref()
+    snippet = _download_verify_run(
+        install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
+        sha_url=install_script_sha256_url(ref) or None)
+    log_q = shlex.quote(str(log_file))
+    return ["bash", "-c", f"{{ {snippet}; exit $rc; }} >{log_q} 2>&1"]

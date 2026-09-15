@@ -1,11 +1,30 @@
-# GigaMate — allow non-root USB control for Gigabyte keyboard RGB
-# All known Gigabyte vendor IDs: 0414 (primary), 1044 (secondary), 04D9 (third)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0666"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", ATTRS{idProduct}=="*", MODE="0666"
-SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="*", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", ATTRS{idProduct}=="*", MODE="0666"
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="*", MODE="0666"
+# GigaMate — keyboard RGB access.
+#
+# Access is granted to the *active session user* via systemd-logind's
+# "uaccess" tag (equivalent to an ACL for the logged-in seat) instead of
+# world-writable 0666. This keeps no-root usage working without exposing the
+# hardware to every local user/process.
+#
+# NOTE: this relies on systemd-logind (standard on Arch/Fedora/Debian/Ubuntu).
+# On systems without logind, grant access via a dedicated group instead.
+#
+# IMPORTANT: the ACL is applied by udev's "uaccess" builtin, which
+# 73-seat-late.rules only queues for devices whose TAG+="uaccess" is already
+# set *before* that file runs. Rules here are numbered 99- and therefore run
+# later, so we must queue the builtin ourselves — tagging alone is not enough
+# and silently leaves the device inaccessible (USBError: Access denied).
 
-# AMD SmartShift bias control (non-root access for dGPU power tuning)
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", ATTR{smartshift_bias}!="", MODE="0666"
+# Primary Gigabyte keyboard controller.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+
+# Shared/generic USB vendors historically used by Gigabyte keyboards.
+# Restrict Holtek (04D9) to prevent keystroke sniffing on arbitrary external mice/keyboards.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", MODE="0660", GROUP="plugdev", TAG+="uaccess", RUN{builtin}+="uaccess"
+
+# Battery charge limit and ACPI platform attributes
+SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}!="", RUN+="/bin/chmod 0666 $sys$devpath/charge_control_end_threshold"
+SUBSYSTEM=="platform", DRIVER=="gigamate_acpi", RUN+="/bin/chmod 0666 /sys/devices/platform/gigamate_acpi/profile /sys/devices/platform/gigamate_acpi/charge_limit"

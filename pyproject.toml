@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gigamate"
-version = "2.0.8"
+dynamic = ["version"]
 description = "GigaMate — Gigabyte laptop management for Linux"
 readme = "README.md"
 license = {text = "MIT"}
@@ -29,11 +29,13 @@ dependencies = [
     # evdev 2.x needs Python >=3.11; 1.9.x covers 3.8+ (idle.py only
     # needs it optionally, so any 1.9+ API is fine).
     "evdev>=1.9",
+    "PyQt6>=6.4",
 ]
 
 [project.scripts]
 gigamate = "gigamate.cli:main"
 gigamate-tray = "gigamate.tray:main"
+gigamate-center = "gigamate.ui:run_gui"
 # Legacy backward-compat aliases:
 gigabyte-rgb = "gigamate.cli:main"
 gigabyte-rgb-tray = "gigamate.tray:main"
@@ -45,6 +47,9 @@ Repository = "https://github.com/goodeesh/GigaMate"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "gigamate.__version__"}
 
 [tool.setuptools.package-data]
 gigamate = ["profile_data/*.json"]

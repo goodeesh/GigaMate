@@ -88,17 +88,19 @@ def test_set_timeout_clamps_and_resets_idle():
 
 
 def test_idle_step_values():
-    assert [s for s, _ in IDLE_TIMEOUT_STEPS] == [0, 10, 30, 60, 120]
+    assert [s for s, _ in IDLE_TIMEOUT_STEPS] == [0, 10, 30, 60, 120, 300, 900]
     assert IDLE_STEP_OFF == 0
     assert idle_step_label(0) == "Off"
     assert idle_step_label(10) == "10 seconds"
     assert idle_step_label(60) == "1 minute"
+    assert idle_step_label(900) == "15 minutes"
 
 
 def test_nearest_idle_step():
     assert nearest_idle_step(10) == 10
     assert nearest_idle_step(30) == 30
-    assert nearest_idle_step(300) == 120  # legacy 5m maps to nearest
+    assert nearest_idle_step(300) == 300
+    assert nearest_idle_step(200) == 120  # legacy 3m20s maps to nearest
     assert nearest_idle_step(45) == 30  # tie prefers smaller
     assert nearest_idle_step(50) == 60
 

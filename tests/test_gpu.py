@@ -1,5 +1,7 @@
 """Tests for the discrete GPU power state monitor (gpu.py)."""
 
+from unittest.mock import patch
+
 from gigamate.gpu import (
     GpuState,
     NvidiaGpuMonitor,
@@ -266,11 +268,11 @@ class TestGetGpuState:
 
 
 class TestCmdGpuStatus:
-    def test_no_gpu_prints_nothing(self, capsys, monkeypatch):
+    def test_no_gpu_prints_integrated_message(self, capsys, monkeypatch):
         monkeypatch.setattr(cli_module, "get_gpu_state", lambda: GpuState(present=False))
         cmd_gpu_status(None)
         out = capsys.readouterr().out
-        assert out == ""
+        assert "No discrete GPU detected" in out
 
     def test_gpu_present_prints_state(self, capsys, monkeypatch):
         state = GpuState(present=True, status="suspended", power_state="D3cold")
@@ -340,8 +342,10 @@ class TestDynamicBoost:
         proc.mkdir(parents=True)
 
         mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
-        # Without service unit or proc support, returns false
-        assert mon._check_dynamic_boost_supported() is False or True  # Depends on host system files
+        # No /proc power file and no service unit/binary anywhere → unsupported.
+        with patch("pathlib.Path.is_file", return_value=False), \
+             patch("pathlib.Path.exists", return_value=False):
+            assert mon._check_dynamic_boost_supported() is False
 
     def test_sync_power_nvidia_gaming_starts_powerd(self, tmp_path, monkeypatch):
         root = _nvidia_gpu(tmp_path)
@@ -409,3 +413,24 @@ class TestAmdSmartShift:
         assert mon.sync_power(0) is True
         bias_file = mon._device / "smartshift_bias"
         assert bias_file.read_text().strip() == "-50"
+
+    def test_amd_3d_controller_without_boot_vga(self, tmp_path):
+        root = tmp_path / "pci"
+        dev = root / "0000:03:00.0"
+        dev.mkdir(parents=True)
+        (dev / "vendor").write_text("0x1002\n")
+        (dev / "class").write_text("0x030200\n")
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        gpu, vendor = mon._find_device()
+        assert gpu == dev
+        assert vendor == "amd"
+
+    def test_dynamic_boost_unsupported_proc_file(self, tmp_path):
+        root = _nvidia_gpu(tmp_path)
+        proc = tmp_path / "proc_nvidia"
+        gpu_power = proc / "gpus" / "0000:01:00.0" / "power"
+        gpu_power.parent.mkdir(parents=True)
+        gpu_power.write_text("Notebook Dynamic Boost:     Not Supported\n")
+        mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
+        mon.detect()
+        assert mon._check_dynamic_boost_supported() is False

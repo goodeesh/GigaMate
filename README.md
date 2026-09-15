@@ -19,6 +19,9 @@ Known risks:
 - Certain animated keyboard effects can hang the keyboard firmware
   (requires USB reset to recover). Only `static` mode is safe.
 - ACPI profile switching adjusts CPU/GPU power limits.
+- To allow control without root, the kernel module exposes `profile` and
+  `charge_limit` (and the udev rules expose the keyboard) as world-writable
+  (`0666`). Any local user on the machine can therefore change these settings.
 
 Tested on specific Gigabyte models only. Other models may behave differently.
 
@@ -36,42 +39,48 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 
 ## Features
 
-- **Keyboard RGB** — Set colour and brightness from tray or CLI
-- **Temperature monitoring** — CPU and system temperatures
-- **Fan monitoring** — RPM and duty cycle readback
-- **Power profiles** — Switch between Quiet/Balanced/Performance/Gaming
-- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles
-- **On-Screen Display (OSD)** — Native KDE Plasma OSD overlay & universal desktop notifications
-- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon` (`power-saver`, `balanced`, `performance`)
-- **dGPU monitoring** — Discrete NVIDIA GPU asleep/awake state (read-only sysfs; never wakes the GPU)
-- **System tray app** — All controls in one place, live status updates
-- **Community model profiles** — Add your laptop model without coding
+- **🖥️ GigaMate Center** — Dedicated desktop control panel (PyQt6) engineered for KDE Plasma, GNOME, and Hyprland
+- **🔋 Battery Care & Limiter** — Set max 80% (or custom) charge limit to protect battery longevity; health & cycle monitoring
+- **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile, RGB and battery limit on resume
+- **🔁 Persistent Settings** — Fan profile, RGB and charge limit are safely re-applied on login, app launch and resume
+- **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
+- **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
+- **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
+- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles with native KDE Plasma OSD overlay
+- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
+- **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
 
 ---
 
 ## Usage
 
-### System tray app
+### GigaMate Center (GUI)
 
-The tray icon shows colour, brightness, power profile, and live status:
-
+Launch from your desktop application launcher or via command line:
+```sh
+gigamate center       # or click "GigaMate Center..." in the tray menu
 ```
-Colour → 11+ colours depending on your model
-Brightness → Off / Dim / Full
+
+### System Tray App
+
+The tray icon provides instant status and quick actions:
+```
+GigaMate Center...
+Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
-Status → CPU: 56°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep
-Sync system power profile
-Apply on startup
-Reload profiles
+Battery: 85% (AC)  [x] Battery Care (Cap at 80%)
+Colour / Brightness / Backlight idle off
 ```
 
 ### CLI
 
 ```sh
+gigamate center                  # Launch modern GUI Control Panel
+gigamate battery                 # Show battery status, health, and limit
+gigamate battery --limit 80      # Set maximum battery charge limit to 80%
 gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
-gigamate rgb detect              # Scan for keyboards
-gigamate rgb calibrate           # Interactive RGB calibration
+gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
 gigamate status                  # Full hardware status
 gigamate gpu status              # Show discrete GPU power state
 gigamate profile                 # Show current power profile
@@ -135,6 +144,33 @@ for per-distro manual steps.
 
 Settings migrate automatically from `~/.config/gigabyte-keyboard-rgb/` on first run.
 
+### Upgrading from 2.0.x
+
+Your existing keyboard/startup/idle settings are kept. GigaMate 3.0 adds GigaMate
+Center, battery care and suspend/resume handling; the new features are **opt-in**
+and configured on first launch of the Center (you can re-run setup any time from
+Settings → *Run Setup Again*). The first update hop is performed by the old 2.0.x
+updater (`curl … install.sh | bash`), which is not checksum-verified; subsequent
+updates use the pinned, checksum-verified updater. GigaMate Center requires
+PyQt6 (installed automatically; on older distros it may come from pip).
+
+---
+
+## First-run setup
+
+On first launch, GigaMate Center runs a short setup wizard. Nothing on your
+hardware is changed until you choose it:
+
+- Keyboard colour/brightness and whether to apply it at startup
+- Idle backlight auto-off
+- Battery charge limit (only where supported)
+- System power-profile sync (only on supported Gigabyte laptops)
+
+Unsupported hardware (non-Gigabyte, no kernel module, no compatible keyboard,
+or no battery limit) is clearly reported and the corresponding options are
+skipped. Existing 2.0.x users get an "upgrade" variant that keeps their current
+keyboard/idle settings and additionally offers the new features.
+
 ---
 
 ## How It Works
@@ -183,7 +219,7 @@ GigaMate/
 ├── src/gigamate_acpi/        # Kernel module source
 ├── data/                     # Service, udev, icon, desktop
 ├── docs/                     # Research notes + profile schema
-├── tests/                    # 100+ unit tests
+├── tests/                    # 240+ unit tests
 ├── install.sh / uninstall.sh
 ├── README.md / CONTRIBUTING.md
 └── pyproject.toml / LICENSE

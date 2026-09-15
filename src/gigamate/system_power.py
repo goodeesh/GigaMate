@@ -196,7 +196,10 @@ class SystemPowerManager:
         Returns:
             True if applied successfully, False otherwise.
         """
-        target = self._profile_map.get(int(fan_profile_id))
+        try:
+            target = self._profile_map.get(int(fan_profile_id))
+        except (TypeError, ValueError):
+            return False
         if not target:
             return False
         return self.set_system_profile(target)

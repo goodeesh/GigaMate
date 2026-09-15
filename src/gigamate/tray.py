@@ -18,8 +18,17 @@ from typing import Optional, Dict, List
 import gi
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("AppIndicator3", "0.1")
-from gi.repository import Gtk, GLib, AppIndicator3
+from gi.repository import Gtk, GLib, Gio
+
+try:
+    gi.require_version("AppIndicator3", "0.1")
+    from gi.repository import AppIndicator3
+except Exception:
+    try:
+        gi.require_version("AyatanaAppIndicator3", "0.1")
+        from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+    except Exception:  # missing typelib — degrade to no tray indicator
+        AppIndicator3 = None
 
 from pathlib import Path
 
@@ -28,13 +37,13 @@ from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
     get_dmi_product_name,
 )
-from .config import load as load_config, save as save_config
+from .config import CONFIG_FILE, load as load_config, update_config
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
 from .hotkeys import HotkeyListener
 from .gpu import gpu_icon_key
-from .paths import ICON_PATHS
+from .paths import ICON_PATHS, get_runtime_ipc_paths
 from .idle import (
     DEFAULT_TIMEOUT_SEC,
     IDLE_STEP_OFF,
@@ -48,7 +57,15 @@ from .idle import (
 from .osd import show_profile_osd
 from .system_power import sync_system_power, is_system_power_available
 from .gpu import get_gpu_state, gpu_short_status_text
+import subprocess
+import shutil
+import logging
+from .battery import get_battery_manager
+from .sleep_handler import get_sleep_handler
+from .hardware import apply_hardware_settings
 from . import updates as update_checker
+
+logger = logging.getLogger(__name__)
 
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
@@ -72,12 +89,13 @@ class GigaMateTrayApp:
         self._config = load_config()
         self._indicator: Optional[AppIndicator3.Indicator] = None
         self._menu: Optional[Gtk.Menu] = None
-        self._icon_key = "gigamate"
+        self._icon_key: Optional[str] = None
 
         # Keyboard state
         self._profile: Optional[DeviceProfile] = None
         self._unsupported = False
         self._no_keyboard = False
+        self._keyboard_retry_timer_id: Optional[int] = None
         self._detected_vid: Optional[int] = None
         self._detected_pid: Optional[int] = None
 
@@ -87,9 +105,11 @@ class GigaMateTrayApp:
         self._current_colour = self._config.get("colour", "light_purple")
         self._current_brightness = self._config.get("brightness", 2)
         self._startup_item: Optional[Gtk.CheckMenuItem] = None
-        self._startup_apply = self._config.get("startup_apply", True)
-        self._sync_system_power = self._config.get("sync_system_power", True)
+        self._startup_apply = self._config.get("startup_apply", False)
+        self._sync_system_power = self._config.get("sync_system_power", False)
         self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
+        self._battery_care_item: Optional[Gtk.CheckMenuItem] = None
+        self._battery_dirty = False
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
@@ -103,7 +123,7 @@ class GigaMateTrayApp:
         self._hotkey_listener: Optional[HotkeyListener] = None
 
         # Keyboard idle auto-off state
-        self._idle_enabled = bool(self._config.get("idle_off_enabled", True))
+        self._idle_enabled = bool(self._config.get("idle_off_enabled", False))
         self._idle_timeout = clamp_timeout(
             self._config.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC))
         self._idle_dimmed = False
@@ -111,6 +131,7 @@ class GigaMateTrayApp:
         self._idle_fallback_timer_id: Optional[int] = None
         self._idle_parent_item: Optional[Gtk.MenuItem] = None
         self._idle_timeout_items: Dict[int, Gtk.RadioMenuItem] = {}
+        self._idle_lock = threading.RLock()
 
         # Menu item references (for updating)
         self._reload_item: Optional[Gtk.MenuItem] = None
@@ -128,6 +149,10 @@ class GigaMateTrayApp:
         self._building = False
         self._apply_on_startup()
         self._init_idle()
+        self._init_sleep_handler()
+        self._last_config_mtime = self._get_config_mtime()
+        self._config_monitor = None
+        self._init_config_monitor()
         self._start_status_polling()
         self._init_update_check()
 
@@ -179,13 +204,104 @@ class GigaMateTrayApp:
         )
         self._hotkey_listener.start()
 
+    def _get_config_mtime(self) -> float:
+        try:
+            return CONFIG_FILE.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _init_config_monitor(self) -> None:
+        """Watch config.json via Gio FileMonitor so changes from Center/CLI sync instantly."""
+        try:
+            gfile = Gio.File.new_for_path(str(CONFIG_FILE))
+            self._config_monitor = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+            self._config_monitor.connect("changed", self._on_config_file_event)
+        except Exception:
+            self._config_monitor = None
+
+    def _on_config_file_event(self, _monitor, _file, _other_file, event_type) -> None:
+        if event_type in (
+            Gio.FileMonitorEvent.CHANGED,
+            Gio.FileMonitorEvent.CHANGES_DONE_HINT,
+            Gio.FileMonitorEvent.CREATED,
+        ):
+            self._sync_from_external_config()
+
+    def _sync_from_external_config(self) -> None:
+        """Reload configuration when changed externally by GigaMate Center or CLI."""
+        mtime = self._get_config_mtime()
+        if mtime <= getattr(self, "_last_config_mtime", 0.0):
+            return
+        self._last_config_mtime = mtime
+
+        new_cfg = load_config()
+        self._config = new_cfg
+
+        new_colour = new_cfg.get("colour")
+        new_bright = new_cfg.get("brightness")
+        new_profile = new_cfg.get("acpi_profile")
+        new_idle_off = new_cfg.get("idle_off_enabled", False)
+        new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
+        new_startup = new_cfg.get("startup_apply", False)
+        new_sync_power = new_cfg.get("sync_system_power", False)
+        new_limit = new_cfg.get("charge_limit", 80)
+        new_limit_enabled = new_cfg.get("charge_limit_enabled", False)
+
+        old_building = self._building
+        self._building = True
+        try:
+            if new_colour and new_colour != self._current_colour:
+                self._current_colour = new_colour
+                if new_colour in self._colour_items:
+                    self._colour_items[new_colour].set_active(True)
+
+            if new_bright is not None and new_bright != self._current_brightness:
+                self._current_brightness = new_bright
+                if new_bright in self._brightness_items:
+                    self._brightness_items[new_bright].set_active(True)
+
+            if new_profile is not None and new_profile != self._current_acpi_profile:
+                self._current_acpi_profile = new_profile
+                if new_profile in self._profile_items:
+                    self._profile_items[new_profile].set_active(True)
+
+            if (new_idle_off != self._idle_enabled) or (new_idle_sec != self._idle_timeout):
+                self._idle_enabled = new_idle_off
+                self._idle_timeout = clamp_timeout(new_idle_sec)
+                self._update_idle_parent_label()
+                eff = self._idle_effective_step()
+                if eff in self._idle_timeout_items:
+                    self._idle_timeout_items[eff].set_active(True)
+                self._init_idle()
+
+            if new_startup != self._startup_apply:
+                self._startup_apply = new_startup
+                if self._startup_item is not None:
+                    self._startup_item.set_active(new_startup)
+
+            if new_sync_power != self._sync_system_power:
+                self._sync_system_power = new_sync_power
+                if self._sync_power_item is not None:
+                    self._sync_power_item.set_active(new_sync_power)
+
+            if getattr(self, "_battery_care_item", None) is not None:
+                self._battery_care_item.set_label(f"Battery Care (Cap at {new_limit}%)")
+                self._battery_care_item.set_active(new_limit_enabled and 40 <= new_limit < 100)
+            self._battery_cap_limit = new_limit
+        finally:
+            self._building = old_building
+
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
     # ────────────────────────────────────────────
 
     def _init_idle(self) -> None:
         """Start event-driven idle monitoring (evdev) or D-Bus fallback."""
-        self._stop_idle()
+        with self._idle_lock:
+            self._init_idle_locked()
+
+    def _init_idle_locked(self) -> None:
+        self._stop_idle_locked()
         self._idle_dimmed = False
         if not self._idle_enabled:
             return
@@ -210,6 +326,10 @@ class GigaMateTrayApp:
             )
 
     def _stop_idle(self) -> None:
+        with self._idle_lock:
+            self._stop_idle_locked()
+
+    def _stop_idle_locked(self) -> None:
         if self._idle_monitor is not None:
             try:
                 self._idle_monitor.stop()
@@ -249,6 +369,7 @@ class GigaMateTrayApp:
         if dev is None:
             return
         try:
+            self._sync_from_external_config()
             set_static(dev, self._current_colour,
                        self._current_brightness, self._profile)
         except Exception:
@@ -359,19 +480,159 @@ class GigaMateTrayApp:
         if self._menu is not None:
             self._menu.show_all()
 
+        if AppIndicator3 is None:
+            # No AppIndicator typelib: the daemon still runs (hotkeys, sleep,
+            # config monitoring) but cannot show a tray icon.
+            logger.warning("AppIndicator3 not available; running without a tray icon.")
+            return
+
         if self._indicator is None:
-            self._indicator = AppIndicator3.Indicator.new(
+            icon_dir = str(Path(APP_ICON_PATH).parent)
+            self._indicator = AppIndicator3.Indicator.new_with_path(
                 APP_ID,
                 APP_ICON_PATH,
                 AppIndicator3.IndicatorCategory.HARDWARE,
+                icon_dir,
             )
             self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self._indicator.set_menu(self._menu)
+        self._refresh_tray_icon()
+
+    def _init_sleep_handler(self) -> None:
+        """Initialize clean state handling before suspend and after wake."""
+        try:
+            handler = get_sleep_handler()
+            # Pause idle monitoring across suspend and restart it on resume so
+            # the backlight state stays consistent with apply_hardware_settings.
+            handler.set_hooks(self._on_suspend_hook, self._on_resume_hook)
+            handler.start_listening()
+        except Exception:
+            pass
+
+    def _on_suspend_hook(self) -> None:
+        """Called before the machine sleeps."""
+        self._stop_idle()
+
+    def _on_resume_hook(self) -> None:
+        """Called after the machine wakes."""
+        # If the backlight was idle-dimmed before suspend, restore it first;
+        # _init_idle() would otherwise clear the flag and leave it dark.
+        if self._idle_dimmed:
+            self._on_idle_active()
+        self._init_idle()
+
+    def _append_center_item(self) -> None:
+        """Add launcher item for GigaMate Center GUI."""
+        item = Gtk.MenuItem(label="GigaMate Center...")
+        item.connect("activate", self._on_open_center)
+        self._menu.append(item)
+        self._menu.append(Gtk.SeparatorMenuItem())
+
+    def _on_open_center(self, _widget) -> None:
+        sock_path = get_runtime_ipc_paths()[0]
+
+        # 1. Try activating existing instance via Unix socket directly (0ms latency, 0 new processes)
+        try:
+            import socket as py_socket
+            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                s.settimeout(0.8)
+                s.connect(sock_path)
+                s.sendall(b"ACTIVATE\n")
+                return
+        except Exception:
+            pass
+
+        # 2. Not running: launch primary instance detached
+        try:
+            subprocess.Popen(["gigamate", "center"], start_new_session=True)
+        except Exception:
+            pass
+
+    def _on_run_setup(self, *_widget) -> None:
+        """Open GigaMate Center's setup wizard (works even if already onboarded)."""
+        sock_path = get_runtime_ipc_paths()[0]
+        try:
+            import socket as py_socket
+            if os.path.exists(sock_path):
+                with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                    s.settimeout(0.8)
+                    s.connect(sock_path)
+                    s.sendall(b"SETUP\n")
+                    return
+        except Exception:
+            pass
+        try:
+            env = dict(os.environ)
+            env["GIGAMATE_FORCE_SETUP"] = "1"
+            subprocess.Popen(["gigamate", "center"], env=env, start_new_session=True)
+        except Exception:
+            pass
+
+    def _append_battery_section(self) -> None:
+        """Add battery info and charge limit toggle."""
+        mgr = get_battery_manager()
+        if not mgr.is_available:
+            return
+
+        self._menu.append(Gtk.SeparatorMenuItem())
+        info = mgr.get_battery_info()
+        ac_str = "AC" if info.ac_online else "Battery"
+        bat_header = Gtk.MenuItem(label=f"Battery: {info.capacity}% ({ac_str})")
+        bat_header.set_sensitive(False)
+        self._menu.append(bat_header)
+
+        if mgr.is_charge_limit_supported():
+            limit_enabled = self._config.get("charge_limit_enabled", False)
+            try:
+                limit = int(self._config.get("charge_limit", 80))
+            except (TypeError, ValueError):
+                limit = 80
+            if not (40 <= limit <= 100):
+                limit = 80
+            # Any limit below 100% counts as an active cap, not just 80%.
+            cap_active = bool(limit_enabled) and limit < 100
+            chk_limit = Gtk.CheckMenuItem(label=f"Battery Care (Cap at {limit}%)")
+            chk_limit.set_active(cap_active)
+            chk_limit.connect("toggled", self._on_toggle_battery_care)
+            self._battery_cap_limit = limit
+            self._battery_care_item = chk_limit
+            self._menu.append(chk_limit)
+
+    def _on_toggle_battery_care(self, widget: Gtk.CheckMenuItem) -> None:
+        if self._building:
+            return
+        mgr = get_battery_manager()
+        if widget.get_active():
+            cap = getattr(self, "_battery_cap_limit", 80)
+            target = cap if 40 <= cap < 100 else 80
+        else:
+            target = 100
+        try:
+            ok = mgr.set_charge_limit(target)
+        except Exception:
+            ok = False
+
+        if ok:
+            if widget.get_active():
+                self._config["charge_limit"] = target
+            self._config["charge_limit_enabled"] = widget.get_active()
+            self._battery_dirty = True
+            self._save_config()
+        else:
+            # Revert the checkbox without re-entering this handler.
+            self._building = True
+            try:
+                widget.set_active(not widget.get_active())
+            finally:
+                self._building = False
 
     def _build_no_hardware_menu(self) -> None:
         """Menu when no Gigabyte hardware is detected at all."""
+        self._append_center_item()
         item = Gtk.MenuItem(label="No Gigabyte hardware detected")
         item.set_sensitive(False)
+        self._menu.append(item)
+        self._append_battery_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -380,6 +641,7 @@ class GigaMateTrayApp:
 
     def _build_acpi_only_menu(self) -> None:
         """Menu when ACPI is available but keyboard is not found."""
+        self._append_center_item()
         dmi_model = get_dmi_product_name()
         if dmi_model:
             header = Gtk.MenuItem(label=dmi_model)
@@ -388,6 +650,7 @@ class GigaMateTrayApp:
 
         self._append_status_section()
         self._append_power_profile_section()
+        self._append_battery_section()
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
         self._menu.append(Gtk.SeparatorMenuItem())
@@ -396,6 +659,7 @@ class GigaMateTrayApp:
 
     def _build_unsupported_menu(self) -> None:
         """Menu when keyboard is found but not in the profile database."""
+        self._append_center_item()
         vid = self._detected_vid or 0
         pid = self._detected_pid or 0
         dmi_model = get_dmi_product_name()
@@ -415,6 +679,7 @@ class GigaMateTrayApp:
         if self._acpi_controller is not None:
             self._append_power_profile_section()
             self._append_status_section()
+            self._append_battery_section()
 
         self._menu.append(Gtk.SeparatorMenuItem())
         self._append_settings_items()
@@ -424,11 +689,17 @@ class GigaMateTrayApp:
 
     def _build_supported_menu(self) -> None:
         """Full menu: Status on top, then Profiles, then Colours, Brightness."""
+        # ── Open GigaMate Center ──
+        self._append_center_item()
+
         # ── Live Status section (ACPI) — always on top ──
         self._append_status_section()
 
         # ── Power Profile section (ACPI) ──
         self._append_power_profile_section()
+
+        # ── Battery Care section ──
+        self._append_battery_section()
 
         # ── Keyboard RGB section ──
         if self._profile is not None and self._profile.has_rgb:
@@ -547,6 +818,17 @@ class GigaMateTrayApp:
         reload_item = Gtk.MenuItem(label="Reload profiles")
         reload_item.connect("activate", self._on_reload)
         self._menu.append(reload_item)
+
+        setup_item = Gtk.MenuItem(label="Set up GigaMate…")
+        setup_item.connect("activate", self._on_run_setup)
+        self._menu.append(setup_item)
+
+        # Offer calibration whenever a keyboard controller was detected but may
+        # not yet be mapped (or to re-calibrate an existing model).
+        if self._detected_vid is not None:
+            calib_item = Gtk.MenuItem(label="Calibrate keyboard...")
+            calib_item.connect("activate", self._on_calibrate_rgb)
+            self._menu.append(calib_item)
 
         check_item = Gtk.MenuItem(
             label=update_checker.menu_item_label(self._update_available))
@@ -669,14 +951,15 @@ class GigaMateTrayApp:
         noadmin.format_secondary_text(
             "Updating drivers needs sudo, which is not available "
             f"for your user (status: {admin}).\n\n"
-            f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
+            f"{update_checker.manual_update_instructions()}")
         noadmin.run()
         noadmin.destroy()
 
     def _run_update_in_terminal(self) -> None:
         """Stock-system path: normal terminal runs the curl update."""
         argv = update_checker.build_terminal_update_command(
-            desktop=os.environ.get("XDG_CURRENT_DESKTOP", ""))
+            desktop=os.environ.get("XDG_CURRENT_DESKTOP", ""),
+            tag=self._latest_version)
         if argv is None:
             self._show_no_admin_dialog("no-terminal")
             return
@@ -707,7 +990,7 @@ class GigaMateTrayApp:
             update_checker.dismiss_version(self._latest_version)
         try:
             pid, _, _, _ = GLib.spawn_async(
-                update_checker.build_update_command(),
+                update_checker.build_update_command(tag=self._latest_version),
                 flags=(GLib.SpawnFlags.SEARCH_PATH
                        | GLib.SpawnFlags.DO_NOT_REAP_CHILD))
             GLib.child_watch_add(pid, self._on_update_done)
@@ -746,17 +1029,26 @@ class GigaMateTrayApp:
         )
         dlg.format_secondary_text(
             f"{detail}\n\nLog: {update_checker.UPDATE_LOG_FILE}\n\n"
-            f"{update_checker.MANUAL_UPDATE_INSTRUCTIONS}")
+            f"{update_checker.manual_update_instructions()}")
         dlg.run()
         dlg.destroy()
 
     def _on_check_updates_clicked(self, *args) -> None:
-        """Manual 'Check for updates' — forced network check + result dialog."""
+        """Manual 'Check for updates' — forced network check off the main loop."""
+        threading.Thread(target=self._manual_update_check_bg, daemon=True).start()
+
+    def _manual_update_check_bg(self) -> None:
         try:
             result = update_checker.check_for_updates(force=True)
         except Exception:
             result = {"current": "?", "latest": None,
                       "update_available": False}
+        try:
+            GLib.idle_add(self._after_manual_update_check, result)
+        except Exception:
+            pass
+
+    def _after_manual_update_check(self, result: dict) -> bool:
         # Feed through the normal path so icon + menu refresh.
         try:
             self._on_update_result(result)
@@ -764,7 +1056,7 @@ class GigaMateTrayApp:
             pass
         if result.get("update_available"):
             self._on_update_clicked()
-            return
+            return False
         dlg = Gtk.MessageDialog(
             transient_for=None,
             flags=0,
@@ -782,6 +1074,7 @@ class GigaMateTrayApp:
         dlg.format_secondary_text(detail)
         dlg.run()
         dlg.destroy()
+        return False
 
     # ────────────────────────────────────────────
     # Status polling
@@ -789,42 +1082,40 @@ class GigaMateTrayApp:
 
     def _start_status_polling(self) -> None:
         """Start the periodic status update timer."""
-        acpi_ok = self._acpi_controller is not None and self._acpi_controller.available
-        gpu_present = get_gpu_state().present
-        if acpi_ok or gpu_present:
-            self._update_status()
-            self._status_timer_id = GLib.timeout_add(
-                STATUS_POLL_INTERVAL_MS, self._update_status
-            )
+        self._update_status()
+        self._status_timer_id = GLib.timeout_add(
+            STATUS_POLL_INTERVAL_MS, self._update_status
+        )
 
-    def _update_gpu_icon(self) -> None:
-        """Legacy alias: refresh combined dGPU + update badge icon."""
-        self._refresh_tray_icon()
-
-    def _tray_icon_key(self) -> str:
+    def _tray_icon_key(self, gpu=None) -> str:
         """Combine dGPU state with update badge into one of 6 icon keys."""
-        base = gpu_icon_key(get_gpu_state())
+        base = gpu_icon_key(gpu if gpu is not None else get_gpu_state())
         if self._update_available:
             return f"{base}-update" if base != "gigamate" else "gigamate-update"
         return base
 
-    def _refresh_tray_icon(self) -> None:
+    def _refresh_tray_icon(self, gpu=None) -> None:
         """Switch tray icon to match dGPU + update state (change-only)."""
-        key = self._tray_icon_key()
-        if key == self._icon_key:
+        key = self._tray_icon_key(gpu)
+        if key == self._icon_key and getattr(self, "_icon_applied", False):
             return
         self._icon_key = key
+        self._icon_applied = True
         if self._indicator is None:
             return
         try:
-            self._indicator.set_icon_full(
-                APP_ICON_PATHS.get(key, APP_ICON_PATH), f"GigaMate {key}")
+            icon_path = APP_ICON_PATHS.get(key, APP_ICON_PATH)
+            icon_dir = str(Path(icon_path).parent)
+            self._indicator.set_icon_theme_path(icon_dir)
+            self._indicator.set_icon_full(icon_path, f"GigaMate {key}")
         except Exception:
             pass
 
     def _update_status(self) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
-        self._refresh_tray_icon()
+        self._sync_from_external_config()
+        gpu = get_gpu_state()
+        self._refresh_tray_icon(gpu)
         if not self._status_items:
             return False
 
@@ -860,18 +1151,36 @@ class GigaMateTrayApp:
                     pname = entry.get("name", str(state.profile.value))
                     parts.append(f"Profile: {pname}")
 
-        # Discrete GPU state
-        gpu = get_gpu_state()
+        # Discrete GPU state (reuse the value fetched for the icon)
         if gpu.present:
             parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
 
+
+        # Battery status
+        try:
+            bat_info = get_battery_manager().get_battery_info()
+            if bat_info.present:
+                ac_str = "AC" if bat_info.ac_online else "Bat"
+                parts.append(f"Batt: {bat_info.capacity}% ({ac_str})")
+        except Exception:
+            pass
+
         text = "  |  ".join(parts) if parts else "Status: N/A"
 
-        for item in self._status_items:
-            try:
-                item.set_label(text)
-            except Exception:
-                pass
+        # Only touch GTK when the text actually changed (each set is a DBus
+        # property update / shell redraw).
+        if text != getattr(self, "_last_status_text", None):
+            self._last_status_text = text
+            for item in self._status_items:
+                try:
+                    item.set_label(text)
+                except Exception:
+                    pass
+            if self._indicator is not None:
+                try:
+                    self._indicator.set_title(f"GigaMate 3.0\n{text}")
+                except Exception:
+                    pass
 
         return True  # keep timer alive
 
@@ -907,10 +1216,13 @@ class GigaMateTrayApp:
                 self._indicator.set_label("No keyboard", APP_ID)
             except Exception:
                 pass
-        GLib.timeout_add(10000, self._retry_keyboard)
+        # Avoid stacking retry timers when _get_keyboard fails repeatedly.
+        if self._keyboard_retry_timer_id is None:
+            self._keyboard_retry_timer_id = GLib.timeout_add(10000, self._retry_keyboard)
 
     def _retry_keyboard(self) -> bool:
         """Try to re-detect keyboard. Returns False (single-shot timer)."""
+        self._keyboard_retry_timer_id = None
         detected = detect_device()
         if detected is not None:
             self._no_keyboard = False
@@ -955,13 +1267,6 @@ class GigaMateTrayApp:
             return
         self._current_brightness = level
         self._apply_colour()
-
-    def _on_unsupported_off(self, item: Gtk.RadioMenuItem) -> None:
-        if not item.get_active() or self._building:
-            return
-        dev = self._get_keyboard()
-        if dev is not None:
-            set_off(dev)
 
     # ────────────────────────────────────────────
     # Callbacks: ACPI / Power Profile
@@ -1047,32 +1352,66 @@ class GigaMateTrayApp:
 
     def _on_sync_power_toggled(self, item: Gtk.CheckMenuItem) -> None:
         """Handle toggle for syncing system-level power profile."""
+        if self._building:
+            return
         self._sync_system_power = item.get_active()
         self._save_config()
         if self._sync_system_power and self._current_acpi_profile is not None:
             sync_system_power(self._current_acpi_profile)
 
     def _on_startup_toggled(self, item: Gtk.CheckMenuItem) -> None:
+        if self._building:
+            return
         self._startup_apply = item.get_active()
         self._save_config()
 
     def _on_calibrate_rgb(self, *args) -> None:
         """Launch keyboard RGB calibration in a terminal."""
-        terminal_cmds = [
-            ("gnome-terminal", ["gnome-terminal", "--", "gigamate", "calibrate", "rgb"]),
-            ("konsole", ["konsole", "-e", "gigamate", "calibrate", "rgb"]),
-            ("xfce4-terminal", ["xfce4-terminal", "-e", "gigamate", "calibrate", "rgb"]),
-            ("lxterminal", ["lxterminal", "-e", "gigamate", "calibrate", "rgb"]),
-            ("x-terminal-emulator", ["x-terminal-emulator", "-e", "gigamate", "calibrate", "rgb"]),
-        ]
-        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+        from .updates import detect_default_terminal
+
+        inner = "gigamate calibrate rgb; exec bash"
+        dashdash = ("gnome-terminal", "mate-terminal", "ptyxis")
         argv = None
-        for term, cmd in terminal_cmds:
-            if desktop and term in desktop:
-                argv = cmd
-                break
+
+        try:
+            found = detect_default_terminal()
+        except Exception:
+            found = None
+        if found:
+            binary, exec_arg = found
+            if os.path.basename(binary).lower() in dashdash:
+                argv = [binary, "--", "bash", "-c", inner]
+            else:
+                argv = [binary, exec_arg, "bash", "-c", inner]
+
         if argv is None:
-            argv = ["gigamate", "calibrate", "rgb"]
+            # Fallback: pick an installed terminal (by availability, not by a
+            # fragile desktop-name substring match).
+            desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+            preferred = None
+            for key, term in (("kde", "konsole"), ("plasma", "konsole"),
+                              ("gnome", "gnome-terminal"), ("xfce", "xfce4-terminal"),
+                              ("lxde", "lxterminal"), ("lxqt", "lxterminal")):
+                if key in desktop:
+                    preferred = term
+                    break
+            candidates = ["konsole", "gnome-terminal", "xfce4-terminal",
+                          "lxterminal", "xterm", "x-terminal-emulator"]
+            if preferred:
+                candidates.insert(0, preferred)
+            for term in candidates:
+                path = shutil.which(term)
+                if not path:
+                    continue
+                if os.path.basename(path).lower() in dashdash:
+                    argv = [path, "--", "bash", "-c", inner]
+                else:
+                    argv = [path, "-e", "bash", "-c", inner]
+                break
+
+        if argv is None:
+            self._show_calibrate_fallback()
+            return
         try:
             pid, *_ = GLib.spawn_async(
                 argv,
@@ -1155,17 +1494,6 @@ class GigaMateTrayApp:
 
         self._apply_on_startup()
 
-    def _on_reset(self, *args) -> None:
-        """Re-attach kernel keyboard drivers."""
-        dev = self._get_keyboard()
-        if dev is None:
-            return
-        for i in [0, 2, 4]:
-            try:
-                dev.attach_kernel_driver(i)
-            except Exception:
-                pass
-
     def _on_about(self, *args) -> None:
         """Show the About dialog."""
         version = __import__('gigamate', fromlist=['']).__version__
@@ -1220,6 +1548,22 @@ class GigaMateTrayApp:
 
     def _on_quit(self, *args) -> None:
         """Save config and quit (restore backlight if idle-dimmed)."""
+        # Re-entrancy guard: SIGTERM/SIGINT and the menu can both fire.
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
+        # Close GigaMate Center window if open
+        try:
+            import socket as py_socket
+            sock_path = get_runtime_ipc_paths()[0]
+            if os.path.exists(sock_path):
+                with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    s.connect(sock_path)
+                    s.sendall(b"QUIT\n")
+        except Exception:
+            pass
+
         if self._idle_dimmed:
             self._idle_dimmed = False
             try:
@@ -1229,8 +1573,11 @@ class GigaMateTrayApp:
                                self._current_brightness, self._profile)
             except Exception:
                 pass
-        self._save_config()
         self._stop_idle()
+        try:
+            get_sleep_handler().stop_listening()
+        except Exception:
+            pass
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
             self._hotkey_listener = None
@@ -1243,6 +1590,18 @@ class GigaMateTrayApp:
             except Exception:
                 pass
             self._update_timer_id = None
+        if self._keyboard_retry_timer_id is not None:
+            try:
+                GLib.source_remove(self._keyboard_retry_timer_id)
+            except Exception:
+                pass
+            self._keyboard_retry_timer_id = None
+        if self._config_monitor is not None:
+            try:
+                self._config_monitor.cancel()
+            except Exception:
+                pass
+            self._config_monitor = None
         Gtk.main_quit()
 
     # ────────────────────────────────────────────
@@ -1250,39 +1609,40 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
 
     def _save_config(self) -> None:
-        """Save current settings to config file."""
-        self._config["colour"] = self._current_colour
-        self._config["brightness"] = self._current_brightness
-        self._config["startup_apply"] = self._startup_apply
-        self._config["sync_system_power"] = self._sync_system_power
-        self._config["idle_off_enabled"] = self._idle_enabled
-        self._config["idle_timeout_sec"] = self._idle_timeout
-        if self._current_acpi_profile is not None:
-            self._config["acpi_profile"] = self._current_acpi_profile
-        save_config(self._config)
+        """Save only the settings the tray actually changed (delta write)."""
+        def _mutate(cfg):
+            # Write a key only when the tray's value differs from its last
+            # known value, so a stale snapshot cannot clobber a concurrent
+            # Center/CLI edit made within the sync window.
+            pairs = (
+                ("colour", self._current_colour, self._config.get("colour")),
+                ("brightness", self._current_brightness, self._config.get("brightness")),
+                ("startup_apply", self._startup_apply, self._config.get("startup_apply")),
+                ("sync_system_power", self._sync_system_power, self._config.get("sync_system_power")),
+                ("idle_off_enabled", self._idle_enabled, self._config.get("idle_off_enabled")),
+                ("idle_timeout_sec", self._idle_timeout, self._config.get("idle_timeout_sec")),
+            )
+            for key, current, last in pairs:
+                if current != last:
+                    cfg[key] = current
+            if (self._current_acpi_profile is not None
+                    and self._current_acpi_profile != self._config.get("acpi_profile")):
+                cfg["acpi_profile"] = self._current_acpi_profile
+            if getattr(self, "_battery_dirty", False):
+                cfg["charge_limit"] = self._config.get("charge_limit", cfg.get("charge_limit"))
+                cfg["charge_limit_enabled"] = self._config.get(
+                    "charge_limit_enabled", cfg.get("charge_limit_enabled"))
+            return cfg
+
+        self._config = update_config(_mutate)
+        self._battery_dirty = False
+        self._last_config_mtime = self._get_config_mtime()
 
     def _apply_on_startup(self) -> None:
         """Apply saved settings on startup."""
-        if not self._startup_apply:
-            return
-        if self._acpi_controller is not None and self._current_acpi_profile is not None:
-            try:
-                self._acpi_controller.set_profile(
-                    FanProfile(self._current_acpi_profile)
-                )
-                if self._sync_system_power:
-                    sync_system_power(self._current_acpi_profile)
-            except Exception:
-                pass
-        if self._unsupported or self._no_keyboard:
-            return
-        dev = self._get_keyboard()
-        if dev is None:
-            return
-        if self._current_brightness == 0:
-            set_off(dev, self._profile)
-        else:
-            set_static(dev, self._current_colour, self._current_brightness, self._profile)
+        if self._current_acpi_profile is not None:
+            self._config["acpi_profile"] = self._current_acpi_profile
+        apply_hardware_settings(self._config)
 
     # ────────────────────────────────────────────
     # Menu management
@@ -1302,6 +1662,9 @@ class GigaMateTrayApp:
         self._status_items = []
         self._idle_timeout_items = {}
         self._idle_parent_item = None
+        self._sync_power_item = None
+        self._startup_item = None
+        self._battery_care_item = None
 
     def _rebuild_menu(self) -> None:
         """Clear and rebuild the entire menu."""
@@ -1316,8 +1679,40 @@ class GigaMateTrayApp:
 
 def main() -> None:
     """Entry point for the GigaMate tray application."""
+    if os.geteuid() == 0:
+        print(
+            "GigaMate Tray must be run as your desktop user, not root.\n"
+            "Running it with sudo would create root-owned settings and cannot "
+            "reach your user session. Re-run as your normal user.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    GigaMateTrayApp()
+
+    # Single-instance guard to prevent duplicate tray icons
+    import fcntl
+    from .paths import get_runtime_dir
+    runtime_dir = get_runtime_dir()
+    lock_file_path = runtime_dir / f"gigamate-tray-{os.getuid()}.lock"
+    try:
+        lock_fd = open(lock_file_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Tray already running: focus/raise GigaMate Center instead
+        try:
+            subprocess.Popen(["gigamate", "center"])
+        except Exception:
+            pass
+        return
+
+    app = GigaMateTrayApp()
+    try:
+        from gi.repository import GLibUnix
+        GLibUnix.signal_add(0, signal.SIGTERM, lambda: (app._on_quit(), False)[1])
+        GLibUnix.signal_add(0, signal.SIGINT, lambda: (app._on_quit(), False)[1])
+    except Exception:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
     try:
         Gtk.main()
     except KeyboardInterrupt:

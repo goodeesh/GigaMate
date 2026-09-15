@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -147,7 +148,7 @@ def load_builtin_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
             data = json.loads(path.read_text())
             profile = DeviceProfile.from_dict(data)
             profiles[profile.id] = profile
-        except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
             print(f"Warning: skipping built-in profile {path.name}: {exc}", file=sys.stderr)
     return profiles
 
@@ -161,7 +162,7 @@ def load_user_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
             data = json.loads(path.read_text())
             profile = DeviceProfile.from_dict(data)
             profiles[profile.id] = profile
-        except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
             print(f"Warning: skipping user profile {path.name}: {exc}", file=sys.stderr)
     return profiles
 
@@ -175,6 +176,7 @@ def all_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
 
 def detect_device() -> Optional[Tuple[int, int]]:
     try:
+        known = all_profiles()
         for dev in usb.core.find(find_all=True):
             if dev is None:
                 continue
@@ -183,8 +185,21 @@ def detect_device() -> Optional[Tuple[int, int]]:
                 pid = dev.idProduct
             except (AttributeError, usb.core.USBError, ValueError):
                 continue
-            if vid in GIGABYTE_VIDS:
+            if vid == 0x0414:
                 return (vid, pid)
+            if vid in (0x1044, 0x04D9):
+                # 0x1044 (Chu Yuen) and 0x04D9 (Holtek) are shared ODM VIDs also
+                # used by non-Gigabyte peripherals. Only treat as Gigabyte when
+                # the (vid, pid) is a known profile or the device reports a
+                # Gigabyte manufacturer string.
+                if (vid, pid) in known:
+                    return (vid, pid)
+                try:
+                    mfr = (dev.manufacturer or "").upper()
+                    if "GIGABYTE" in mfr or "AORUS" in mfr:
+                        return (vid, pid)
+                except Exception:
+                    pass
         for dev in usb.core.find(find_all=True):
             if dev is None:
                 continue
@@ -213,6 +228,32 @@ def get_dmi_product_name() -> Optional[str]:
     return None
 
 
+def get_dmi_vendor() -> Optional[str]:
+    """Read the system vendor (OEM) string from sysfs DMI tables if available."""
+    dmi_path = Path("/sys/class/dmi/id")
+    try:
+        vendor_file = dmi_path / "sys_vendor"
+        if vendor_file.is_file():
+            vendor = vendor_file.read_text().strip()
+            if vendor and vendor.lower() not in ("", "none", "to be filled by o.e.m.", "default string"):
+                return vendor
+    except (OSError, IOError, PermissionError):
+        pass
+    return None
+
+
+def get_dmi_chassis_type() -> Optional[int]:
+    """Read the SMBIOS chassis type from sysfs, or None on failure."""
+    chassis_file = Path("/sys/class/dmi/id/chassis_type")
+    try:
+        if chassis_file.is_file():
+            return int(chassis_file.read_text().strip())
+    except (OSError, ValueError, PermissionError):
+        pass
+    return None
+
+
+
 def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[DeviceProfile]:
     if vid is None or pid is None:
         detected = detect_device()
@@ -223,9 +264,22 @@ def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Opt
 
 
 def save_user_profile(profile: DeviceProfile) -> Path:
+    """Persist a user profile atomically after validation."""
+    errors = validate_profile(profile)
+    if errors:
+        raise ValueError("Invalid profile: " + "; ".join(errors))
     USER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     path = USER_PROFILES_DIR / f"{profile.vid:04X}_{profile.pid:04X}.json"
-    path.write_text(json.dumps(profile.to_dict(), indent=2) + "\n")
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(profile.to_dict(), indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     return path
 
 
@@ -252,15 +306,24 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
         for colour_name, levels in profile.colour_map.items():
             if not colour_name:
                 errors.append("Colour name is empty")
+            if not isinstance(levels, dict):
+                errors.append(f"Colour '{colour_name}' levels are not a mapping")
+                continue
             for level_key in (0, 1, 2):
                 if level_key not in levels:
                     errors.append(f"Colour '{colour_name}' missing brightness level {level_key}")
-                else:
+                    continue
+                try:
                     byte5, byte4 = levels[level_key]
-                    if not (0x00 <= byte5 <= 0xFF):
-                        errors.append(f"Colour '{colour_name}' level {level_key}: byte5 out of range")
-                    if not (0x00 <= byte4 <= 0xFF):
-                        errors.append(f"Colour '{colour_name}' level {level_key}: byte4 out of range")
+                    byte5 = int(byte5)
+                    byte4 = int(byte4)
+                except (TypeError, ValueError):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: invalid byte pair")
+                    continue
+                if not (0x00 <= byte5 <= 0xFF):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: byte5 out of range")
+                if not (0x00 <= byte4 <= 0xFF):
+                    errors.append(f"Colour '{colour_name}' level {level_key}: byte4 out of range")
 
     if profile.has_acpi:
         acpi = profile.acpi

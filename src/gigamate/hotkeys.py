@@ -93,6 +93,9 @@ class HotkeyListener:
         """
         if self.is_running:
             return True
+        # Refuse to start a second worker over a wedged one.
+        if self._thread is not None and self._thread.is_alive():
+            return False
 
         device_path = find_hotkey_hidraw(self._vid, self._pid, self._iface_num)
         if not device_path:
@@ -124,21 +127,23 @@ class HotkeyListener:
 
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        # Only tear down once the worker has actually stopped; a timed-out
+        # worker may still be using the pipe fds.
+        if self._thread is not None and not self._thread.is_alive():
             self._thread = None
+            if self._stop_pipe_r is not None:
+                try:
+                    os.close(self._stop_pipe_r)
+                except OSError:
+                    pass
+                self._stop_pipe_r = None
 
-        if self._stop_pipe_r is not None:
-            try:
-                os.close(self._stop_pipe_r)
-            except OSError:
-                pass
-            self._stop_pipe_r = None
-
-        if self._stop_pipe_w is not None:
-            try:
-                os.close(self._stop_pipe_w)
-            except OSError:
-                pass
-            self._stop_pipe_w = None
+            if self._stop_pipe_w is not None:
+                try:
+                    os.close(self._stop_pipe_w)
+                except OSError:
+                    pass
+                self._stop_pipe_w = None
 
     def _worker(self, device_path: str) -> None:
         """Worker thread loop reading from hidraw device."""
