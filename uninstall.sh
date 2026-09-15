@@ -113,6 +113,17 @@ if [ -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules ]; then
     info "polkit rule removed."
 fi
 
+# --- GPU power (nvidia-powerd) ---
+# install.sh enables nvidia-powerd on Gigabyte + NVIDIA laptops for Dynamic
+# Boost. We deliberately leave it enabled on uninstall (it benefits GPU
+# performance), but surface it so the change is not silent.
+if command -v systemctl &>/dev/null && systemctl is-enabled nvidia-powerd.service &>/dev/null; then
+    header "GPU power"
+    info "nvidia-powerd.service is still enabled (Dynamic Boost)."
+    info "GigaMate leaves it enabled because it improves GPU performance."
+    warn "To disable it: sudo systemctl disable --now nvidia-powerd.service"
+fi
+
 # --- Uninstall Python package ---
 header "Python package"
 
