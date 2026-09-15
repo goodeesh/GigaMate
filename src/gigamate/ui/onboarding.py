@@ -10,6 +10,7 @@ Two perspectives share one dialog:
 The wizard never nags: both Finish and Skip record ``onboarding_complete``.
 """
 
+import json
 import os
 
 from PyQt6.QtCore import Qt
@@ -34,12 +35,26 @@ from ..config import resolve_active_profile
 
 
 def has_user_config() -> bool:
-    """True when a config already exists (i.e. this is an upgrade, not fresh)."""
+    """True when a *pre-3.0* config exists (i.e. this is an upgrade, not fresh).
+
+    A config created by 3.0 itself (the CLI or tray running before the first-run
+    wizard) must not count as an upgrade. 2.0.x ``save()`` never wrote
+    ``onboarding_complete``, whereas 3.0 always does, so the presence of that
+    key distinguishes a genuine legacy config from one 3.0 just created.
+    """
     try:
         from ..config import _OLD_CONFIG_FILE  # legacy 2.0.x-era path
     except Exception:
         _OLD_CONFIG_FILE = None
-    return CONFIG_FILE.exists() or (_OLD_CONFIG_FILE is not None and _OLD_CONFIG_FILE.exists())
+    if _OLD_CONFIG_FILE is not None and _OLD_CONFIG_FILE.exists():
+        return True
+    if not CONFIG_FILE.exists():
+        return False
+    try:
+        data = json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "onboarding_complete" not in data
 
 
 def _colour_keys() -> list:

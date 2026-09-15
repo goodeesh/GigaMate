@@ -825,3 +825,59 @@ def test_onboarding_unsupported_opts_out_everything(qapp):
     assert cfg["startup_apply"] is False
     assert cfg["idle_off_enabled"] is False
     assert cfg["sync_system_power"] is False
+
+
+def test_has_user_config_ignores_config_written_by_30():
+    """A config 3.0 created (CLI/tray) carries onboarding_complete -> not upgrade."""
+    import json
+    from gigamate.ui import onboarding as ob
+
+    ob.CONFIG_FILE.write_text(json.dumps({"colour": "white", "onboarding_complete": False}))
+    with patch("gigamate.config._OLD_CONFIG_FILE", ob.CONFIG_FILE.parent / "no-legacy.json"):
+        assert ob.has_user_config() is False
+
+
+def test_has_user_config_treats_pre_30_config_as_upgrade():
+    """A 2.0.x config never wrote onboarding_complete -> genuine upgrade."""
+    import json
+    from gigamate.ui import onboarding as ob
+
+    ob.CONFIG_FILE.write_text(json.dumps({"colour": "white", "brightness": 1}))
+    with patch("gigamate.config._OLD_CONFIG_FILE", ob.CONFIG_FILE.parent / "no-legacy.json"):
+        assert ob.has_user_config() is True
+
+
+def test_has_user_config_detects_legacy_dir(tmp_path):
+    from gigamate.ui import onboarding as ob
+
+    legacy = tmp_path / "gigabyte-keyboard-rgb" / "config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}")
+    with patch("gigamate.config._OLD_CONFIG_FILE", legacy):
+        assert ob.has_user_config() is True
+
+
+def test_has_user_config_false_when_missing_or_corrupt():
+    from gigamate.ui import onboarding as ob
+
+    with patch("gigamate.config._OLD_CONFIG_FILE", ob.CONFIG_FILE.parent / "no-legacy.json"):
+        ob.CONFIG_FILE.write_text("{ not valid json")
+        assert ob.has_user_config() is False
+        ob.CONFIG_FILE.unlink()
+        assert ob.has_user_config() is False
+
+
+def test_onboarding_cli_created_config_stays_new(qapp):
+    """Using the CLI before the wizard must not flip the mode to 'upgrade'."""
+    import json
+    from gigamate.ui import onboarding as ob
+
+    ob.CONFIG_FILE.write_text(json.dumps({
+        "colour": "blue", "brightness": 2, "startup_apply": False,
+        "onboarding_complete": False,
+    }))
+    with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=_onboarding_caps()), \
+         patch("gigamate.config._OLD_CONFIG_FILE", ob.CONFIG_FILE.parent / "no-legacy.json"):
+        wiz = ob.OnboardingWizard()
+        assert wiz.mode == "new"
+        assert wiz.rerun is False
