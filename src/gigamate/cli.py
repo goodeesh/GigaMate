@@ -665,6 +665,132 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
 # ────────────────────────────────────────────
 
 
+def cmd_hotkeys_list(args) -> None:
+    """Show the hotkey mappings configured for a keyboard."""
+    from .config import load as load_config
+    from .hotkeys import merge_hotkey_specs
+    from .profiles import detect_device, load_builtin_profiles, resolve_profile
+
+    detected = detect_device()
+    if detected is None and args.vid is None and args.pid is None:
+        print("No supported keyboard detected.")
+        sys.exit(1)
+    vid = args.vid if args.vid is not None else detected[0]
+    pid = args.pid if args.pid is not None else detected[1]
+    profile = resolve_profile(vid, pid)
+    builtin = load_builtin_profiles().get((vid, pid))
+    cfg = load_config()
+    raw_overrides = cfg.get("hotkey_overrides")
+    overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
+    specs = merge_hotkey_specs(
+        overrides,
+        profile.hotkeys if profile is not None else {},
+        builtin.hotkeys if builtin is not None else {},
+    )
+
+    print("GigaMate — Hotkey mappings")
+    print()
+    if profile is not None:
+        print(f"  Keyboard: {profile.name}  ({vid:04X}:{pid:04X})")
+    else:
+        print(f"  Keyboard: Unknown model  ({vid:04X}:{pid:04X})")
+    if not specs:
+        print("  No hotkey mappings for this keyboard.")
+        print("  Run 'gigamate hotkeys watch' and press the buttons to capture signatures.")
+        return
+    for spec in specs:
+        payload = " ".join(f"{b:02x}" for b in spec.payload)
+        label = f" ({spec.key_name})" if spec.key_name != spec.action else ""
+        print(f"  {spec.action}{label}: interface {spec.interface}, "
+              f"report 0x{spec.report_id:02x}, payload {payload}")
+
+
+def cmd_hotkeys_watch(args) -> None:
+    """Stream raw hidraw reports to capture button signatures (Ctrl-C stops)."""
+    import os
+    import select
+    import time
+    from .config import load as load_config
+    from .hotkeys import (
+        format_report, list_hotkey_hidraw, match_spec, merge_hotkey_specs,
+    )
+    from .profiles import detect_device, load_builtin_profiles, resolve_profile
+
+    detected = detect_device()
+    if detected is None and args.vid is None and args.pid is None:
+        print("No supported keyboard detected.")
+        sys.exit(1)
+    vid = args.vid if args.vid is not None else detected[0]
+    pid = args.pid if args.pid is not None else detected[1]
+
+    nodes = list_hotkey_hidraw(vid, pid)
+    if args.interface is not None:
+        nodes = [(i, n) for i, n in nodes if i == args.interface]
+    if not nodes:
+        print(f"No hidraw interfaces for keyboard {vid:04X}:{pid:04X}.")
+        sys.exit(1)
+
+    profile = resolve_profile(vid, pid)
+    builtin = load_builtin_profiles().get((vid, pid))
+    cfg = load_config()
+    raw_overrides = cfg.get("hotkey_overrides")
+    overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
+    specs = merge_hotkey_specs(
+        overrides,
+        profile.hotkeys if profile is not None else {},
+        builtin.hotkeys if builtin is not None else {},
+    )
+
+    print("GigaMate — hotkey capture (Ctrl-C to stop)", flush=True)
+    print("  Keyboard "
+          f"{profile.name + '  ' if profile is not None else ''}({vid:04X}:{pid:04X})", flush=True)
+    print("  Listening on: " + ", ".join(f"iface {i} ({n})" for i, n in nodes), flush=True)
+    print("  Press the buttons whose signatures you want to capture.", flush=True)
+
+    fds = {}
+    for iface, path in nodes:
+        try:
+            fds[os.open(path, os.O_RDONLY | os.O_NONBLOCK)] = iface
+        except OSError as exc:
+            print(f"  Cannot open {path}: {exc}")
+    if not fds:
+        print("Could not open any hidraw interface (check udev permissions).")
+        sys.exit(1)
+
+    last = {}
+    start = time.monotonic()
+    try:
+        while True:
+            readable, _, _ = select.select(list(fds), [], [], 1.0)
+            for fd in readable:
+                try:
+                    data = os.read(fd, 64)
+                except OSError:
+                    continue
+                if not data:
+                    continue
+                text = format_report(data)
+                if last.get(fd) == text:
+                    continue
+                last[fd] = text
+                elapsed = time.monotonic() - start
+                line = (f"[{elapsed:7.2f}s] iface={fds[fd]} len={len(data)} "
+                        f"report_id=0x{data[0]:02x} payload={text[3:] if len(text) > 3 else text}")
+                hit = match_spec(specs, data, fds[fd])
+                if hit is not None:
+                    label = f" ({hit.key_name})" if hit.key_name != hit.action else ""
+                    line += f"  <- {hit.action}{label}"
+                print(line, flush=True)
+    except KeyboardInterrupt:
+        print("\nStopped.", flush=True)
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def cmd_calibrate_rgb(args) -> None:
     """Run keyboard RGB calibration."""
     # Delegate to the existing rgb calibrate command
@@ -1133,6 +1259,20 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
     gpu_sub.add_parser("status", help="Show discrete GPU power state")
 
+    # --- hotkeys subcommand ---
+    hotkeys_parser = sub.add_parser("hotkeys", help="Hardware hotkey mappings and capture")
+    hotkeys_sub = hotkeys_parser.add_subparsers(dest="hotkeys_action", help="Hotkey action")
+    hotkeys_watch_parser = hotkeys_sub.add_parser(
+        "watch", help="Capture raw button reports until interrupted (Ctrl-C)")
+    hotkeys_watch_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
+    hotkeys_watch_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    hotkeys_watch_parser.add_argument("--interface", "-i", type=int, default=None,
+                                      help="Only listen on this USB interface")
+    hotkeys_list_parser = hotkeys_sub.add_parser(
+        "list", help="Show configured hotkey mappings")
+    hotkeys_list_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
+    hotkeys_list_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+
     # --- battery subcommand ---
     battery_parser = sub.add_parser("battery", help="Battery health and charge threshold limiter")
     battery_parser.add_argument("--limit", "-l", type=int, default=None,
@@ -1187,6 +1327,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             print("GPU actions: status")
             print("Example: gigamate gpu status")
             sys.exit(1)
+    elif args.command == "hotkeys":
+        _dispatch_hotkeys(args)
     else:
         if len(sys.argv) == 1:
             cmd_center(args)
@@ -1247,6 +1389,15 @@ def _dispatch_profile(args) -> None:
         # Assume it's a profile name/number (shorthand)
         cmd_profile_set(args, action)
         return
+
+
+def _dispatch_hotkeys(args) -> None:
+    """Dispatch to the correct hotkeys handler."""
+    action = args.hotkeys_action
+    if action == "watch":
+        cmd_hotkeys_watch(args)
+    else:
+        cmd_hotkeys_list(args)
 
 
 def _dispatch_calibrate(args) -> None:

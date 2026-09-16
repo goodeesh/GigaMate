@@ -61,7 +61,7 @@ hexadecimal USB identifiers (uppercase).
 | `control_interface` | int | yes | USB interface for ctrl_transfer, typically `3` |
 | `colour_map` | object | yes | Keyboard RGB colour definitions |
 | `acpi` | object | no | ACPI/fan/power profile capabilities |
-| `hotkeys` | object | no | Hardware hotkey definitions (e.g. F7 mode switch) |
+| `hotkeys` | object | no | Hardware hotkey definitions (e.g. mode/performance switch, vendor key) |
 
 ---
 
@@ -161,8 +161,10 @@ Each key is a string profile ID (`"0"` through `"3"`) mapping to:
 
 ## Hotkeys section (optional)
 
-The `hotkeys` section defines hardware hotkeys (such as the F7 Performance Mode switch)
-emitted via vendor HID reports.
+The `hotkeys` section defines hardware hotkeys (such as the Mode performance
+switch and the GigaMate vendor key) emitted via vendor HID reports. The Mode
+key sits on the keycap printed as `F7`: pressed alone it emits the vendor
+mode-switch report, and `Fn` + the key produces a regular F7.
 
 ```json
 "hotkeys": {
@@ -170,7 +172,13 @@ emitted via vendor HID reports.
     "interface": 2,
     "report_id": 4,
     "payload": "000084",
-    "key_name": "F7"
+    "key_name": "Mode"
+  },
+  "open_center": {
+    "interface": 2,
+    "report_id": 4,
+    "payload": "000091",
+    "key_name": "GigaMate"
   }
 }
 ```
@@ -182,7 +190,14 @@ emitted via vendor HID reports.
 | `interface` | int | USB interface number emitting the report (typically 2) |
 | `report_id` | int | HID report ID (e.g. 4) |
 | `payload` | string | Expected byte payload in hex (e.g. `"000084"`) |
-| `key_name` | string | Human-readable key name (e.g. `"F7"`) |
+| `key_name` | string | Human-readable key name (e.g. `"Mode"`, `"GigaMate"`). Do **not** use the function-row label (e.g. `"F7"`): bare press emits the vendor report, and `Fn` + the key produces the function key. |
+
+Hotkeys are strictly model-scoped: the daemon only watches reports defined by
+the profile matching the detected keyboard (falling back to the built-in
+profile for the same VID:PID) or by explicit `hotkey_overrides` in
+`config.json`. Unknown models are never affected. Capture unknown button
+signatures with `gigamate hotkeys watch` (see [Contributing](#contributing-a-profile))
+and submit them as part of a profile.
 
 ---
 
@@ -270,6 +285,20 @@ if errors:
 else:
     print("Profile is valid!")
 ```
+
+### Capturing hardware button signatures
+
+Vendor keys emit raw HID reports. Capture them:
+
+```sh
+gigamate hotkeys watch      # press the buttons, Ctrl-C to stop
+gigamate hotkeys list       # show the configured mappings
+```
+
+Take the `iface`, `report_id` and `payload` bytes from the capture, add them
+to the profile's `hotkeys` section — or to `hotkey_overrides` in
+`~/.config/gigamate/config.json` to test a mapping without a release — and
+validate as above.
 
 ---
 

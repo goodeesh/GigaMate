@@ -59,6 +59,9 @@ DEFAULT_CONFIG = {
     "last_brightness": 2,
     # Set once the first-run setup has been shown (so it never nags again).
     "onboarding_complete": False,
+    # Explicit per-user hotkey mappings (action -> spec), merged over the
+    # device profile's hotkeys. Opt-in only; see docs/PROFILE_SCHEMA.md.
+    "hotkey_overrides": {},
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -221,6 +224,32 @@ def load():
     return config
 
 
+def _sanitize_hotkey_overrides(value):
+    """Coerce hotkey_overrides to valid, known-action specs (else drop)."""
+    from .hotkeys import KNOWN_ACTIONS, HotkeySpec
+
+    if not isinstance(value, dict):
+        return {}
+    clean = {}
+    for action, entry in value.items():
+        if action not in KNOWN_ACTIONS:
+            logger.warning("hotkey_overrides: unknown action %r (known: %s)",
+                           action, ", ".join(KNOWN_ACTIONS))
+            continue
+        try:
+            spec = HotkeySpec.from_dict(action, entry)
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.warning("hotkey_overrides: ignoring invalid %r spec: %s", action, exc)
+            continue
+        clean[action] = {
+            "interface": spec.interface,
+            "report_id": spec.report_id,
+            "payload": spec.payload.hex(),
+            "key_name": spec.key_name,
+        }
+    return clean
+
+
 def _coerce_charge_limit(value) -> int:
     """Return a valid 40..100 charge limit, falling back to the default."""
     try:
@@ -322,6 +351,7 @@ def _write_config(config):
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
+        "hotkey_overrides": _sanitize_hotkey_overrides(config.get("hotkey_overrides")),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:

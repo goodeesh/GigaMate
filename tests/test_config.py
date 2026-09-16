@@ -282,3 +282,32 @@ def test_non_string_colour_gracefully_handled(isolated_config):
         assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
 
 
+
+
+def test_hotkey_overrides_default_empty(isolated_config):
+    assert config_module.load()["hotkey_overrides"] == {}
+
+
+def test_hotkey_overrides_roundtrip(isolated_config):
+    config_module.save({
+        "hotkey_overrides": {
+            "open_center": {"interface": 2, "report_id": 4, "payload": "000091", "key_name": "GigaMate"},
+        }
+    })
+    loaded = config_module.load()
+    assert loaded["hotkey_overrides"] == {
+        "open_center": {"interface": 2, "report_id": 4, "payload": "000091", "key_name": "GigaMate"},
+    }
+
+
+def test_hotkey_overrides_sanitized(isolated_config):
+    config_module.save({
+        "hotkey_overrides": {
+            "open_center": {"interface": 2, "report_id": 4, "payload": "00 00 91"},
+            "self_destruct": {"interface": 2, "report_id": 4, "payload": "00"},
+            "mode_switch": {"interface": 2},
+        }
+    })
+    loaded = config_module.load()
+    assert set(loaded["hotkey_overrides"]) == {"open_center"}
+    assert loaded["hotkey_overrides"]["open_center"]["payload"] == "000091"

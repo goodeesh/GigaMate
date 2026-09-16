@@ -340,6 +340,25 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
         if acpi.backend not in ("module", "acpi_call"):
             errors.append(f"Unknown ACPI backend: {acpi.backend}")
 
+    if profile.hotkeys:
+        from .hotkeys import KNOWN_ACTIONS, HotkeySpec
+
+        for action, entry in profile.hotkeys.items():
+            if action not in KNOWN_ACTIONS:
+                errors.append(f"Unknown hotkey action: '{action}'")
+                continue
+            if not isinstance(entry, dict):
+                errors.append(f"Invalid hotkey '{action}': spec must be a mapping")
+                continue
+            key_name = entry.get("key_name")
+            if key_name is not None and (
+                    not isinstance(key_name, str) or not key_name.strip()):
+                errors.append(f"Invalid hotkey '{action}': key_name must be a non-empty string")
+            try:
+                HotkeySpec.from_dict(action, entry)
+            except (ValueError, TypeError, AttributeError) as exc:
+                errors.append(f"Invalid hotkey '{action}': {exc}")
+
     return errors
 
 
