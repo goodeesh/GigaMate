@@ -35,13 +35,13 @@ from pathlib import Path
 from .protocol import set_static, set_off, get_keyboard
 from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
-    get_dmi_product_name,
+    get_dmi_product_name, load_builtin_profiles,
 )
 from .config import CONFIG_FILE, load as load_config, update_config
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
-from .hotkeys import HotkeyListener
+from .hotkeys import HotkeyListener, merge_hotkey_specs
 from .gpu import gpu_icon_key
 from .paths import ICON_PATHS, get_runtime_ipc_paths
 from .idle import (
@@ -188,8 +188,36 @@ class GigaMateTrayApp:
             self._acpi_controller = None
             self._acpi_caps = None
 
+    def _resolve_hotkey_specs(self):
+        """Hotkey specs, strictly model-scoped (no cross-model spillover).
+
+        Precedence: explicit ``hotkey_overrides`` from config.json, then the
+        active profile's ``hotkeys``, then the built-in profile's ``hotkeys``
+        for the same VID:PID. Models without any of these get no listener.
+        """
+        overrides: Dict = {}
+        try:
+            cfg_overrides = self._config.get("hotkey_overrides")
+            if isinstance(cfg_overrides, dict):
+                overrides = cfg_overrides
+        except Exception:
+            overrides = {}
+        profile_hotkeys: Dict = {}
+        builtin_hotkeys: Dict = {}
+        try:
+            vid = self._profile.vid if self._profile else (self._detected_vid or 0x0414)
+            pid = self._profile.pid if self._profile else (self._detected_pid or 0x8105)
+            if self._profile is not None and isinstance(self._profile.hotkeys, dict):
+                profile_hotkeys = self._profile.hotkeys
+            builtin = load_builtin_profiles().get((vid, pid))
+            if builtin is not None and isinstance(builtin.hotkeys, dict):
+                builtin_hotkeys = builtin.hotkeys
+        except Exception:
+            pass
+        return merge_hotkey_specs(overrides, profile_hotkeys, builtin_hotkeys)
+
     def _init_hotkeys(self) -> None:
-        """Initialise and start background hotkey listener."""
+        """Initialise and start background hotkey listener (model-scoped)."""
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
             self._hotkey_listener = None
@@ -197,12 +225,25 @@ class GigaMateTrayApp:
         vid = self._profile.vid if self._profile else (self._detected_vid or 0x0414)
         pid = self._profile.pid if self._profile else (self._detected_pid or 0x8105)
 
+        specs = self._resolve_hotkey_specs()
+        if not specs:
+            return
         self._hotkey_listener = HotkeyListener(
-            on_mode_switch=self._on_hotkey_cycle_profile,
+            on_action=self._on_hotkey_action,
             vid=vid,
             pid=pid,
+            specs=specs,
         )
         self._hotkey_listener.start()
+
+    def _on_hotkey_action(self, action: str) -> None:
+        """Dispatch a hardware hotkey action from the listener."""
+        if action == "mode_switch":
+            self._on_hotkey_cycle_profile()
+        elif action == "open_center":
+            self._activate_center()
+        else:
+            logger.warning("Unknown hotkey action: %s", action)
 
     def _get_config_mtime(self) -> float:
         try:
@@ -528,7 +569,8 @@ class GigaMateTrayApp:
         self._menu.append(item)
         self._menu.append(Gtk.SeparatorMenuItem())
 
-    def _on_open_center(self, _widget) -> None:
+    def _activate_center(self) -> None:
+        """Raise an existing Center instance via IPC, else launch one."""
         sock_path = get_runtime_ipc_paths()[0]
 
         # 1. Try activating existing instance via Unix socket directly (0ms latency, 0 new processes)
@@ -547,6 +589,9 @@ class GigaMateTrayApp:
             subprocess.Popen(["gigamate", "center"], start_new_session=True)
         except Exception:
             pass
+
+    def _on_open_center(self, _widget) -> None:
+        self._activate_center()
 
     def _on_run_setup(self, *_widget) -> None:
         """Open GigaMate Center's setup wizard (works even if already onboarded)."""
@@ -1289,7 +1334,7 @@ class GigaMateTrayApp:
             pass
 
     def _on_hotkey_cycle_profile(self) -> None:
-        """Handle hardware hotkey (e.g. F7): cycle power profile and display OSD."""
+        """Handle hardware hotkey (e.g. the Mode key): cycle profile and show OSD."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
 

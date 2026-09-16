@@ -46,7 +46,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
-- **Hardware Hotkey Support** — Press `F7` (mode key) to cycle power profiles with native KDE Plasma OSD overlay
+- **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
 - **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
 

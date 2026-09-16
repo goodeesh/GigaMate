@@ -868,10 +868,10 @@ def test_has_user_config_false_when_missing_or_corrupt():
 
 
 def test_onboarding_cli_created_config_stays_new(qapp):
-    """Using the CLI before the wizard must not flip the mode to 'upgrade'."""
     import json
     from gigamate.ui import onboarding as ob
 
+    # Simulate `gigamate rgb ...` persisting a config before the wizard runs.
     ob.CONFIG_FILE.write_text(json.dumps({
         "colour": "blue", "brightness": 2, "startup_apply": False,
         "onboarding_complete": False,
@@ -881,3 +881,106 @@ def test_onboarding_cli_created_config_stays_new(qapp):
         wiz = ob.OnboardingWizard()
         assert wiz.mode == "new"
         assert wiz.rerun is False
+
+
+def test_tray_hotkey_action_dispatch():
+    """Hotkey actions route to profile cycling or Center activation."""
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        with patch.object(tray, "_on_hotkey_cycle_profile") as cyc, \
+             patch.object(tray, "_activate_center") as act:
+            tray._on_hotkey_action("mode_switch")
+            cyc.assert_called_once()
+            act.assert_not_called()
+            tray._on_hotkey_action("open_center")
+            act.assert_called_once()
+            cyc.assert_called_once()
+            # Unknown actions are logged, not raised.
+            tray._on_hotkey_action("bogus")
+
+
+def test_tray_resolve_hotkey_specs_precedence():
+    """Overrides > active profile > built-in profile; unknown models get none."""
+    GigaMateTrayApp = _import_tray_app()
+    from gigamate.profiles import DeviceProfile
+
+    def _profile(name, hotkeys):
+        return DeviceProfile(vid=0x0414, pid=0x8105, name=name,
+                             interfaces=[1, 3], control_interface=3,
+                             colour_map={}, hotkeys=hotkeys)
+
+    builtin = _profile("builtin", {
+        "mode_switch": {"interface": 2, "report_id": 4, "payload": "000084"},
+    })
+    user = _profile("user", {
+        "mode_switch": {"interface": 2, "report_id": 4, "payload": "0000ff"},
+    })
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._detected_vid, tray._detected_pid = 0x0414, 0x8105
+        tray._profile = user
+        tray._config = {"hotkey_overrides": {
+            "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
+        }}
+        with patch("gigamate.tray.load_builtin_profiles",
+                   return_value={(0x0414, 0x8105): builtin}):
+            by_action = {s.action: s for s in tray._resolve_hotkey_specs()}
+        assert by_action["open_center"].payload == bytes.fromhex("000091")
+        assert by_action["mode_switch"].payload == bytes.fromhex("0000ff")
+
+        # Unknown model, no profile, no overrides: no specs, no listener.
+        tray._profile = None
+        tray._detected_vid, tray._detected_pid = 0x9999, 0x1234
+        tray._config = {}
+        tray._hotkey_listener = None
+        with patch("gigamate.tray.load_builtin_profiles", return_value={}):
+            assert tray._resolve_hotkey_specs() == []
+            tray._init_hotkeys()
+            assert tray._hotkey_listener is None
+
+
+class _FakeCenterSocket:
+    """Stand-in for socket.socket speaking to a Center instance."""
+    instance = None
+
+    def __init__(self, *args, **kwargs):
+        _FakeCenterSocket.instance = self
+        self.sent = b""
+
+    def settimeout(self, timeout):
+        pass
+
+    def connect(self, path):
+        self.path = path
+
+    def sendall(self, data):
+        self.sent += data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_tray_activate_center_uses_socket():
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        with patch("socket.socket", side_effect=_FakeCenterSocket), \
+             patch("gigamate.tray.subprocess.Popen") as popen:
+            tray._activate_center()
+        popen.assert_not_called()
+        assert _FakeCenterSocket.instance is not None
+        assert _FakeCenterSocket.instance.sent == b"ACTIVATE\n"
+
+
+def test_tray_activate_center_falls_back_to_spawn():
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        with patch("socket.socket", side_effect=OSError("no server")), \
+             patch("gigamate.tray.subprocess.Popen") as popen:
+            tray._activate_center()
+        popen.assert_called_once()

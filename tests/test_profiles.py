@@ -418,3 +418,41 @@ def test_shared_vid_accepted_with_gigabyte_manufacturer(monkeypatch):
 
     monkeypatch.setattr(profiles_mod.usb.core, "find", lambda find_all=False: [FakeDev()])
     assert profiles_mod.detect_device() == (0x1044, 0x1234)
+
+
+class TestValidateHotkeys:
+    def _profile(self, hotkeys):
+        return DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Hotkeys",
+            interfaces=[1, 3], control_interface=3,
+            colour_map={"red": {0: (1, 0), 1: (1, 25), 2: (1, 100)}},
+            hotkeys=hotkeys,
+        )
+
+    def test_valid_hotkeys(self):
+        profile = self._profile({
+            "mode_switch": {"interface": 2, "report_id": 4, "payload": "000084", "key_name": "Mode"},
+            "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
+        })
+        assert validate_profile(profile) == []
+
+    def test_unknown_action(self):
+        profile = self._profile({
+            "self_destruct": {"interface": 2, "report_id": 4, "payload": "00"},
+        })
+        errors = validate_profile(profile)
+        assert any("Unknown hotkey action" in e for e in errors)
+
+    def test_invalid_spec(self):
+        profile = self._profile({
+            "mode_switch": {"interface": 2, "report_id": 4, "payload": "zz"},
+        })
+        errors = validate_profile(profile)
+        assert any("Invalid hotkey" in e for e in errors)
+
+    def test_invalid_key_name(self):
+        profile = self._profile({
+            "mode_switch": {"interface": 2, "report_id": 4, "payload": "00", "key_name": ""},
+        })
+        errors = validate_profile(profile)
+        assert any("key_name" in e for e in errors)
