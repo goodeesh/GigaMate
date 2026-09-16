@@ -344,7 +344,8 @@ class HotkeyListener:
     def _dispatch(self, action: str) -> None:
         """Dispatch a matched action with per-action debouncing."""
         now = time.monotonic()
-        if now - self._last_trigger.get(action, 0.0) < self._debounce_sec:
+        last = self._last_trigger.get(action)
+        if last is not None and now - last < self._debounce_sec:
             return
         self._last_trigger[action] = now
         callbacks = []
