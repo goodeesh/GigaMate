@@ -36,6 +36,7 @@ dependencies = [
 gigamate = "gigamate.cli:main"
 gigamate-tray = "gigamate.tray:main"
 gigamate-center = "gigamate.ui:run_gui"
+gigamate-dgpu-watch = "gigamate.dgpu_tune:run_watcher"
 # Legacy backward-compat aliases:
 gigabyte-rgb = "gigamate.cli:main"
 gigabyte-rgb-tray = "gigamate.tray:main"

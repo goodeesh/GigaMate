@@ -55,6 +55,14 @@ DEFAULT_CONFIG = {
     "idle_timeout_sec": 60,
     "charge_limit": 80,
     "charge_limit_enabled": False,
+    # Discrete-GPU (NVIDIA) sleep-aware undervolt: V/F clock offset in MHz.
+    # 0 = stock/off. Applied only while the dGPU is awake (see dgpu_tune.py).
+    "dgpu_undervolt_enabled": False,
+    "dgpu_undervolt_offset_mhz": 0,
+    "dgpu_undervolt_auto": True,
+    # Max (boost) clock cap in MHz: 0 = unlocked. Applied only while awake.
+    "dgpu_max_clock_enabled": False,
+    "dgpu_max_clock_mhz": 0,
     "sync_system_power": False,
     "last_brightness": 2,
     # Set once the first-run setup has been shown (so it never nags again).
@@ -205,6 +213,24 @@ def load():
                 data["charge_limit"] = DEFAULT_CONFIG["charge_limit"]
         if "charge_limit_enabled" in data:
             data["charge_limit_enabled"] = bool(data["charge_limit_enabled"])
+        if "dgpu_undervolt_enabled" in data:
+            data["dgpu_undervolt_enabled"] = bool(data["dgpu_undervolt_enabled"])
+        if "dgpu_undervolt_auto" in data:
+            data["dgpu_undervolt_auto"] = bool(data["dgpu_undervolt_auto"])
+        if "dgpu_undervolt_offset_mhz" in data:
+            try:
+                off = int(data["dgpu_undervolt_offset_mhz"])
+                data["dgpu_undervolt_offset_mhz"] = off if 0 <= off <= 255 else DEFAULT_CONFIG["dgpu_undervolt_offset_mhz"]
+            except (ValueError, TypeError):
+                data["dgpu_undervolt_offset_mhz"] = DEFAULT_CONFIG["dgpu_undervolt_offset_mhz"]
+        if "dgpu_max_clock_enabled" in data:
+            data["dgpu_max_clock_enabled"] = bool(data["dgpu_max_clock_enabled"])
+        if "dgpu_max_clock_mhz" in data:
+            try:
+                mc = int(data["dgpu_max_clock_mhz"])
+                data["dgpu_max_clock_mhz"] = mc if 0 <= mc <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
+            except (ValueError, TypeError):
+                data["dgpu_max_clock_mhz"] = DEFAULT_CONFIG["dgpu_max_clock_mhz"]
         if "acpi_profile" in data:
             try:
                 prof = int(data["acpi_profile"])
@@ -257,6 +283,24 @@ def _coerce_charge_limit(value) -> int:
     except (ValueError, TypeError):
         return DEFAULT_CONFIG["charge_limit"]
     return v if 40 <= v <= 100 else DEFAULT_CONFIG["charge_limit"]
+
+
+def _coerce_dgpu_offset(value) -> int:
+    """Return a valid 0..255 dGPU undervolt offset (MHz), else the default."""
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["dgpu_undervolt_offset_mhz"]
+    return v if 0 <= v <= 255 else DEFAULT_CONFIG["dgpu_undervolt_offset_mhz"]
+
+
+def _coerce_dgpu_max_clock(value) -> int:
+    """Return a valid 0..4000 dGPU max-clock cap (MHz), else the default."""
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["dgpu_max_clock_mhz"]
+    return v if 0 <= v <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
 
 
 def _open_config_lock():
@@ -348,6 +392,13 @@ def _write_config(config):
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
         "charge_limit": _coerce_charge_limit(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
         "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
+        "dgpu_undervolt_enabled": bool(config.get("dgpu_undervolt_enabled", DEFAULT_CONFIG["dgpu_undervolt_enabled"])),
+        "dgpu_undervolt_offset_mhz": _coerce_dgpu_offset(
+            config.get("dgpu_undervolt_offset_mhz", DEFAULT_CONFIG["dgpu_undervolt_offset_mhz"])),
+        "dgpu_undervolt_auto": bool(config.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])),
+        "dgpu_max_clock_enabled": bool(config.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"])),
+        "dgpu_max_clock_mhz": _coerce_dgpu_max_clock(
+            config.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),

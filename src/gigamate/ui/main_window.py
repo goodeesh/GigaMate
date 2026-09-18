@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from .pages.battery_page import BatteryPage
 from .pages.dashboard_page import DashboardPage
+from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import DARK_THEME
@@ -244,7 +245,8 @@ class MainWindow(QMainWindow):
         self.btn_dashboard = self._add_nav_btn("⚡  Dashboard", 0, sb_layout)
         self.btn_battery = self._add_nav_btn("🔋  Battery Care", 1, sb_layout)
         self.btn_rgb = self._add_nav_btn("🎨  RGB Lighting", 2, sb_layout)
-        self.btn_settings = self._add_nav_btn("⚙️  Settings", 3, sb_layout)
+        self.btn_gpu = self._add_nav_btn("⚡  GPU", 3, sb_layout)
+        self.btn_settings = self._add_nav_btn("⚙️  Settings", 4, sb_layout)
 
         sb_layout.addStretch()
 
@@ -295,11 +297,13 @@ class MainWindow(QMainWindow):
         self.page_dashboard = DashboardPage()
         self.page_battery = BatteryPage()
         self.page_rgb = RgbPage()
+        self.page_gpu = GpuPage()
         self.page_settings = SettingsPage()
 
         self.stack.addWidget(self.page_dashboard)
         self.stack.addWidget(self.page_battery)
         self.stack.addWidget(self.page_rgb)
+        self.stack.addWidget(self.page_gpu)
         self.stack.addWidget(self.page_settings)
 
         root_layout.addWidget(self.stack)
@@ -371,6 +375,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._refresh_daemon_status)
         if hasattr(self, "page_rgb"):
             self.page_rgb.reload_from_config()
+        if hasattr(self, "page_gpu"):
+            self.page_gpu.reload_from_config()
         if hasattr(self, "page_dashboard"):
             self.page_dashboard.reload_from_config()
         if hasattr(self, "page_battery"):

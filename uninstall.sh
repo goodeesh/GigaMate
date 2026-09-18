@@ -25,6 +25,14 @@ if [ -f "$SERVICE" ]; then
     info "Removed: $SERVICE"
 fi
 
+# dGPU undervolt watcher (user service)
+DGPU_SERVICE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gigamate-dgpu.service"
+systemctl --user disable --now gigamate-dgpu.service 2>/dev/null || true
+if [ -f "$DGPU_SERVICE" ]; then
+    rm -f "$DGPU_SERVICE"
+    info "Removed: $DGPU_SERVICE"
+fi
+
 # Also clean up old service name
 OLD_SERVICE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gigabyte-keyboard-rgb.service"
 if [ -f "$OLD_SERVICE" ]; then
@@ -111,6 +119,24 @@ if [ -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules ]; then
     info "Removing polkit rule (needs sudo)..."
     sudo rm -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules
     info "polkit rule removed."
+fi
+
+# --- Remove dGPU undervolt helper + polkit policy ---
+if [ -x /usr/lib/gigamate/gigamate-dgpu-nvml ]; then
+    info "Clearing dGPU undervolt to stock (best effort)..."
+    sudo /usr/lib/gigamate/gigamate-dgpu-nvml clear 2>/dev/null || true
+    info "Removing dGPU undervolt helper (needs sudo)..."
+    sudo rm -f /usr/lib/gigamate/gigamate-dgpu-nvml
+    sudo rmdir /usr/lib/gigamate 2>/dev/null || true
+    info "dGPU undervolt helper removed."
+fi
+if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules ]; then
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules
+    info "dGPU polkit rule removed."
+fi
+if [ -f /usr/share/polkit-1/actions/org.gigamate.dgpu.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/org.gigamate.dgpu.policy
+    info "dGPU polkit action removed."
 fi
 
 # --- GPU power (nvidia-powerd) ---

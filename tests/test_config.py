@@ -141,6 +141,23 @@ def test_invalid_acpi_profile_is_dropped(isolated_config):
     assert config_module.load().get("acpi_profile") is None
 
 
+def test_dgpu_max_clock_roundtrip(isolated_config):
+    config_module.save({
+        "dgpu_max_clock_enabled": True,
+        "dgpu_max_clock_mhz": 2100,
+    })
+    loaded = config_module.load()
+    assert loaded["dgpu_max_clock_enabled"] is True
+    assert loaded["dgpu_max_clock_mhz"] == 2100
+
+
+def test_invalid_dgpu_max_clock_falls_back_to_default(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text('{"dgpu_max_clock_mhz": 99999}')
+    assert config_module.load()["dgpu_max_clock_mhz"] == \
+        config_module.DEFAULT_CONFIG["dgpu_max_clock_mhz"]
+
+
 def test_save_warns_on_unknown_keys(isolated_config, caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="gigamate.config"):
