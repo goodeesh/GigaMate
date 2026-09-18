@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""GigaMate — privileged NVIDIA dGPU V/F-offset helper.
+
+This script is installed root-owned (0755) at /usr/lib/gigamate/gigamate-dgpu-nvml
+and invoked via pkexec by the unprivileged GigaMate tray/CLI/Center. It performs
+exactly one NVML operation and exits; it never lingers (an open NVML handle would
+keep the dGPU awake).
+
+Commands (argv):
+    probe                  Report whether the VF-offset API is usable.
+    get                    Read the current offset + GPU utilization.
+    apply <mhz> [maxmhz]   Set the V/F offset (0..255) and optional clock cap.
+    clear                  Offset 0 + unlock clocks (stock).
+
+The clock cap uses nvmlDeviceSetGpuLockedClocks(dev, 0, maxmhz), which upper-
+bounds the boost clock (0 or omitted = unlocked).
+
+Output: a single JSON object on stdout. Exit code 0 on success, 2 on usage error.
+"""
+
+import ctypes
+import json
+import os
+import re
+import sys
+from ctypes import c_char_p, c_int, c_uint, c_void_p, POINTER, Structure
+
+MAX_OFFSET_MHZ = 255
+MAX_CLOCK_MHZ = 4000
+NVML_CLOCK_GRAPHICS = 0
+
+NVML_SUCCESS = 0
+NVML_ERROR_NOT_SUPPORTED = 3
+NVML_ERROR_NO_PERMISSION = 4
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Device discovery (sysfs; does not wake the GPU)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_PCI_DEVICES = "/sys/bus/pci/devices"
+_NVIDIA_VENDOR = "0x10de"
+
+
+def find_nvidia_bdf():
+    """Return the PCI BDF (e.g. '0000:64:00.0') of the NVIDIA 3D/VGA controller."""
+    try:
+        entries = os.listdir(_PCI_DEVICES)
+    except OSError:
+        return None
+    for name in sorted(entries):
+        dev = os.path.join(_PCI_DEVICES, name)
+        try:
+            with open(os.path.join(dev, "vendor")) as fh:
+                vendor = fh.read().strip()
+            with open(os.path.join(dev, "class")) as fh:
+                klass = fh.read().strip()
+        except OSError:
+            continue
+        if vendor != _NVIDIA_VENDOR:
+            continue
+        # 0x0300xx = VGA controller, 0x0302xx = 3D controller
+        if not (klass.startswith("0x0300") or klass.startswith("0x0302")):
+            continue
+        # BDF as NVML expects it.
+        if re.fullmatch(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]",
+                        name):
+            return name
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NVML backends
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _NvmlUtilization(Structure):
+    _fields_ = [("gpu", c_uint), ("memory", c_uint)]
+
+
+class NvmlError(Exception):
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+class _CtypesBackend:
+    """Minimal ctypes binding to libnvidia-ml.so (stdlib only)."""
+
+    def __init__(self):
+        lib = None
+        for soname in ("libnvidia-ml.so.1", "libnvidia-ml.so"):
+            try:
+                lib = ctypes.CDLL(soname)
+                break
+            except OSError:
+                continue
+        if lib is None:
+            raise NvmlError("libnvidia-ml.so not found")
+        self._lib = lib
+        self._init = getattr(lib, "nvmlInit_v2", None) or getattr(lib, "nvmlInit", None)
+        if self._init is None:
+            raise NvmlError("nvmlInit symbol missing")
+        lib.nvmlShutdown.restype = c_int
+        lib.nvmlErrorString.argtypes = [c_int]
+        lib.nvmlErrorString.restype = c_char_p
+        lib.nvmlDeviceGetHandleByPciBusId_v2.argtypes = [c_char_p, POINTER(c_void_p)]
+        lib.nvmlDeviceGetHandleByPciBusId_v2.restype = c_int
+        lib.nvmlDeviceSetGpcClkVfOffset.argtypes = [c_void_p, c_int]
+        lib.nvmlDeviceSetGpcClkVfOffset.restype = c_int
+        lib.nvmlDeviceGetGpcClkVfOffset.argtypes = [c_void_p, POINTER(c_int)]
+        lib.nvmlDeviceGetGpcClkVfOffset.restype = c_int
+        lib.nvmlDeviceGetUtilizationRates.argtypes = [c_void_p, POINTER(_NvmlUtilization)]
+        lib.nvmlDeviceGetUtilizationRates.restype = c_int
+        if hasattr(lib, "nvmlDeviceSetGpuLockedClocks"):
+            lib.nvmlDeviceSetGpuLockedClocks.argtypes = [c_void_p, c_uint, c_uint]
+            lib.nvmlDeviceSetGpuLockedClocks.restype = c_int
+        if hasattr(lib, "nvmlDeviceResetGpuLockedClocks"):
+            lib.nvmlDeviceResetGpuLockedClocks.argtypes = [c_void_p]
+            lib.nvmlDeviceResetGpuLockedClocks.restype = c_int
+        if hasattr(lib, "nvmlDeviceGetMaxClockInfo"):
+            lib.nvmlDeviceGetMaxClockInfo.argtypes = [c_void_p, c_uint, POINTER(c_uint)]
+            lib.nvmlDeviceGetMaxClockInfo.restype = c_int
+        self._handle = None
+
+    def _err(self, ret):
+        try:
+            text = self._lib.nvmlErrorString(ret)
+            text = text.decode("utf-8", "replace") if text else f"NVML error {ret}"
+        except Exception:
+            text = f"NVML error {ret}"
+        return NvmlError(text, code=ret)
+
+    def _check(self, ret):
+        if ret != NVML_SUCCESS:
+            raise self._err(ret)
+
+    def open(self, bdf):
+        self._check(self._init())
+        handle = c_void_p()
+        self._check(self._lib.nvmlDeviceGetHandleByPciBusId_v2(bdf.encode(), ctypes.byref(handle)))
+        self._handle = handle
+        return self
+
+    def close(self):
+        try:
+            self._lib.nvmlShutdown()
+        except Exception:
+            pass
+
+    def get_offset(self):
+        out = c_int(0)
+        self._check(self._lib.nvmlDeviceGetGpcClkVfOffset(self._handle, ctypes.byref(out)))
+        return int(out.value)
+
+    def set_offset(self, mhz):
+        self._check(self._lib.nvmlDeviceSetGpcClkVfOffset(self._handle, c_int(int(mhz))))
+
+    def get_util(self):
+        u = _NvmlUtilization()
+        self._check(self._lib.nvmlDeviceGetUtilizationRates(self._handle, ctypes.byref(u)))
+        return int(u.gpu)
+
+    def set_max_clock(self, mhz):
+        """Upper-bound the graphics clock to `mhz` (0 < mhz <= ceiling)."""
+        fn = getattr(self._lib, "nvmlDeviceSetGpuLockedClocks", None)
+        if fn is None:
+            raise NvmlError("locked clocks unsupported", NVML_ERROR_NOT_SUPPORTED)
+        self._check(fn(self._handle, c_uint(0), c_uint(int(mhz))))
+
+    def reset_max_clock(self):
+        fn = getattr(self._lib, "nvmlDeviceResetGpuLockedClocks", None)
+        if fn is None:
+            raise NvmlError("locked clocks unsupported", NVML_ERROR_NOT_SUPPORTED)
+        self._check(fn(self._handle))
+
+    def get_max_clock(self):
+        fn = getattr(self._lib, "nvmlDeviceGetMaxClockInfo", None)
+        if fn is None:
+            raise NvmlError("max clock info unsupported", NVML_ERROR_NOT_SUPPORTED)
+        out = c_uint(0)
+        self._check(fn(self._handle, c_uint(NVML_CLOCK_GRAPHICS), ctypes.byref(out)))
+        return int(out.value)
+
+
+class _PynvmlBackend:
+    """Uses python-nvidia-ml-py (pynvml) when importable."""
+
+    def __init__(self):
+        import pynvml  # noqa: F401 (imported for availability check)
+        # Require the locked-clock API too; otherwise fall back to ctypes.
+        for name in ("nvmlDeviceSetGpuLockedClocks", "nvmlDeviceResetGpuLockedClocks",
+                     "nvmlDeviceGetMaxClockInfo"):
+            if not hasattr(pynvml, name):
+                raise ImportError(f"pynvml lacks {name}")
+        self._p = pynvml
+        self._handle = None
+
+    def _code(self, exc):
+        code = getattr(exc, "value", None)
+        return code
+
+    def open(self, bdf):
+        self._p.nvmlInit()
+        try:
+            self._handle = self._p.nvmlDeviceGetHandleByPciBusId(bdf)
+        except Exception:
+            # Older pynvml exposes it as ...ByPciBusId only.
+            self._handle = self._p.nvmlDeviceGetHandleByPciBusId(bdf)
+        return self
+
+    def close(self):
+        try:
+            self._p.nvmlShutdown()
+        except Exception:
+            pass
+
+    def get_offset(self):
+        return int(self._p.nvmlDeviceGetGpcClkVfOffset(self._handle))
+
+    def set_offset(self, mhz):
+        self._p.nvmlDeviceSetGpcClkVfOffset(self._handle, int(mhz))
+
+    def get_util(self):
+        return int(self._p.nvmlDeviceGetUtilizationRates(self._handle).gpu)
+
+    def set_max_clock(self, mhz):
+        self._p.nvmlDeviceSetGpuLockedClocks(self._handle, 0, int(mhz))
+
+    def reset_max_clock(self):
+        self._p.nvmlDeviceResetGpuLockedClocks(self._handle)
+
+    def get_max_clock(self):
+        return int(self._p.nvmlDeviceGetMaxClockInfo(self._handle, NVML_CLOCK_GRAPHICS))
+
+
+def open_backend(bdf):
+    """Open the best available NVML backend for `bdf`."""
+    try:
+        return _PynvmlBackend().open(bdf)
+    except ImportError:
+        pass
+    except Exception:
+        # pynvml present but failed; fall through to ctypes.
+        pass
+    return _CtypesBackend().open(bdf)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Command dispatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _emit(obj, code=0):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+    return code
+
+
+def _error(exc):
+    code = getattr(exc, "code", None)
+    return _emit({"ok": False, "error": str(exc), "code": code})
+
+
+def cmd_probe():
+    bdf = find_nvidia_bdf()
+    if bdf is None:
+        return _emit({"ok": False, "supported": False, "error": "no NVIDIA dGPU found"})
+    try:
+        be = open_backend(bdf)
+    except Exception as exc:  # noqa: BLE001
+        return _emit({"ok": False, "supported": False, "device": bdf, "error": str(exc),
+                      "code": getattr(exc, "code", None)})
+    try:
+        try:
+            offset = be.get_offset()
+        except Exception as exc:  # noqa: BLE001
+            return _emit({"ok": False, "supported": False, "device": bdf, "error": str(exc),
+                          "code": getattr(exc, "code", None)})
+        try:
+            ceiling = be.get_max_clock()
+        except Exception:
+            ceiling = None
+        return _emit({"ok": True, "supported": True, "device": bdf, "offset_mhz": offset,
+                      "gpu_max_clock_mhz": ceiling})
+    finally:
+        be.close()
+
+
+def cmd_get():
+    bdf = find_nvidia_bdf()
+    if bdf is None:
+        return _emit({"ok": False, "error": "no NVIDIA dGPU found"})
+    try:
+        be = open_backend(bdf)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    try:
+        offset = be.get_offset()
+        try:
+            util = be.get_util()
+        except Exception:
+            util = None
+        return _emit({"ok": True, "device": bdf, "offset_mhz": offset, "util": util})
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    finally:
+        be.close()
+
+
+def cmd_apply(mhz, maxmhz=0):
+    try:
+        mhz = int(mhz)
+        maxmhz = int(maxmhz)
+    except (TypeError, ValueError):
+        return _emit({"ok": False, "error": "invalid offset"}, code=2)
+    mhz = max(0, min(MAX_OFFSET_MHZ, mhz))
+    maxmhz = max(0, min(MAX_CLOCK_MHZ, maxmhz))
+    bdf = find_nvidia_bdf()
+    if bdf is None:
+        return _emit({"ok": False, "error": "no NVIDIA dGPU found"})
+    try:
+        be = open_backend(bdf)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    try:
+        be.set_offset(mhz)
+        readback = be.get_offset()
+        result = {"ok": True, "device": bdf, "offset_mhz": readback, "max_clock_mhz": 0}
+        try:
+            if maxmhz > 0:
+                be.set_max_clock(maxmhz)
+                result["max_clock_mhz"] = maxmhz
+            else:
+                be.reset_max_clock()
+        except Exception as exc:  # noqa: BLE001
+            result["max_clock_error"] = str(exc)
+        return _emit(result)
+    except Exception as exc:  # noqa: BLE001
+        return _error(exc)
+    finally:
+        be.close()
+
+
+def main(argv):
+    if len(argv) < 2:
+        return _emit({"ok": False, "error": "usage: gigamate-dgpu-nvml {probe|get|apply <mhz> [maxmhz]|clear}"}, code=2)
+    cmd = argv[1]
+    if cmd == "probe":
+        return cmd_probe()
+    if cmd == "get":
+        return cmd_get()
+    if cmd == "apply":
+        if len(argv) < 3:
+            return _emit({"ok": False, "error": "apply requires <mhz> [maxmhz]"}, code=2)
+        maxmhz = argv[3] if len(argv) > 3 else 0
+        return cmd_apply(argv[2], maxmhz)
+    if cmd == "clear":
+        return cmd_apply(0, 0)
+    return _emit({"ok": False, "error": f"unknown command: {cmd}"}, code=2)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

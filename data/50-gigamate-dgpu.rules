@@ -1,0 +1,8 @@
+// GigaMate — allow wheel/sudo to change the NVIDIA dGPU undervolt without password.
+// The privileged helper does one NVML operation and exits (see dgpu_tune.py).
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.gigamate.dgpu.control" &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});

@@ -369,6 +369,167 @@ def cmd_gpu_status(args) -> None:
         print(f"  SmartShift:   Supported{bias_str}")
 
 
+def _dgpu_status_with_applied(dgpu_tune, st):
+    """Overlay the watcher service's runtime state file onto a local status dict.
+
+    The CLI runs in its own process, so its watcher cannot know what the
+    background service applied — especially when auto-apply is off. The state
+    file written by the service is the cross-process source of truth.
+    """
+    sf = dgpu_tune.read_state_file() or {}
+    if not sf:
+        return st
+    off = sf.get("applied_offset")
+    mx = sf.get("applied_max")
+    if off is not None:
+        st["offset_mhz"] = off
+    if mx is not None:
+        st["max_clock_mhz"] = mx
+    st["applied_offset"] = off
+    st["applied_max"] = mx
+    st["applied"] = bool(off or mx)
+    return st
+
+
+def cmd_gpu_undervolt(args) -> None:
+    """Sleep-aware NVIDIA dGPU V/F-offset undervolt."""
+    from . import dgpu_tune
+
+    if getattr(args, "probe", False):
+        res = dgpu_tune.probe(force=True)
+        print("GigaMate — dGPU undervolt probe")
+        print(f"  supported: {bool(res.get('supported'))}")
+        print(f"  device:    {res.get('device') or '—'}")
+        if res.get("offset_mhz") is not None:
+            print(f"  offset:    +{res['offset_mhz']} MHz")
+        if res.get("error"):
+            print(f"  error:     {res['error']}")
+        return
+
+    value = getattr(args, "value", "status")
+
+    if value in (None, "status"):
+        dgpu_tune.watcher.load_desired_from_config()
+        dgpu_tune.watcher.tick()
+        st = _dgpu_status_with_applied(dgpu_tune, dgpu_tune.watcher.status())
+        print("GigaMate — dGPU tuning")
+        print()
+        print(f"  device:      {st.get('device') or '—'}")
+        print(f"  supported:   {bool(dgpu_tune.probe().get('supported'))}")
+        print(f"  dGPU state:  {st.get('runtime') or '—'} ({st.get('power_state') or '—'})")
+        uv = f"on (+{st.get('desired_offset')} MHz)" if st.get("desired_offset") else "off"
+        print(f"  undervolt:   {uv}")
+        cap = int(st.get("desired_max_clock") or 0)
+        print(f"  max clock:   {('cap ' + str(cap) + ' MHz') if cap else 'off (unlocked)'}")
+        print(f"  auto-apply:  {'on' if st.get('auto', True) else 'off (manual)'}")
+        print(f"  applied:     {st.get('applied')}"
+              + (f" (offset +{st.get('offset_mhz')} MHz)" if st.get('offset_mhz') is not None else "")
+              + (f" (cap {st.get('max_clock_mhz')} MHz)" if st.get('max_clock_mhz') else ""))
+        if st.get("last_error"):
+            print(f"  last error:  {st['last_error']}")
+        holders = dgpu_tune.wake_holders()
+        if holders:
+            print(f"  awake held by: {', '.join(holders)}")
+        print()
+        print("  Note: applied only while the dGPU is awake; cleared when it sleeps.")
+        return
+
+    cfg = load_config()
+    auto = cfg.get("dgpu_undervolt_auto", True) if getattr(args, "auto", None) is None else bool(args.auto)
+
+    if str(value).lower() in ("off", "stock", "reset"):
+        dgpu_tune.set_desired_config(False, 0, auto)
+        print("dGPU undervolt: off (stock offset +0 MHz)")
+        return
+
+    try:
+        mhz = int(str(value))
+    except (TypeError, ValueError):
+        print("Invalid value: use a MHz offset 0-255, 'off', or 'status'")
+        sys.exit(2)
+
+    mhz = max(0, min(dgpu_tune.MAX_OFFSET_MHZ, mhz))
+    dgpu_tune.set_desired_config(mhz > 0, mhz, auto)
+    print(f"dGPU undervolt: +{mhz} MHz" if mhz else "dGPU undervolt: off (stock offset +0 MHz)")
+
+
+def cmd_gpu_maxclock(args) -> None:
+    """Sleep-aware NVIDIA dGPU maximum-clock cap."""
+    from . import dgpu_tune
+
+    if getattr(args, "probe", False):
+        res = dgpu_tune.probe(force=True)
+        print("GigaMate — dGPU max-clock probe")
+        print(f"  supported: {bool(res.get('supported'))}")
+        print(f"  device:    {res.get('device') or '—'}")
+        ceiling = res.get("gpu_max_clock_mhz")
+        print(f"  ceiling:   {ceiling if ceiling is not None else '—'} MHz")
+        if res.get("error"):
+            print(f"  error:     {res['error']}")
+        return
+
+    value = getattr(args, "value", "status")
+
+    if value in (None, "status"):
+        dgpu_tune.watcher.load_desired_from_config()
+        dgpu_tune.watcher.tick()
+        st = _dgpu_status_with_applied(dgpu_tune, dgpu_tune.watcher.status())
+        cap = int(st.get("desired_max_clock") or 0)
+        print("GigaMate — dGPU max clock")
+        print()
+        print(f"  device:      {st.get('device') or '—'}")
+        print(f"  dGPU state:  {st.get('runtime') or '—'} ({st.get('power_state') or '—'})")
+        print(f"  configured:  {('cap ' + str(cap) + ' MHz') if cap else 'off (unlocked)'}")
+        print(f"  applied:     {st.get('applied')}"
+              + (f" (cap {st.get('max_clock_mhz')} MHz)" if st.get('max_clock_mhz') else ""))
+        if st.get("last_error"):
+            print(f"  last error:  {st['last_error']}")
+        return
+
+    if str(value).lower() in ("off", "unlock", "reset", "stock"):
+        dgpu_tune.set_desired_config(max_enabled=False, max_clock=0)
+        print("dGPU max clock: off (unlocked)")
+        return
+
+    try:
+        mhz = int(str(value))
+    except (TypeError, ValueError):
+        print("Invalid value: use a MHz cap 0-4000, 'off', or 'status'")
+        sys.exit(2)
+
+    mhz = max(0, min(dgpu_tune.MAX_CLOCK_MHZ, mhz))
+    dgpu_tune.set_desired_config(max_enabled=mhz > 0, max_clock=mhz)
+    print(f"dGPU max clock: cap {mhz} MHz" if mhz else "dGPU max clock: off (unlocked)")
+
+
+def cmd_gpu_auto(args) -> None:
+    """Enable/disable automatic application of dGPU tuning on boot/wake."""
+    from . import dgpu_tune
+
+    value = getattr(args, "value", "status")
+
+    if value in (None, "status"):
+        auto = bool(load_config().get("dgpu_undervolt_auto", True))
+        print("GigaMate — dGPU auto-apply")
+        print()
+        print(f"  auto-apply:  {'on' if auto else 'off (manual)'}")
+        print("  applies on:  boot, wake and resume" if auto else "  applies on:  explicit Apply / CLI only")
+        return
+
+    if str(value).lower() in ("on", "true", "yes", "enable", "enabled"):
+        dgpu_tune.set_auto_config(True)
+        print("dGPU auto-apply: on")
+        return
+
+    if str(value).lower() in ("off", "false", "no", "disable", "disabled"):
+        dgpu_tune.set_auto_config(False)
+        print("dGPU auto-apply: off (current GPU state left unchanged)")
+        return
+
+    print("Invalid value: use 'on', 'off', or 'status'")
+    sys.exit(2)
+
+
 # ────────────────────────────────────────────
 # Profile commands
 # ────────────────────────────────────────────
@@ -1258,6 +1419,23 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     gpu_parser = sub.add_parser("gpu", help="Discrete GPU power state")
     gpu_sub = gpu_parser.add_subparsers(dest="gpu_action", help="GPU action")
     gpu_sub.add_parser("status", help="Show discrete GPU power state")
+    gpu_uv_parser = gpu_sub.add_parser("undervolt", help="Sleep-aware NVIDIA dGPU undervolt (V/F offset)")
+    gpu_uv_parser.add_argument("value", nargs="?", default="status",
+                               help="MHz offset 0-255, 'off', or 'status' (default)")
+    gpu_uv_parser.add_argument("--probe", action="store_true",
+                               help="Report whether the V/F offset API is supported")
+    gpu_uv_parser.add_argument("--auto", dest="auto", action="store_true", default=None,
+                               help="Auto-apply on wake (default)")
+    gpu_uv_parser.add_argument("--no-auto", dest="auto", action="store_false",
+                               help="Do not auto-apply on wake (manual)")
+    gpu_mc_parser = gpu_sub.add_parser("maxclock", help="Sleep-aware NVIDIA dGPU max clock cap")
+    gpu_mc_parser.add_argument("value", nargs="?", default="status",
+                               help="MHz cap 0-4000, 'off', or 'status' (default)")
+    gpu_mc_parser.add_argument("--probe", action="store_true",
+                               help="Report the GPU clock ceiling")
+    gpu_auto_parser = gpu_sub.add_parser("auto", help="Auto-apply dGPU tuning on boot/wake")
+    gpu_auto_parser.add_argument("value", nargs="?", default="status",
+                                 help="'on', 'off', or 'status' (default)")
 
     # --- hotkeys subcommand ---
     hotkeys_parser = sub.add_parser("hotkeys", help="Hardware hotkey mappings and capture")
@@ -1323,9 +1501,15 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     elif args.command == "gpu":
         if args.gpu_action in ("status", None):
             cmd_gpu_status(args)
+        elif args.gpu_action == "undervolt":
+            cmd_gpu_undervolt(args)
+        elif args.gpu_action == "maxclock":
+            cmd_gpu_maxclock(args)
+        elif args.gpu_action == "auto":
+            cmd_gpu_auto(args)
         else:
-            print("GPU actions: status")
-            print("Example: gigamate gpu status")
+            print("GPU actions: status, undervolt, maxclock, auto")
+            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu auto off")
             sys.exit(1)
     elif args.command == "hotkeys":
         _dispatch_hotkeys(args)

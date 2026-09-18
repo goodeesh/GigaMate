@@ -55,6 +55,7 @@ def _apply_hardware_settings_locked(
         "profile": False,
         "battery": False,
         "keyboard": False,
+        "dgpu": False,
     }
 
     # ─────────────────────────────────────────────────────────────
@@ -142,5 +143,20 @@ def _apply_hardware_settings_locked(
                     logger.info(f"Hardware sync: Keyboard lighting set to {colour} (brightness {brightness})")
         except Exception as exc:
             logger.warning(f"Hardware sync failed for keyboard lighting: {exc}")
+
+    # ─────────────────────────────────────────────────────────────
+    # 4. Discrete GPU tuning (sleep-aware; applies only if awake)
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from . import dgpu_tune
+
+        dgpu_tune.apply_from_config()
+        results["dgpu"] = bool(
+            (cfg.get("dgpu_undervolt_enabled", DEFAULT_CONFIG["dgpu_undervolt_enabled"])
+             or cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"]))
+            and cfg.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])
+        )
+    except Exception as exc:
+        logger.warning(f"Hardware sync failed for dGPU tuning: {exc}")
 
     return results

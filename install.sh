@@ -596,6 +596,52 @@ configure_gpu_power() {
     fi
 }
 
+# --- Install privileged NVIDIA dGPU undervolt helper + polkit policy ---
+install_dgpu_helper() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # Only on machines with a discrete NVIDIA GPU.
+    local has_nvidia=false
+    if [ -d /sys/bus/pci/devices ]; then
+        for v in /sys/bus/pci/devices/*/vendor; do
+            if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
+                has_nvidia=true
+                break
+            fi
+        done
+    fi
+    if [ "$has_nvidia" != true ]; then
+        info "No discrete NVIDIA GPU; skipping dGPU undervolt helper."
+        return
+    fi
+
+    header "Installing dGPU undervolt helper"
+
+    local helper_src="$script_dir/data/gigamate-dgpu-nvml"
+    local helper_dir="/usr/lib/gigamate"
+    local helper_dst="$helper_dir/gigamate-dgpu-nvml"
+    if [ -f "$helper_src" ]; then
+        sudo install -d -m 755 "$helper_dir"
+        sudo install -m 755 -o root -g root "$helper_src" "$helper_dst"
+        info "Installed helper: $helper_dst"
+    fi
+
+    local action_src="$script_dir/data/org.gigamate.dgpu.policy"
+    local action_dir="/usr/share/polkit-1/actions"
+    if [ -d "$action_dir" ] && [ -f "$action_src" ]; then
+        sudo install -m 644 -o root -g root "$action_src" "$action_dir/org.gigamate.dgpu.policy"
+        info "Installed polkit action: $action_dir/org.gigamate.dgpu.policy"
+    fi
+
+    local rule_src="$script_dir/data/50-gigamate-dgpu.rules"
+    local rule_dir="/etc/polkit-1/rules.d"
+    if [ -d "$rule_dir" ] && [ -f "$rule_src" ]; then
+        sudo install -m 644 -o root -g root "$rule_src" "$rule_dir/50-gigamate-dgpu.rules"
+        info "Installed polkit rule: $rule_dir/50-gigamate-dgpu.rules"
+    fi
+}
+
 # --- Install systemd user service ---
 install_service() {
     local script_dir
@@ -630,6 +676,43 @@ install_service() {
     systemctl --user restart gigamate.service 2>/dev/null || true
     info "systemd user service installed and (re)started."
     info "  Status: systemctl --user status gigamate.service"
+}
+
+# --- Install dGPU undervolt watcher service (NVIDIA only) ---
+install_dgpu_service() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local svc_src="$script_dir/data/gigamate-dgpu.service"
+    local svc_dst="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gigamate-dgpu.service"
+
+    # Only meaningful with a discrete NVIDIA GPU.
+    local has_nvidia=false
+    if [ -d /sys/bus/pci/devices ]; then
+        for v in /sys/bus/pci/devices/*/vendor; do
+            if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
+                has_nvidia=true
+                break
+            fi
+        done
+    fi
+    if [ "$has_nvidia" != true ] || [ ! -f "$svc_src" ]; then
+        return
+    fi
+
+    header "Installing dGPU undervolt watcher service"
+    mkdir -p "$(dirname "$svc_dst")"
+    cp "$svc_src" "$svc_dst"
+
+    local watch_bin
+    watch_bin="$(command -v gigamate-dgpu-watch 2>/dev/null || true)"
+    [ -n "$watch_bin" ] || watch_bin="$HOME/.local/bin/gigamate-dgpu-watch"
+    sed -i "s|^ExecStart=.*|ExecStart=${watch_bin}|" "$svc_dst" 2>/dev/null || true
+
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable gigamate-dgpu.service 2>/dev/null || true
+    systemctl --user restart gigamate-dgpu.service 2>/dev/null || true
+    info "dGPU undervolt watcher installed and (re)started."
+    info "  Status: systemctl --user status gigamate-dgpu.service"
 }
 
 # --- Install desktop entry + icon ---
@@ -760,6 +843,7 @@ main() {
     build_kernel_module
     install_udev
     configure_gpu_power
+    install_dgpu_helper
     # Migrate the old config/profiles *before* starting the tray: the tray
     # creates ~/.config/gigamate on launch, which would otherwise make
     # migrate_config take the "both exist" branch and skip user profiles.
@@ -768,6 +852,7 @@ main() {
     migrate_config
     install_desktop_entry
     install_service
+    install_dgpu_service
 
     if [ "$DO_UPDATE" = true ]; then
         # install_service already restarted the tray; just drop the cached

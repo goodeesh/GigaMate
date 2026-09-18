@@ -46,6 +46,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
+- **🧊 Discrete GPU Undervolt & Clock Cap (NVIDIA)** — A V/F-curve offset ("undervolt") and an optional boost-clock cap for the dGPU. Both are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
 - **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
 - **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
@@ -83,6 +84,14 @@ gigamate rgb off                 # Turn backlight off
 gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
 gigamate status                  # Full hardware status
 gigamate gpu status              # Show discrete GPU power state
+gigamate gpu undervolt 100       # Undervolt the NVIDIA dGPU (V/F offset, MHz; 0-255)
+gigamate gpu undervolt off       # Reset the dGPU to stock
+gigamate gpu undervolt status    # Show dGPU undervolt state
+gigamate gpu maxclock 2100       # Cap the dGPU boost clock (MHz; 0-4000)
+gigamate gpu maxclock off        # Unlock the dGPU clock
+gigamate gpu maxclock status     # Show dGPU max-clock state
+gigamate gpu auto off            # Don't auto-apply dGPU tuning on boot/wake
+gigamate gpu auto status         # Show dGPU auto-apply state
 gigamate profile                 # Show current power profile
 gigamate profile gaming          # Switch to Gaming mode
 gigamate profile cycle           # Cycle to next mode + trigger OSD

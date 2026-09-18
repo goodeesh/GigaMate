@@ -49,7 +49,7 @@ def test_main_window_creation(qapp):
 
     win = MainWindow()
     assert win.windowTitle() == "GigaMate Center"
-    assert win.stack.count() == 4
+    assert win.stack.count() == 5
 
     # Check navigation switches pages
     win.btn_battery.click()
@@ -58,11 +58,138 @@ def test_main_window_creation(qapp):
     win.btn_rgb.click()
     assert win.stack.currentIndex() == 2
 
-    win.btn_settings.click()
+    win.btn_gpu.click()
     assert win.stack.currentIndex() == 3
+
+    win.btn_settings.click()
+    assert win.stack.currentIndex() == 4
 
     win.btn_dashboard.click()
     assert win.stack.currentIndex() == 0
+
+
+def test_gpu_page_max_clock_controls(qapp):
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({
+        "dgpu_undervolt_enabled": True,
+        "dgpu_undervolt_offset_mhz": 100,
+        "dgpu_max_clock_enabled": True,
+        "dgpu_max_clock_mhz": 2500,
+    })
+    config_mod.save(cfg)
+
+    page = gp.GpuPage()
+    with patch.object(gp.dgpu_tune, "get_state", return_value={"offset_mhz": 100}), \
+         patch.object(gp.dgpu_tune, "probe",
+                      return_value={"supported": True, "device": "RTX 5060",
+                                    "gpu_max_clock_mhz": 3090}), \
+         patch.object(gp.dgpu_tune, "read_state_file",
+                      return_value={"applied_offset": 100, "applied_max": 2500}), \
+         patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
+         patch.object(gp, "get_gpu_state",
+                      return_value=GpuState(present=True, vendor="nvidia",
+                                            status="active", power_state="D0")), \
+         patch.object(gp, "gpu_status_text", return_value="Active"):
+        page.reload_from_config()
+
+    # Presets/checkbox/spinbox are gone; it is slider-only.
+    assert not hasattr(page, "max_preset_buttons")
+    assert not hasattr(page, "max_spin")
+    assert not hasattr(page, "max_check")
+    assert not hasattr(page, "preset_buttons")
+
+    # Range: [normal - 800, normal + headroom]; normal = 3090 + 300 headroom.
+    assert page.max_slider.minimum() == 3090 - gp.dgpu_tune.MAX_CLOCK_SPAN
+    assert page.max_slider.maximum() == 3090 + gp.dgpu_tune.MAX_CLOCK_HEADROOM
+    assert page.max_slider.value() == 2500
+    assert "cap 2500 MHz" in page.max_status_lbl.text()
+    assert "+100 MHz" in page.uv_status_lbl.text()
+
+    # Top of the slider reads as stock/unlocked.
+    page._update_max_readout(page._normal_max)
+    assert page.max_val.text() == "Stock (unlocked)"
+    page._update_max_readout(2500)
+    assert "Cap 2500 MHz" in page.max_val.text()
+
+    # Apply behaviour: top = unlock, below = cap. Reset = unlock.
+    with patch.object(gp.dgpu_tune, "set_desired_config") as sdc, \
+         patch.object(page, "_read_hw"), patch.object(page, "_refresh"):
+        page._apply_max(page._normal_max)
+        sdc.assert_called_once_with(max_enabled=False, max_clock=0)
+        sdc.reset_mock()
+        page._apply_max(2500)
+        assert sdc.call_args.kwargs == {"max_enabled": True, "max_clock": 2500}
+
+    # A cap set below the default travel (e.g. via CLI) widens the low end.
+    cfg["dgpu_max_clock_mhz"] = 1800
+    config_mod.save(cfg)
+    with patch.object(gp.dgpu_tune, "get_state", return_value={"offset_mhz": 100}), \
+         patch.object(gp.dgpu_tune, "probe",
+                      return_value={"supported": True, "gpu_max_clock_mhz": 3090}), \
+         patch.object(gp.dgpu_tune, "read_state_file",
+                      return_value={"applied_max": 1800}), \
+         patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
+         patch.object(gp, "get_gpu_state",
+                      return_value=GpuState(present=True, vendor="nvidia",
+                                            status="active", power_state="D0")), \
+         patch.object(gp, "gpu_status_text", return_value="Active"):
+        page.reload_from_config()
+    assert page.max_slider.minimum() == 1800
+    assert page.max_slider.value() == 1800
+    page.deleteLater()
+
+
+def test_gpu_page_sliders_not_reset_while_dragging(qapp):
+    """Regression: the refresh timer must not yank a slider mid-drag."""
+    from PyQt6.QtWidgets import QSlider
+
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({
+        "dgpu_undervolt_enabled": True,
+        "dgpu_undervolt_offset_mhz": 100,
+        "dgpu_max_clock_enabled": True,
+        "dgpu_max_clock_mhz": 2500,
+    })
+    config_mod.save(cfg)
+
+    page = gp.GpuPage()
+    with patch.object(gp.dgpu_tune, "get_state", return_value={"offset_mhz": 100}), \
+         patch.object(gp.dgpu_tune, "probe",
+                      return_value={"supported": True, "gpu_max_clock_mhz": 3090}), \
+         patch.object(gp.dgpu_tune, "read_state_file", return_value={"applied_max": 2500}), \
+         patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
+         patch.object(gp, "get_gpu_state",
+                      return_value=GpuState(present=True, vendor="nvidia", status="active")), \
+         patch.object(gp, "gpu_status_text", return_value="Active"):
+        page.reload_from_config()
+
+    # Simulate the user dragging both handles to new, not-yet-applied values.
+    page.uv_slider.setValue(220)
+    page.max_slider.setValue(2350)
+
+    with patch.object(QSlider, "isSliderDown", return_value=True), \
+         patch.object(gp.dgpu_tune, "get_state", return_value={"offset_mhz": 100}), \
+         patch.object(gp.dgpu_tune, "probe",
+                      return_value={"supported": True, "gpu_max_clock_mhz": 3090}), \
+         patch.object(gp.dgpu_tune, "read_state_file", return_value={"applied_max": 2500}), \
+         patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
+         patch.object(gp, "get_gpu_state",
+                      return_value=GpuState(present=True, vendor="nvidia", status="active")), \
+         patch.object(gp, "gpu_status_text", return_value="Active"):
+        page._refresh()
+        page._refresh()
+
+    assert page.uv_slider.value() == 220
+    assert page.max_slider.value() == 2350
+    page.deleteLater()
 
 
 def test_dashboard_profile_selection(qapp):
@@ -370,6 +497,7 @@ def test_settings_page(qapp):
     page = SettingsPage()
     assert page.chk_startup_apply is not None
     assert page.chk_sync_power is not None
+    assert page.chk_dgpu_auto is not None
 
     # Test toggling startup apply
     page.chk_startup_apply.setChecked(False)
@@ -385,15 +513,26 @@ def test_settings_page(qapp):
     page.chk_sync_power.setChecked(True)
     assert load_config()["sync_system_power"] is True
 
+    # Test toggling dGPU auto-apply (patched: no real GPU/helper access).
+    with patch("gigamate.dgpu_tune.find_nvidia_bdf", return_value=None), \
+         patch("gigamate.dgpu_tune._write_state_file"):
+        page.chk_dgpu_auto.setChecked(False)
+        assert load_config()["dgpu_undervolt_auto"] is False
+
+        page.chk_dgpu_auto.setChecked(True)
+        assert load_config()["dgpu_undervolt_auto"] is True
+
     # Test external config reload
     cfg = load_config()
     cfg["startup_apply"] = False
     cfg["sync_system_power"] = False
+    cfg["dgpu_undervolt_auto"] = False
     save_config(cfg)
 
     page.reload_from_config()
     assert page.chk_startup_apply.isChecked() is False
     assert page.chk_sync_power.isChecked() is False
+    assert page.chk_dgpu_auto.isChecked() is False
 
 
 def test_battery_page_when_battery_missing(qapp):

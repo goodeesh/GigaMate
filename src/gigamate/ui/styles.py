@@ -275,6 +275,10 @@ QPushButton.ColorPaletteBtn:checked {
  * Sliders & Progress Bars
  * ──────────────────────────────────────────── */
 
+QSlider {
+    min-height: 24px;
+}
+
 QSlider::groove:horizontal {
     height: 8px;
     background: #272f40;
@@ -291,7 +295,7 @@ QSlider::handle:horizontal {
     border: 2px solid #ff6b35;
     width: 18px;
     height: 18px;
-    margin: -6px 0;
+    margin: -7px 0;
     border-radius: 10px;
 }
 

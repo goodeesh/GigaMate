@@ -84,6 +84,25 @@ class SettingsPage(QWidget):
         chk_box2.addWidget(subtext2)
         s_layout.addLayout(chk_box2)
 
+        s_layout.addSpacing(6)
+
+        # dGPU Auto-Apply Checkbox
+        chk_box3 = QVBoxLayout()
+        chk_box3.setSpacing(4)
+        self.chk_dgpu_auto = QCheckBox("Apply dGPU undervolt / clock cap automatically on boot and resume")
+        self.chk_dgpu_auto.setChecked(self.cfg.get("dgpu_undervolt_auto", True))
+        self.chk_dgpu_auto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_dgpu_auto.toggled.connect(self._on_dgpu_auto_toggled)
+
+        subtext3 = QLabel("When off, the discrete GPU is left untouched on boot and resume; "
+                          "use Apply on the GPU page (or the CLI) each session. Disabling does "
+                          "not clear anything already applied.")
+        subtext3.setStyleSheet("color: #8896ab; font-size: 12px; margin-left: 26px;")
+        subtext3.setWordWrap(True)
+        chk_box3.addWidget(self.chk_dgpu_auto)
+        chk_box3.addWidget(subtext3)
+        s_layout.addLayout(chk_box3)
+
         layout.addWidget(startup_card)
 
         # ── Card 2: Background Service Management ──
@@ -239,6 +258,14 @@ class SettingsPage(QWidget):
         if checked:
             sync_system_power(self.cfg.get("acpi_profile", 1))
 
+    def _on_dgpu_auto_toggled(self, checked: bool) -> None:
+        try:
+            from ... import dgpu_tune
+            dgpu_tune.set_auto_config(checked)
+        except Exception:
+            pass
+        self.cfg = load_config()
+
     def _on_run_setup_clicked(self) -> None:
         """Re-open the first-run setup wizard."""
         try:
@@ -307,6 +334,10 @@ class SettingsPage(QWidget):
         self.chk_sync_power.blockSignals(True)
         self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", False))
         self.chk_sync_power.blockSignals(False)
+
+        self.chk_dgpu_auto.blockSignals(True)
+        self.chk_dgpu_auto.setChecked(self.cfg.get("dgpu_undervolt_auto", True))
+        self.chk_dgpu_auto.blockSignals(False)
 
         # Refresh the diagnostic chips too (driver/keyboard/battery hotplug).
         self._populate_diag_chips()
