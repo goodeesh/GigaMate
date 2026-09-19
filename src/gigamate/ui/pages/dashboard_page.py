@@ -18,6 +18,7 @@ from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
 from ...gpu import get_gpu_state, gpu_status_text
+from ...profiles import has_verified_profiles, resolve_profile
 from ...system_power import sync_system_power
 
 
@@ -28,6 +29,7 @@ class DashboardPage(QWidget):
         super().__init__(parent)
         self.acpi_ctrl = AcpiController()
         self._profile_buttons = {}
+        self._cached_profile = None
         self._init_ui()
 
         # Telemetry update timer (every 1.5s); only refreshes while visible.
@@ -42,7 +44,17 @@ class DashboardPage(QWidget):
 
     def reload_from_config(self) -> None:
         """Public page-lifecycle hook: refresh telemetry/highlight."""
+        self._cached_profile = None
         self._refresh_telemetry()
+
+    def _model_profile(self):
+        """Resolve the matching model profile (cached; refreshed on reload)."""
+        if self._cached_profile is None:
+            try:
+                self._cached_profile = resolve_profile()
+            except Exception:
+                self._cached_profile = None
+        return self._cached_profile
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -215,16 +227,35 @@ class DashboardPage(QWidget):
         self._ensure_acpi_controller()
 
         if self.acpi_ctrl.available:
-            self.acpi_warning_box.setVisible(False)
             self.telemetry_card.setVisible(True)
             self.cpu_tile.setVisible(True)
             self.duty_tile.setVisible(True)
 
             # Fan count awareness
             caps = self.acpi_ctrl.capabilities
-            # Only offer profile switching when the backend actually exposes it.
-            for btn in self._profile_buttons.values():
-                btn.setEnabled(bool(caps.has_power_profiles))
+            # Profile switching is a per-model contract: only enable buttons
+            # when a matching model profile declares it as verified, and only
+            # for the profile ids that model actually defines.
+            model = self._model_profile()
+            verified = has_verified_profiles(model)
+            model_set = (
+                set(int(k) for k in model.acpi.profiles.keys())
+                if verified and model is not None and model.acpi
+                else set()
+            )
+            for prof, btn in self._profile_buttons.items():
+                btn.setEnabled(verified and prof.value in model_set)
+
+            if verified:
+                self.acpi_warning_box.setVisible(False)
+            else:
+                self.acpi_warning_box.setVisible(True)
+                self.wb_title.setText("ℹ️ Power profiles not verified for this model")
+                self.wb_desc.setText(
+                    "Profile switching is only enabled on models with a confirmed profile. "
+                    "On this unit the controls may do nothing, so they stay disabled. "
+                    "Run 'gigamate calibrate acpi' to generate a candidate profile."
+                )
             fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
             fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
             if not caps.has_fan_rpm:

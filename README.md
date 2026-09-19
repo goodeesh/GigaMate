@@ -111,11 +111,18 @@ Your laptop isn't supported yet? Run these three commands:
 
 ```sh
 gigamate calibrate rgb              # Map keyboard colours (5 min)
-gigamate detect --acpi              # Probe ACPI capabilities
+gigamate calibrate acpi             # Probe ACPI + generate a candidate profile
 gigamate profile contribute         # Print PR instructions to share
 ```
 
 No coding required. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+> **Power profiles are only shown on verified models.** GigaMate never exposes
+> profile controls on hardware whose profile switching hasn't been confirmed
+> (an EC can accept a write without acting on it). `gigamate calibrate acpi`
+> generates a candidate profile for your model — sensors are auto-detected, but
+> profile switching stays off until you explicitly confirm it as experimental,
+> and it only unlocks for everyone once the profile is shipped as a built-in.
 
 ---
 

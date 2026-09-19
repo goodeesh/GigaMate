@@ -253,6 +253,22 @@ def get_dmi_chassis_type() -> Optional[int]:
     return None
 
 
+def get_dmi_product_family() -> Optional[str]:
+    """Read the product family string from sysfs DMI tables if available."""
+    dmi_path = Path("/sys/class/dmi/id")
+    try:
+        family_file = dmi_path / "product_family"
+        if family_file.is_file():
+            family = family_file.read_text().strip()
+            if family and family.lower() not in (
+                "", "none", "unknown", "to be filled by o.e.m.", "default string"
+            ):
+                return family
+    except (OSError, IOError, PermissionError):
+        pass
+    return None
+
+
 
 def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[DeviceProfile]:
     if vid is None or pid is None:
@@ -261,6 +277,26 @@ def resolve_profile(vid: Optional[int] = None, pid: Optional[int] = None) -> Opt
             return None
         vid, pid = detected
     return all_profiles().get((vid, pid))
+
+
+def has_verified_profiles(profile: Optional[DeviceProfile]) -> bool:
+    """Whether a device profile authoritatively declares working power profiles.
+
+    Profile switching is only exposed to users when a matching model profile
+    (built-in or user-supplied) declares ``acpi.has_power_profiles`` **and** a
+    non-empty ``acpi.profiles`` set. Backend detection alone ("the AMW0 WMI
+    interface answers sensor reads") never enables the profile UI: different
+    Gigabyte EC generations implement different commands, and an EC can accept
+    a profile write without acting on it. ``has_power_profiles`` is therefore a
+    per-model contract, not something a probe can prove.
+    """
+    return bool(
+        profile is not None
+        and profile.has_acpi
+        and profile.acpi is not None
+        and profile.acpi.has_power_profiles
+        and bool(profile.acpi.profiles)
+    )
 
 
 def save_user_profile(profile: DeviceProfile) -> Path:
@@ -299,7 +335,7 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
     if not (0x0000 <= profile.pid <= 0xFFFF):
         errors.append(f"Invalid PID: {profile.pid:04X}")
 
-    if not profile.interfaces:
+    if profile.has_rgb and not profile.interfaces:
         errors.append("No USB interfaces specified")
 
     if profile.has_rgb:
