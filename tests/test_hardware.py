@@ -5,6 +5,27 @@ import pytest
 
 from gigamate.hardware import apply_hardware_settings
 from gigamate.acpi import FanProfile
+from gigamate.profiles import AcpiConfig, DeviceProfile
+
+
+def _verified_profile() -> DeviceProfile:
+    """A model profile that authoritatively declares profile support."""
+    return DeviceProfile(
+        vid=0x0414,
+        pid=0x8105,
+        name="Test Aero",
+        interfaces=[],
+        control_interface=0,
+        acpi=AcpiConfig(
+            has_fan_control=True,
+            has_temperature=True,
+            has_power_profiles=True,
+            fan_count=2,
+            profiles={str(i): {"name": n, "desc": ""} for i, n in enumerate(
+                ["Quiet", "Balanced", "Performance", "Gaming"])},
+            backend="module",
+        ),
+    )
 
 
 def test_apply_hardware_settings_full():
@@ -24,7 +45,8 @@ def test_apply_hardware_settings_full():
          patch("gigamate.battery.get_battery_manager") as mock_get_bat, \
          patch("gigamate.protocol.get_keyboard") as mock_get_kb, \
          patch("gigamate.protocol.set_static") as mock_set_static, \
-         patch("gigamate.hardware.resolve_active_profile", return_value=None):
+         patch("gigamate.protocol.set_off") as mock_set_off, \
+         patch("gigamate.hardware.resolve_active_profile", return_value=_verified_profile()):
 
         mock_ctrl = MagicMock()
         mock_ctrl.available = True
@@ -155,6 +177,18 @@ def test_invalid_acpi_profile_does_not_crash_or_sync():
     cfg = {"acpi_profile": "gaming", "sync_system_power": True}
     with patch("gigamate.acpi.AcpiController") as mock_ctrl_cls, \
          patch("gigamate.system_power.sync_system_power") as mock_sync_sys:
+        results = apply_hardware_settings(cfg)
+        assert results["profile"] is False
+        mock_ctrl_cls.assert_not_called()
+        mock_sync_sys.assert_not_called()
+
+
+def test_apply_hardware_settings_skips_unverified_model_profile():
+    """A model without a verified profile must not re-apply (dead control)."""
+    cfg = {"acpi_profile": 2, "sync_system_power": True}
+    with patch("gigamate.acpi.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.system_power.sync_system_power") as mock_sync_sys, \
+         patch("gigamate.hardware.resolve_active_profile", return_value=None):
         results = apply_hardware_settings(cfg)
         assert results["profile"] is False
         mock_ctrl_cls.assert_not_called()

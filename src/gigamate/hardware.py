@@ -64,36 +64,52 @@ def _apply_hardware_settings_locked(
     prof_val = cfg.get("acpi_profile")
     if prof_val is not None:
         from .acpi import AcpiController, FanProfile
+        from .profiles import has_verified_profiles
 
-        # Parse the persisted profile id in its own error domain so a bad value
-        # cannot suppress the system/GPU power sync below.
-        fp: Optional[FanProfile] = None
-        try:
-            fp = FanProfile(int(prof_val))
-        except (TypeError, ValueError):
-            logger.warning("Hardware sync: ignoring invalid acpi_profile %r", prof_val)
-
-        if fp is not None:
-            acpi_available = False
+        # Only re-apply the persisted profile when the matching model profile
+        # declares profile support as verified. Otherwise a re-apply is a dead
+        # control: the EC may accept the write and ignore it.
+        model = resolve_active_profile()
+        if not has_verified_profiles(model):
+            logger.info("Hardware sync: skipping ACPI profile (unverified model)")
+        else:
+            model_ids = set(int(k) for k in model.acpi.profiles.keys())
             try:
-                ctrl = AcpiController()
-                acpi_available = ctrl.available
-                if ctrl.available and ctrl.set_profile(fp):
-                    results["profile"] = True
-                    logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
-            except Exception as exc:
-                logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
-
-            # System power sync also synchronizes GPU power (Dynamic Boost /
-            # SmartShift); honour the user's sync_system_power preference when ACPI is available.
-            if acpi_available:
+                prof_val_i = int(prof_val)
+            except (TypeError, ValueError):
+                prof_val_i = None
+            if prof_val_i is None or prof_val_i not in model_ids:
+                logger.warning("Hardware sync: ignoring acpi_profile %r (not in model set)", prof_val)
+            else:
+                # Parse the persisted profile id in its own error domain so a bad value
+                # cannot suppress the system/GPU power sync below.
+                fp: Optional[FanProfile] = None
                 try:
-                    if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
-                        from .system_power import sync_system_power
+                    fp = FanProfile(prof_val_i)
+                except (TypeError, ValueError):
+                    logger.warning("Hardware sync: ignoring invalid acpi_profile %r", prof_val)
 
-                        sync_system_power(int(prof_val))
-                except Exception as exc:
-                    logger.warning(f"Hardware sync failed for system power: {exc}")
+                if fp is not None:
+                    acpi_available = False
+                    try:
+                        ctrl = AcpiController()
+                        acpi_available = ctrl.available
+                        if ctrl.available and ctrl.set_profile(fp):
+                            results["profile"] = True
+                            logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
+                    except Exception as exc:
+                        logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
+
+                    # System power sync also synchronizes GPU power (Dynamic Boost /
+                    # SmartShift); honour the user's sync_system_power preference when ACPI is available.
+                    if acpi_available:
+                        try:
+                            if cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
+                                from .system_power import sync_system_power
+
+                                sync_system_power(int(prof_val))
+                        except Exception as exc:
+                            logger.warning(f"Hardware sync failed for system power: {exc}")
 
     # ─────────────────────────────────────────────────────────────
     # 2. Battery Care & Charging Limit

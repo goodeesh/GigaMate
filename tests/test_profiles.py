@@ -1,5 +1,6 @@
 import json
 import pytest
+from unittest.mock import patch
 
 from gigamate.profiles import (
     DeviceProfile,
@@ -10,6 +11,7 @@ from gigamate.profiles import (
     resolve_profile,
     save_user_profile,
     validate_profile,
+    has_verified_profiles,
     BUILTIN_DATA_DIR,
     USER_PROFILES_DIR,
 )
@@ -369,8 +371,9 @@ class TestGetDmiProductName:
         cli.cmd_profile_contribute(args)
         captured = capsys.readouterr().out
         assert "Model: GIGABYTE Gaming A16" in captured
-        assert "Your laptop uses direct ACPI hardware control" in captured
-        assert "No custom device profile is needed" in captured
+        assert "power-profile support is unverified" in captured
+        assert "gigamate calibrate acpi" in captured
+        assert "fully supported out-of-the-box" not in captured
 
 
 
@@ -420,6 +423,77 @@ def test_shared_vid_accepted_with_gigabyte_manufacturer(monkeypatch):
     assert profiles_mod.detect_device() == (0x1044, 0x1234)
 
 
+class TestHasVerifiedProfiles:
+    def _profile(self, **kw):
+        return DeviceProfile(vid=0x0414, pid=0x8105, name="Test", **kw)
+
+    def test_none_is_unverified(self):
+        assert has_verified_profiles(None) is False
+
+    def test_no_acpi_is_unverified(self):
+        assert has_verified_profiles(self._profile()) is False
+
+    def test_acpi_without_profiles_is_unverified(self):
+        profile = self._profile(acpi=AcpiConfig(has_power_profiles=True))
+        assert has_verified_profiles(profile) is False
+
+    def test_acpi_but_not_declared_is_unverified(self):
+        profile = self._profile(acpi=AcpiConfig(profiles={"0": {"name": "Quiet"}}))
+        assert has_verified_profiles(profile) is False
+
+    def test_declared_profiles_is_verified(self):
+        profile = self._profile(acpi=AcpiConfig(
+            has_power_profiles=True, profiles={"0": {"name": "Quiet"}},
+        ))
+        assert has_verified_profiles(profile) is True
+
+    def test_builtin_aero_x16_is_verified(self):
+        assert has_verified_profiles(load_builtin_profiles()[(0x0414, 0x8105)]) is True
+
+
+class TestGetDmiProductFamily:
+    def _patch_dmi(self, tmp_path, monkeypatch):
+        import gigamate.profiles as p
+
+        dmi = tmp_path / "dmi"
+        dmi.mkdir()
+
+        def fake_path(arg):
+            if str(arg).startswith("/sys/class/dmi/id"):
+                return dmi
+            return p.Path(arg)
+
+        monkeypatch.setattr(p, "Path", fake_path)
+        return dmi
+
+    def test_reads_family(self, tmp_path, monkeypatch):
+        dmi = self._patch_dmi(tmp_path, monkeypatch)
+        (dmi / "product_family").write_text("GIGABYTE GAMING\n")
+        import gigamate.profiles as p
+
+        assert p.get_dmi_product_family() == "GIGABYTE GAMING"
+
+    def test_missing_family_is_none(self, tmp_path, monkeypatch):
+        self._patch_dmi(tmp_path, monkeypatch)
+        import gigamate.profiles as p
+
+        assert p.get_dmi_product_family() is None
+
+
+class TestValidateAcpiOnlyProfile:
+    def test_empty_interfaces_allowed_without_rgb(self):
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="ACPI Only",
+            interfaces=[], control_interface=0,
+            acpi=AcpiConfig(
+                has_fan_control=True, has_temperature=True, has_power_profiles=True,
+                fan_count=2,
+                profiles={"0": {"name": "Quiet"}, "1": {"name": "Balanced"}},
+            ),
+        )
+        assert validate_profile(profile) == []
+
+
 class TestValidateHotkeys:
     def _profile(self, hotkeys):
         return DeviceProfile(
@@ -456,3 +530,157 @@ class TestValidateHotkeys:
         })
         errors = validate_profile(profile)
         assert any("key_name" in e for e in errors)
+
+
+class TestProfileCliGating:
+    """Power-profile CLI commands must refuse to act on unverified models."""
+
+    @staticmethod
+    def _args():
+        import argparse
+
+        return argparse.Namespace(vid=None, pid=None)
+
+    def test_set_refuses_unverified(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
+            mock_ctrl_cls.return_value.available = True
+            with pytest.raises(SystemExit):
+                cli.cmd_profile_set(self._args(), "performance")
+        captured = capsys.readouterr().out
+        assert "not enabled for this model" in captured
+
+    def test_cycle_refuses_unverified(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
+            mock_ctrl_cls.return_value.available = True
+            with pytest.raises(SystemExit):
+                cli.cmd_profile_cycle(self._args())
+        captured = capsys.readouterr().out
+        assert "not enabled for this model" in captured
+
+    def test_show_refuses_unverified(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
+            mock_ctrl_cls.return_value.available = True
+            with pytest.raises(SystemExit):
+                cli.cmd_profile_show(self._args())
+        captured = capsys.readouterr().out
+        assert "not enabled for this model" in captured
+
+    def test_set_rejects_profile_out_of_model_set(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Test",
+            acpi=AcpiConfig(has_power_profiles=True, profiles={
+                "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
+            }),
+        )
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: profile)
+        with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
+            mock_ctrl_cls.return_value.available = True
+            with pytest.raises(SystemExit):
+                cli.cmd_profile_set(self._args(), "3")
+        captured = capsys.readouterr().out
+        assert "not available on this model" in captured
+
+    def test_set_allows_in_model_profile(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        profile = DeviceProfile(
+            vid=0x0414, pid=0x8105, name="Test",
+            acpi=AcpiConfig(has_power_profiles=True, profiles={
+                "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
+            }),
+        )
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: profile)
+        with patch("gigamate.cli.AcpiController") as mock_ctrl_cls, \
+             patch("gigamate.cli._record_profile_and_sync") as mock_record:
+            mock_ctrl = mock_ctrl_cls.return_value
+            mock_ctrl.available = True
+            mock_ctrl.set_profile.return_value = True
+            cli.cmd_profile_set(self._args(), "balanced")
+        captured = capsys.readouterr().out
+        assert "Power profile set to: Balanced  (1)" in captured
+        mock_record.assert_called_once_with(1)
+
+
+class TestCalibrateAcpi:
+    def _caps(self, **kw):
+        from gigamate.acpi import AcpiCapabilities
+
+        defaults = dict(
+            has_temperature=True, has_fan_rpm=True, has_fan_duty=True,
+            has_power_profiles=True, fan_count=2, backend="module",
+        )
+        defaults.update(kw)
+        return AcpiCapabilities(**defaults)
+
+    def test_requires_detected_keyboard(self, monkeypatch, capsys):
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "detect_device", lambda: None)
+        cli.cmd_calibrate_acpi(self._args())
+        captured = capsys.readouterr().out
+        assert "nothing can be saved" in captured
+
+    def test_profiles_off_without_consent(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "detect_device", lambda: (0x0414, 0x9999))
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "Test Laptop")
+        monkeypatch.setattr(cli, "probe_acpi_capabilities", lambda: self._caps())
+        monkeypatch.setattr(cli, "get_dmi_product_family", lambda: "GIGABYTE GAMING")
+        mock_save = MagicMock(return_value=object())
+        monkeypatch.setattr(cli, "save_user_profile", mock_save)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "n")  # decline
+
+        cli.cmd_calibrate_acpi(self._args())
+        captured = capsys.readouterr().out
+        assert "stays disabled for this model until verified" in captured
+        saved = mock_save.call_args[0][0]
+        assert saved.acpi.has_power_profiles is False
+        assert saved.acpi.profiles == {}
+        assert saved.acpi.has_fan_control is True
+        assert saved.acpi.has_temperature is True
+
+    def test_profiles_enabled_with_consent(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "detect_device", lambda: (0x0414, 0x9999))
+        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "Test Laptop")
+        monkeypatch.setattr(cli, "probe_acpi_capabilities", lambda: self._caps())
+        monkeypatch.setattr(cli, "get_dmi_product_family", lambda: "GIGABYTE GAMING")
+        mock_save = MagicMock(return_value=object())
+        monkeypatch.setattr(cli, "save_user_profile", mock_save)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "y")  # accept
+
+        cli.cmd_calibrate_acpi(self._args())
+        captured = capsys.readouterr().out
+        assert "now enabled for this model (experimental)" in captured
+        saved = mock_save.call_args[0][0]
+        assert saved.acpi.has_power_profiles is True
+        assert saved.acpi.profiles == {
+            "0": {"name": "eco", "desc": ""},
+            "1": {"name": "balanced", "desc": ""},
+            "2": {"name": "boost", "desc": ""},
+        }
+
+    @staticmethod
+    def _args():
+        import argparse
+
+        return argparse.Namespace(vid=None, pid=None)

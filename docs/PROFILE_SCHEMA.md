@@ -141,7 +141,7 @@ via its AMW0 WMI device.
 |-------|------|---------|-------------|
 | `has_fan_control` | bool | `false` | Whether fan RPM/duty monitoring is available |
 | `has_temperature` | bool | `false` | Whether CPU/socket temperature sensors are available |
-| `has_power_profiles` | bool | `false` | Whether power profile switching (WMBD 0xED) works |
+| `has_power_profiles` | bool | `false` | Whether power profile switching (WMBD 0xED) works on **this model**. This is an authoritative per-model contract: GigaMate only exposes profile controls (tray menu, Center, `gigamate profile`, hotkey cycle, boot/resume re-apply) when a matching profile declares `true` **and** provides a non-empty `profiles` map. Backend detection alone (e.g. the AMW0 WMI interface answering sensor reads) never enables the UI, because different Gigabyte EC generations implement different commands and an EC can accept a profile write without acting on it. |
 | `fan_count` | int | `0` | Number of fans (1 or 2 typically) |
 | `fan_labels` | array of string | `[]` | Human-readable fan names, e.g. `["CPU Fan", "GPU Fan"]` |
 | `sensor_labels` | object | `{}` | Friendly names for temperature sensors |
@@ -265,9 +265,18 @@ for a complete example with all 11 colours and full ACPI section.
    - Interactive session (~5 min) that sends colour samples and asks you to name them
    - Saves to `~/.config/gigamate/profiles/{VID}_{PID}.json`
 
-2. **ACPI capabilities:** `gigamate detect --acpi`
-   - Automatically probes all ACPI commands and detects what works
-   - Appends the `acpi` section to your existing profile
+2. **ACPI capabilities:** `gigamate calibrate acpi`
+   - Probes the ACPI interface and generates/updates your model profile
+   - Sensors (temperature, fan RPM/duty) are detected automatically and saved
+   - `has_power_profiles` is **never auto-detected**: it stays `false` unless you
+     explicitly confirm the experimental profile set, because profile semantics
+     vary per EC generation and cannot be proven from software. When the DMI
+     product family matches a documented layout (Aero/AORUS → 4 fan-curve
+     profiles; `GIGABYTE GAMING` → eco/balanced/boost GPU-TGP modes) those names
+     are offered as a starting template, clearly labelled unverified.
+   - Enabling profile support this way only unlocks the controls for *your*
+     local profile; it stays hidden for everyone else until the profile is
+     shipped as a built-in (see Contributing).
 
 3. **Combined:** `gigamate calibrate all`
    - Runs both steps above in sequence

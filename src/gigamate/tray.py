@@ -35,7 +35,7 @@ from pathlib import Path
 from .protocol import set_static, set_off, get_keyboard
 from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
-    get_dmi_product_name, load_builtin_profiles,
+    get_dmi_product_name, load_builtin_profiles, has_verified_profiles,
 )
 from .config import CONFIG_FILE, load as load_config, update_config
 from .acpi import (
@@ -799,23 +799,27 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
 
     def _append_power_profile_section(self) -> None:
-        """Add Power Profile radio group (only if ACPI has power profiles)."""
-        if self._acpi_caps is None or not self._acpi_caps.has_power_profiles:
+        """Add Power Profile radio group (only for verified model profiles).
+
+        Profile switching is a per-model contract: it is only shown when a
+        matching model profile declares ``has_power_profiles`` with a curated
+        profile set. Backend detection alone never enables the menu, because
+        different EC generations implement different commands and a write can
+        be accepted without doing anything.
+        """
+        if self._acpi_controller is None or not self._acpi_controller.available:
+            return
+        if not has_verified_profiles(self._profile):
+            return
+
+        profile_names = self._profile.acpi.profiles
+        if not profile_names:
             return
 
         self._menu.append(Gtk.SeparatorMenuItem())
         header = Gtk.MenuItem(label="Power Profile")
         header.set_sensitive(False)
         self._menu.append(header)
-
-        # Get profile names: from AcpiConfig if available, otherwise use defaults
-        if self._profile is not None and self._profile.has_acpi and self._profile.acpi:
-            profile_names = self._profile.acpi.profiles
-        else:
-            profile_names = {
-                str(int(v)): {"name": k.capitalize(), "desc": ""}
-                for k, v in FanProfile.names().items()
-            }
 
         group = None
         self._profile_items = {}
@@ -849,7 +853,9 @@ class GigaMateTrayApp:
 
     def _append_settings_items(self) -> None:
         """Add settings items at the bottom of the menu."""
-        if is_system_power_available():
+        # System power-profile sync only makes sense when a verified model
+        # profile exists to map from; without one there is nothing to sync.
+        if is_system_power_available() and has_verified_profiles(self._profile):
             self._sync_power_item = Gtk.CheckMenuItem(label="Sync system power profile")
             self._sync_power_item.set_active(self._sync_system_power)
             self._sync_power_item.connect("toggled", self._on_sync_power_toggled)
@@ -1337,17 +1343,12 @@ class GigaMateTrayApp:
         """Handle hardware hotkey (e.g. the Mode key): cycle profile and show OSD."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
+        if not has_verified_profiles(self._profile):
+            return
 
         # Get available profiles
-        if self._profile is not None and self._profile.has_acpi and self._profile.acpi:
-            pids = sorted(int(k) for k in self._profile.acpi.profiles.keys())
-            p_data = self._profile.acpi.profiles
-        else:
-            pids = [0, 1, 2, 3]
-            p_data = {
-                str(int(v)): {"name": k.capitalize(), "desc": ""}
-                for k, v in FanProfile.names().items()
-            }
+        pids = sorted(int(k) for k in self._profile.acpi.profiles.keys())
+        p_data = self._profile.acpi.profiles
 
         if not pids:
             return

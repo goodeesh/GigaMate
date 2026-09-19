@@ -44,6 +44,15 @@ def test_detect_system_capabilities_full_gigabyte():
         vid=0x0414,
         pid=0x8105,
         name="Gigabyte Aero 16",
+        acpi=__import__("gigamate.profiles", fromlist=["AcpiConfig"]).AcpiConfig(
+            has_fan_control=True,
+            has_temperature=True,
+            has_power_profiles=True,
+            fan_count=2,
+            profiles={str(i): {"name": n, "desc": ""} for i, n in enumerate(
+                ["Quiet", "Balanced", "Performance", "Gaming"])},
+            backend="module",
+        ),
     )
 
     with patch("gigamate.capabilities.get_dmi_product_name", return_value="GIGABYTE AERO X16"), \
@@ -78,6 +87,7 @@ def test_detect_system_capabilities_full_gigabyte():
         assert caps.keyboard_detected is True
         assert caps.keyboard_profile_loaded is True
         assert caps.keyboard_profile_name == "Gigabyte Aero 16"
+        assert caps.profile_verified is True
         assert caps.has_dgpu is True
 
 
@@ -113,6 +123,7 @@ def test_detect_system_capabilities_uncalibrated_keyboard():
         assert caps.keyboard_detected is True
         assert caps.keyboard_profile_loaded is False
         assert caps.keyboard_vid_pid == (0x0414, 0x9999)
+        assert caps.profile_verified is False
 
 
 def test_detect_system_capabilities_missing_acpi_driver():

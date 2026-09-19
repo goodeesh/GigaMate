@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
+from ...profiles import has_verified_profiles, resolve_profile
 from ...system_power import sync_system_power
 
 
@@ -77,6 +78,10 @@ class SettingsPage(QWidget):
         self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", False))
         self.chk_sync_power.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chk_sync_power.toggled.connect(self._on_sync_power_toggled)
+
+        # System power sync is only meaningful with a verified model profile.
+        _sync_enabled = bool(has_verified_profiles(self._resolved_model_profile()))
+        self.chk_sync_power.setEnabled(_sync_enabled)
 
         subtext2 = QLabel("Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode.")
         subtext2.setStyleSheet("color: #8896ab; font-size: 12px; margin-left: 26px;")
@@ -239,6 +244,13 @@ class SettingsPage(QWidget):
             bat_val = "No Battery"
             bat_sub = "(Continuous AC)"
         self._diag_grid.addWidget(self._make_chip("Charge Limiter", bat_val, "🔋", bat_sub))
+
+    def _resolved_model_profile(self):
+        """Resolve the matching model profile (None when unmapped)."""
+        try:
+            return resolve_profile()
+        except Exception:
+            return None
 
     def _on_startup_apply_toggled(self, checked: bool) -> None:
         def _mutate(cfg):

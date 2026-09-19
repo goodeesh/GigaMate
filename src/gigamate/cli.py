@@ -43,6 +43,8 @@ from .profiles import (
     save_user_profile,
     DeviceProfile,
     get_dmi_product_name,
+    get_dmi_product_family,
+    has_verified_profiles,
 )
 from .config import load as load_config, save as save_config, update_config
 from .acpi import (
@@ -545,17 +547,45 @@ def _profile_name(profile: FanProfile, device_profile: Optional[DeviceProfile] =
     return profile.name.capitalize()
 
 
+_PROFILE_UNVERIFIED_HINT = (
+    "Power profiles are not enabled for this model. GigaMate only exposes profile\n"
+    "switching when a matching model profile declares it as verified (built-in or\n"
+    "created via 'gigamate calibrate acpi')."
+)
+
+
+def _verified_profile(args) -> Optional[DeviceProfile]:
+    """Resolve a model profile that authoritatively declares power profiles."""
+    profile = resolve_profile(args.vid, args.pid)
+    if has_verified_profiles(profile):
+        return profile
+    return None
+
+
+def _profile_set_for(profile: Optional[DeviceProfile]):
+    """Return ``(pids, profiles_map)`` for a verified profile, else ``(None, None)``."""
+    if profile is not None and profile.has_acpi and profile.acpi:
+        pids = sorted(int(k) for k in profile.acpi.profiles.keys())
+        return pids, profile.acpi.profiles
+    return None, None
+
+
 def cmd_profile_show(args) -> None:
     """Show current power profile."""
     ctrl = AcpiController()
     if not ctrl.available:
         print("ACPI not available. No power profile control.")
         sys.exit(1)
+    profile = _verified_profile(args)
+    if profile is None:
+        print("Power profiles: not enabled for this model (unverified).")
+        print()
+        print(_PROFILE_UNVERIFIED_HINT)
+        sys.exit(1)
     profile_val = ctrl.get_profile()
     if profile_val is None:
         print("Current power profile: Unknown")
         return
-    profile = resolve_profile(args.vid, args.pid)
     pname = _profile_name(profile_val, profile)
     print(f"Power Profile: {pname}  ({profile_val.value})")
 
@@ -580,38 +610,52 @@ def cmd_profile_set(args, name: str) -> None:
         print("ACPI not available. No power profile control.")
         sys.exit(1)
 
+    profile = _verified_profile(args)
+    pids, _p_data = _profile_set_for(profile)
+    if not pids:
+        print("Power profiles: not enabled for this model (unverified).")
+        print()
+        print(_PROFILE_UNVERIFIED_HINT)
+        sys.exit(1)
+
     # Try parsing as number first
     try:
         val = int(name)
-        if 0 <= val <= 3:
-            fp = FanProfile(val)
-            if ctrl.set_profile(fp):
-                _record_profile_and_sync(val)
-                profile = resolve_profile(args.vid, args.pid)
-                pname = _profile_name(fp, profile)
-                print(f"Power profile set to: {pname}  ({val})")
-                return
-            else:
-                print(f"Failed to set profile {val}", file=sys.stderr)
-                sys.exit(1)
     except ValueError:
-        pass
+        val = None
+    if val is not None:
+        if val not in pids:
+            print(f"Profile {val} is not available on this model.")
+            print(f"Available: {', '.join(str(p) for p in pids)}")
+            sys.exit(1)
+        fp = FanProfile(val)
+        if ctrl.set_profile(fp):
+            _record_profile_and_sync(val)
+            pname = _profile_name(fp, profile)
+            print(f"Power profile set to: {pname}  ({val})")
+            return
+        else:
+            print(f"Failed to set profile {val}", file=sys.stderr)
+            sys.exit(1)
 
     # Try parsing as name
     try:
         fp = FanProfile.from_name(name)
-        if ctrl.set_profile(fp):
-            _record_profile_and_sync(fp.value)
-            profile = resolve_profile(args.vid, args.pid)
-            pname = _profile_name(fp, profile)
-            print(f"Power profile set to: {pname}  ({fp.value})")
-            return
-        else:
-            print(f"Failed to set profile '{name}'", file=sys.stderr)
-            sys.exit(1)
     except KeyError:
         print(f"Unknown profile: '{name}'")
-        print(f"Available: {', '.join(FanProfile.names().keys())}")
+        print(f"Available: {', '.join(str(p) for p in pids)}")
+        sys.exit(1)
+    if fp.value not in pids:
+        print(f"Profile '{name}' ({fp.value}) is not available on this model.")
+        print(f"Available: {', '.join(str(p) for p in pids)}")
+        sys.exit(1)
+    if ctrl.set_profile(fp):
+        _record_profile_and_sync(fp.value)
+        pname = _profile_name(fp, profile)
+        print(f"Power profile set to: {pname}  ({fp.value})")
+        return
+    else:
+        print(f"Failed to set profile '{name}'", file=sys.stderr)
         sys.exit(1)
 
 
@@ -622,19 +666,12 @@ def cmd_profile_cycle(args) -> None:
         print("ACPI not available. No power profile control.")
         sys.exit(1)
 
-    profile = resolve_profile(args.vid, args.pid)
-    if profile is not None and profile.has_acpi and profile.acpi:
-        pids = sorted(int(k) for k in profile.acpi.profiles.keys())
-        p_data = profile.acpi.profiles
-    else:
-        pids = [0, 1, 2, 3]
-        p_data = {
-            str(int(v)): {"name": k.capitalize(), "desc": ""}
-            for k, v in FanProfile.names().items()
-        }
-
+    profile = _verified_profile(args)
+    pids, p_data = _profile_set_for(profile)
     if not pids:
-        print("No profiles configured.")
+        print("Power profiles: not enabled for this model (unverified).")
+        print()
+        print(_PROFILE_UNVERIFIED_HINT)
         sys.exit(1)
 
     current_fp = ctrl.get_profile()
@@ -680,11 +717,11 @@ def cmd_profile_contribute(args) -> None:
         model = dmi_model or "Gigabyte Laptop"
         print()
         print(f"  Model: {model}")
-        print("  ACPI interface: Detected & Working")
+        print("  ACPI interface: detected (sensors), but power-profile support is unverified.")
         print()
-        print("  Your laptop uses direct ACPI hardware control without a USB RGB keyboard.")
-        print("  Fan monitoring and power profiles are already fully supported out-of-the-box!")
-        print("  No custom device profile is needed.")
+        print("  GigaMate only exposes profile switching on models with a confirmed profile.")
+        print("  Run 'gigamate calibrate acpi' to generate a candidate profile for this model,")
+        print("  then contribute it so it ships as verified support.")
         print()
         return
     else:
@@ -771,7 +808,7 @@ def cmd_detect(args) -> None:
             print(f"          Temperature:  {'✅' if caps.has_temperature else '❌'}")
             print(f"          Fan RPM:      {'✅' if caps.has_fan_rpm else '❌'}")
             print(f"          Fan Duty:     {'✅' if caps.has_fan_duty else '❌'}")
-            print(f"          Power Profiles: {'✅' if caps.has_power_profiles else '❌'}")
+            print(f"          Power Profiles: {'⚠️ unverified' if caps.has_power_profiles else '❌'}")
             print()
             print("  For detailed probe: gigamate detect --acpi")
         else:
@@ -806,18 +843,19 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
     print(f"  Temperature: {'✅ Detected' if caps.has_temperature else '❌ Not available'}")
     print(f"  Fan RPM:    {'✅ Detected' if caps.has_fan_rpm else '❌ Not available'}")
     print(f"  Fan Duty:   {'✅ Detected' if caps.has_fan_duty else '❌ Not available'}")
-    print(f"  Profiles:   {'✅ Detected' if caps.has_power_profiles else '❌ Not available'}")
+    if caps.has_power_profiles:
+        print("  Profiles:   ⚠️ Interface detected, but unverified for this model")
+        print("              Profile switching is only enabled by a matching model profile.")
+        print("              Run 'gigamate calibrate acpi' to generate one.")
+    else:
+        print("  Profiles:   ❌ Not available")
     if caps.fan_count > 0:
         print(f"  Fans:       {caps.fan_count}")
-    if caps.profile_ids:
-        print(f"  Profile IDs: {caps.profile_ids}")
     print()
 
     if caps.backend in ("module", "acpi_call"):
-        print("  To save this configuration to your device profile:")
-        print("    1. Create/edit your profile at ~/.config/gigamate/profiles/")
-        print("    2. Add the 'acpi' section (see docs/PROFILE_SCHEMA.md)")
-        print("    3. Run 'gigamate profile contribute' to share it")
+        print("  To generate a model profile (sensors auto-detected, profiles opt-in):")
+        print("  Run 'gigamate calibrate acpi'")
     print()
 
 
@@ -958,18 +996,46 @@ def cmd_calibrate_rgb(args) -> None:
     cmd_rgb_calibrate(args)
 
 
+# Documented ACPI profile layouts, keyed by DMI product family. These come from
+# community reverse-engineering (e.g. the gigabyte-laptop-wmi driver family):
+# Aero/AORUS use four fan-curve profiles, while Gigabyte Gaming models (e.g.
+# A16) expose eco/balanced/boost that program the NVIDIA platform controller
+# for GPU TGP. They are *hypotheses* to seed a candidate profile — never
+# evidence that a given unit honours them.
+_ACPI_PROFILE_TEMPLATES = {
+    "AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
+    "AORUS": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
+    "GIGABYTE AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
+    "GIGABYTE GAMING": {0: "eco", 1: "balanced", 2: "boost"},
+}
+
+
+def _family_acpi_template() -> Optional[dict]:
+    """Return the documented profile-name template for the DMI product family, if any."""
+    family = (get_dmi_product_family() or "").upper()
+    for key, tpl in _ACPI_PROFILE_TEMPLATES.items():
+        if key in family:
+            return dict(tpl)
+    return None
+
+
 def cmd_calibrate_acpi(args) -> None:
-    """Run ACPI capability probe and save to profile."""
+    """Probe ACPI capabilities and generate/update a model profile."""
     print("GigaMate — ACPI Calibration")
     print()
 
     detected = detect_device()
     if detected is None:
-        print("No Gigabyte keyboard detected. ACPI probe still possible.")
-        vid, pid = 0, 0
-    else:
-        vid, pid = detected
-        print(f"Detected keyboard: {vid:04X}:{pid:04X}")
+        print("No Gigabyte USB device detected. A sensor probe is still possible, but a")
+        print("model profile is keyed on the keyboard's USB VID:PID, so nothing can be saved")
+        print("without a detected Gigabyte keyboard.")
+        print()
+        caps = probe_acpi_capabilities()
+        _print_acpi_caps(caps)
+        return
+
+    vid, pid = detected
+    print(f"Detected keyboard: {vid:04X}:{pid:04X}")
 
     print()
     print("Probing ACPI capabilities...")
@@ -980,57 +1046,74 @@ def cmd_calibrate_acpi(args) -> None:
         print("No ACPI interface found. Nothing to save.")
         return
 
-    # Check if we have a profile to update
-    profile = resolve_profile(vid, pid) if detected else None
-    if profile is not None:
-        print(f"Current profile: {profile.name}")
-        ans = input("Add ACPI capabilities to this profile? [Y/n] ").strip().lower()
-        if ans not in ("", "y", "yes"):
-            print("Skipped.")
-            return
-
-        # Build AcpiConfig from probed capabilities
-        from .profiles import AcpiConfig
-        fan_labels = []
-        if caps.fan_count >= 1:
-            fan_labels.append("Fan 1")
-        if caps.fan_count >= 2:
-            fan_labels.append("Fan 2")
-
-        sensor_labels = {}
-        if caps.has_temperature:
-            sensor_labels["temp_cpu"] = "CPU Temp"
-            sensor_labels["temp_socket"] = "Socket Temp"
-
-        profile_names = {}
-        if caps.has_power_profiles:
-            for pid_int in caps.profile_ids:
-                default_names = {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
-                name = default_names.get(pid_int, f"Profile {pid_int}")
-                profile_names[str(pid_int)] = {"name": name, "desc": ""}
-
-        profile.acpi = AcpiConfig(
-            has_fan_control=caps.has_fan_rpm or caps.has_fan_duty,
-            has_temperature=caps.has_temperature,
-            has_power_profiles=caps.has_power_profiles,
-            fan_count=caps.fan_count,
-            fan_labels=fan_labels,
-            sensor_labels=sensor_labels,
-            profiles=profile_names,
-            backend=caps.backend,
+    profile = resolve_profile(vid, pid)
+    if profile is None:
+        model = get_dmi_product_name() or f"{vid:04X}:{pid:04X}"
+        profile = DeviceProfile(
+            vid=vid, pid=pid, name=model, interfaces=[], control_interface=0
         )
-
-        path = save_user_profile(profile)
-        print(f"\n✅ Profile updated: {path}")
-        print()
-        print("To use right now:")
-        print("  Open the tray menu and click 'Reload profiles'")
-        print()
-        print("To share with the community:")
-        print("  gigamate profile contribute")
+        print(f"Creating a new ACPI-only profile for: {profile.name}")
     else:
-        print("No device profile to update.")
-        print("Run 'gigamate rgb calibrate' first to create a keyboard profile.")
+        print(f"Updating existing profile: {profile.name}")
+
+    # Build the ACPI section from what the probe actually detected. Sensors are
+    # reliably detectable; power-profile semantics are not, so profile support
+    # stays off by default and only gets enabled with explicit, informed consent.
+    from .profiles import AcpiConfig
+
+    fan_labels = []
+    if caps.fan_count >= 1:
+        fan_labels.append("Fan 1")
+    if caps.fan_count >= 2:
+        fan_labels.append("Fan 2")
+
+    sensor_labels = {}
+    if caps.has_temperature:
+        sensor_labels["temp_cpu"] = "CPU Temp"
+        sensor_labels["temp_socket"] = "Socket Temp"
+
+    profiles_map = {}
+    template = _family_acpi_template()
+    if caps.has_power_profiles and template:
+        print()
+        print("The AMW0 interface answers, and this machine's DMI product family matches")
+        print("a documented layout. We can seed profile names from community knowledge:")
+        print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(template.items())))
+        print()
+        print("⚠️  These controls are NOT verified on your specific unit. On some EC")
+        print("    firmwares, profile writes are accepted but do nothing. Enabling this")
+        print("    shows profile controls that may have no effect.")
+        ans = input("Enable experimental power profiles for this model? [y/N] ").strip().lower()
+        if ans in ("y", "yes"):
+            profiles_map = {str(k): {"name": v, "desc": ""} for k, v in template.items()}
+    elif caps.has_power_profiles:
+        print()
+        print("The AMW0 interface answers sensor reads, but no documented profile layout is")
+        print("known for this model family, so power-profile switching stays DISABLED.")
+        print("Profiles remain hidden until a verified model profile is shipped.")
+        print()
+
+    profile.acpi = AcpiConfig(
+        has_fan_control=caps.has_fan_rpm or caps.has_fan_duty,
+        has_temperature=caps.has_temperature,
+        has_power_profiles=bool(profiles_map),
+        fan_count=caps.fan_count,
+        fan_labels=fan_labels,
+        sensor_labels=sensor_labels,
+        profiles=profiles_map,
+        backend=caps.backend,
+    )
+
+    path = save_user_profile(profile)
+    print(f"\n✅ Profile saved: {path}")
+    print()
+    if profiles_map:
+        print("Profile switching is now enabled for this model (experimental).")
+    else:
+        print("Profile switching stays disabled for this model until verified.")
+    print()
+    print("To share with the community:")
+    print("  gigamate profile contribute")
 
 
 # ────────────────────────────────────────────

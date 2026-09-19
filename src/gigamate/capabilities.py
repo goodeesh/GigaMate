@@ -20,6 +20,7 @@ from .profiles import (
     get_dmi_chassis_type,
     get_dmi_product_name,
     get_dmi_vendor,
+    has_verified_profiles,
     resolve_profile,
 )
 
@@ -57,6 +58,7 @@ class HardwareCapabilities:
     acpi_driver_loaded: bool  # True if gigamate_acpi sysfs is active
     acpi_driver_missing: bool  # True if it is a Gigabyte laptop, but ACPI driver is not loaded
     has_power_profiles: bool
+    profile_verified: bool  # True only when a model profile declares has_power_profiles
     has_temperature: bool
     has_fan_rpm: bool
     fan_count: int
@@ -137,10 +139,6 @@ def _probe_system_capabilities() -> HardwareCapabilities:
     acpi_backend = acpi_caps.backend
     driver_loaded = acpi_backend == "module"
 
-    # The gigamate_acpi module only binds on genuine Gigabyte ECs.
-    if acpi_backend == "module":
-        is_gigabyte = True
-
     # A Gigabyte keyboard VID alone does not make the *laptop* Gigabyte (an
     # external keyboard on a desktop must not trigger thermal-control advice).
     detected_kbd = detect_device()
@@ -157,6 +155,12 @@ def _probe_system_capabilities() -> HardwareCapabilities:
             keyboard_profile_loaded = True
             keyboard_profile_name = prof.name
 
+    # Profile switching is a per-model contract, never derived from the probe.
+    # Only a matching model profile that declares has_power_profiles enables it.
+    profile_verified = has_verified_profiles(
+        resolve_profile(detected_kbd[0], detected_kbd[1]) if detected_kbd else None
+    )
+
     # 5. GPU Subsystem
     gpu_state = get_gpu_state()
     has_dgpu = gpu_state.present
@@ -171,6 +175,7 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         acpi_driver_loaded=driver_loaded,
         acpi_driver_missing=acpi_missing,
         has_power_profiles=acpi_caps.has_power_profiles,
+        profile_verified=profile_verified,
         has_temperature=acpi_caps.has_temperature,
         has_fan_rpm=acpi_caps.has_fan_rpm,
         fan_count=acpi_caps.fan_count,
