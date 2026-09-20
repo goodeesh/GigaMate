@@ -93,8 +93,9 @@ app_version() {
     [ -f "$init_py" ] || return 0
     python3 -c "
 import re, sys
-s = open(sys.argv[1], encoding='utf-8', errors='replace').read()
-m = re.search(r'__version__\s*=\s*[\"']([^\"']+)[\"']', s)
+q = chr(34) + chr(39)
+pat = r'__version__\s*=\s*[' + q + ']([^' + q + ']+)[' + q + ']'
+m = re.search(pat, open(sys.argv[1], encoding='utf-8', errors='replace').read())
 print(m.group(1) if m else '')
 " "$init_py" 2>/dev/null || true
 }

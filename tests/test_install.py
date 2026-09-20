@@ -1,8 +1,36 @@
 """Lightweight sanity checks for install.sh — the release hardening changes."""
 
+import re
+import subprocess
 from pathlib import Path
 
 INSTALL = Path(__file__).resolve().parent.parent / "install.sh"
+INIT_PY = Path(__file__).resolve().parent.parent / "src" / "gigamate" / "__init__.py"
+
+
+def _extract_function(name):
+    lines = INSTALL.read_text().splitlines()
+    out = []
+    capture = False
+    for ln in lines:
+        if ln.startswith(f"{name}()"):
+            capture = True
+        if capture:
+            out.append(ln)
+            if ln == "}":
+                break
+    return "\n".join(out)
+
+
+def test_app_version_function_returns_version():
+    """The released module-version derivation must actually parse __version__."""
+    expected = re.search(
+        r'__version__\s*=\s*["\']([^"\']+)["\']', INIT_PY.read_text()
+    ).group(1)
+    script = f"set -euo pipefail\n{_extract_function('app_version')}\napp_version {INIT_PY}\n"
+    res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == expected
 
 
 def test_lock_serializes_updates():
