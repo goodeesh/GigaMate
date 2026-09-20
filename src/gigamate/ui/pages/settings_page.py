@@ -7,25 +7,27 @@ Allows configuring:
 - System diagnostics & hardware info
 """
 
+import json
 import subprocess
 import time
-from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QProcess
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ...capabilities import detect_system_capabilities
+from ...capabilities import detect_system_capabilities, invalidate_capabilities
 from ...config import load as load_config, update_config
 from ...profiles import has_verified_profiles, resolve_profile
 from ...system_power import sync_system_power
+from ...updates import build_terminal_repair_command, repair_command
 
 
 class SettingsPage(QWidget):
@@ -135,6 +137,11 @@ class SettingsPage(QWidget):
         self.btn_restart_service.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_restart_service.clicked.connect(self._on_restart_service_clicked)
         svc_row.addWidget(self.btn_restart_service)
+
+        self.btn_repair_driver = QPushButton("Repair Driver")
+        self.btn_repair_driver.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_repair_driver.clicked.connect(self._on_repair_driver_clicked)
+        svc_row.addWidget(self.btn_repair_driver)
 
         self.btn_setup = QPushButton("Run Setup Again")
         self.btn_setup.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -308,6 +315,90 @@ class SettingsPage(QWidget):
         self.btn_restart_service.setText("Restart Daemon")
         self._refresh_service_status()
 
+    def _on_repair_driver_clicked(self) -> None:
+        """Rebuild + reload the ACPI kernel driver (privileged), then restart the tray."""
+        cmd = repair_command()
+        if cmd:
+            self.btn_repair_driver.setEnabled(False)
+            self.btn_repair_driver.setText("Repairing…")
+            self._repair_output = []
+            proc = QProcess(self)
+            self._repair_proc = proc
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            proc.readyReadStandardOutput.connect(self._on_repair_read)
+            proc.finished.connect(self._on_repair_finished)
+            proc.start(cmd[0], cmd[1:])
+            return
+        # Helper not installed (older install): run the sudo commands in a terminal.
+        term_cmd = build_terminal_repair_command()
+        if term_cmd:
+            try:
+                subprocess.Popen(term_cmd, start_new_session=True)
+                self._show_repair_info(
+                    "Repair running in terminal",
+                    "The ACPI driver repair is running in a terminal window (sudo "
+                    "will ask for your password there). Restart the daemon afterwards "
+                    "if the driver does not appear loaded.")
+                return
+            except Exception:
+                pass
+        self._show_repair_info(
+            "Manual repair",
+            "Run the following in a terminal (sudo will ask for your password):\n\n"
+            "  sudo dkms install gigamate_acpi/<version> -k $(uname -r) --force\n"
+            "  sudo modprobe gigamate_acpi")
+
+    def _on_repair_read(self) -> None:
+        data = bytes(self._repair_proc.readAll()).decode("utf-8", "replace")
+        self._repair_output.append(data)
+
+    def _on_repair_finished(self, code: int, _status) -> None:
+        out = "".join(getattr(self, "_repair_output", []))
+        ok = False
+        detail = out.strip()
+        try:
+            # The helper emits a single JSON line; parse the last line.
+            result = json.loads(detail.splitlines()[-1]) if detail else {}
+            ok = bool(result.get("ok"))
+            if not ok and result.get("error"):
+                detail = result["error"]
+        except Exception:
+            ok = code == 0
+        # A reloaded module needs a fresh probe; restart the tray so it re-inits ACPI.
+        try:
+            subprocess.run(["systemctl", "--user", "restart", "--no-block",
+                            "gigamate.service"], check=False, timeout=5)
+        except Exception:
+            pass
+        invalidate_capabilities()
+        self.reload_from_config()
+        self.btn_repair_driver.setEnabled(True)
+        self.btn_repair_driver.setText("Repair Driver")
+        if ok:
+            self._show_repair_info("Repair complete",
+                                   "The ACPI kernel driver was rebuilt and reloaded.")
+        else:
+            self._show_repair_info("Repair incomplete", detail or "See the output above.")
+
+    def _show_repair_info(self, title: str, text: str) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    def _update_repair_button_state(self) -> None:
+        """Hint when the ACPI driver is expected but missing on a Gigabyte laptop."""
+        try:
+            caps = detect_system_capabilities()
+            broken = bool(caps.is_gigabyte_laptop and not caps.acpi_driver_loaded)
+        except Exception:
+            broken = False
+        self.btn_repair_driver.setToolTip(
+            "The ACPI kernel driver (gigamate_acpi) is not loaded — rebuild and "
+            "reload it for the running kernel." if broken else
+            "Rebuild and reload the ACPI kernel driver (gigamate_acpi) for the running kernel.")
+
     def _refresh_service_status(self) -> None:
         # Cache for 30 s so window activation does not spawn systemctl each time.
         now = time.monotonic()
@@ -353,6 +444,7 @@ class SettingsPage(QWidget):
 
         # Refresh the diagnostic chips too (driver/keyboard/battery hotplug).
         self._populate_diag_chips()
+        self._update_repair_button_state()
 
         # Defer the (blocking) systemctl probe so window activation stays snappy.
         QTimer.singleShot(0, self._refresh_service_status)

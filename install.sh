@@ -87,6 +87,18 @@ installed_version() {
     fi
 }
 
+# Version string from the checkout's src/gigamate/__init__.py, if present.
+app_version() {
+    local init_py="$1"
+    [ -f "$init_py" ] || return 0
+    python3 -c "
+import re, sys
+s = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+m = re.search(r'__version__\s*=\s*[\"']([^\"']+)[\"']', s)
+print(m.group(1) if m else '')
+" "$init_py" 2>/dev/null || true
+}
+
 do_check() {
     local installed latest
     installed="$(installed_version || true)"
@@ -276,6 +288,12 @@ install_system_deps() {
 }
 
 # --- Build and install kernel module ---
+# Derive the DKMS version from the app release so every release registers a
+# distinct module version (dkms add never collides with a prior release).
+dkms_registered() {
+    dkms status 2>/dev/null | grep -q "^gigamate_acpi/$1[ ,]"
+}
+
 build_kernel_module() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -283,6 +301,9 @@ build_kernel_module() {
     local mod_version
     mod_version="$(grep -E '^PACKAGE_VERSION=' "$mod_src/dkms.conf" | head -1 | cut -d= -f2 | tr -d '"')"
     mod_version="${mod_version:-1.0.0}"
+    local app_ver
+    app_ver="$(app_version "$script_dir/src/gigamate/__init__.py")"
+    mod_version="${app_ver:-$mod_version}"
 
     header "Building ACPI kernel module"
 
@@ -321,36 +342,44 @@ build_kernel_module() {
     if command -v dkms &>/dev/null; then
         info "Using DKMS to build and install the module..."
 
-        # Remove any existing registration so re-installs and upgrades work cleanly
-        local entry
-        for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1 | sort -u); do
-            info "Removing existing DKMS entry: $entry"
-            sudo dkms remove "$entry" --all 2>/dev/null || true
-        done
-
-        # Portable across dkms 2.x and 3.x: source must live under /usr/src
+        # Prepare the source copy under /usr/src with the release version baked
+        # in (both dkms.conf and the module's DRIVER_VERSION). The repository
+        # copy is left untouched.
         make -C "$mod_src" clean 2>/dev/null || true
         sudo rm -rf "/usr/src/gigamate_acpi-$mod_version"
         sudo cp -r "$mod_src" "/usr/src/gigamate_acpi-$mod_version"
         sudo find "/usr/src/gigamate_acpi-$mod_version" -name '*.o' -o -name '*.ko*' -o -name '*.mod*' -o -name 'Module.symvers' -o -name 'modules.order' | sudo xargs -r rm -f
+        sudo sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"$mod_version\"/" "/usr/src/gigamate_acpi-$mod_version/dkms.conf" 2>/dev/null || true
+        sudo sed -i "s/#define DRIVER_VERSION .*/#define DRIVER_VERSION \"$mod_version\"/" "/usr/src/gigamate_acpi-$mod_version/gigamate_acpi.c" 2>/dev/null || true
 
-        if ! sudo dkms add -m gigamate_acpi -v "$mod_version"; then
-            warn "DKMS add failed."
-            warn "Fan/power features will be disabled."
-            return
+        # Register the current release if not already present. Never remove a
+        # previous release before its replacement has built (B3).
+        if ! dkms_registered "$mod_version"; then
+            if ! sudo dkms add -m gigamate_acpi -v "$mod_version"; then
+                warn "DKMS add failed for $mod_version."
+                warn "Fan/power features may be unavailable."
+            fi
         fi
 
-        # Build and install for each installed kernel with headers present
-        for kdir in /lib/modules/*/build; do
-            [ -d "$kdir" ] || continue
-            local kver
-            kver="$(basename "$(dirname "$kdir")")"
+        # Build the running kernel first (so it is never left uncovered), then
+        # every other kernel with headers present, without duplicates.
+        local ordered_kernels=""
+        local k
+        for k in "$running_kver" $(ls -d /lib/modules/*/build 2>/dev/null | sed 's#/lib/modules/##; s#/build##'); do
+            case " $ordered_kernels " in *" $k "*) ;; *) ordered_kernels="$ordered_kernels $k" ;; esac
+        done
+
+        local running_built=false
+        local kver
+        for kver in $ordered_kernels; do
+            [ -d "/lib/modules/$kver/build" ] || continue
             info "Building gigamate_acpi for kernel $kver..."
             if sudo dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null ||
                sudo env CC=clang LLVM=1 dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null; then
                 info "DKMS build succeeded for $kver"
                 if sudo dkms install -m gigamate_acpi -v "$mod_version" -k "$kver" --force 2>/dev/null; then
                     info "DKMS install succeeded for $kver"
+                    [ "$kver" = "$running_kver" ] && running_built=true
                 else
                     warn "DKMS install failed for kernel $kver"
                 fi
@@ -358,6 +387,21 @@ build_kernel_module() {
                 warn "DKMS build failed for kernel $kver"
             fi
         done
+
+        # Once the running kernel is covered, prune stale release versions so
+        # the DKMS tree does not accumulate old copies ("already contains").
+        if [ "$running_built" = true ]; then
+            local entry
+            for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1 | sort -u); do
+                if [ "$entry" != "gigamate_acpi/$mod_version" ]; then
+                    info "Pruning stale DKMS entry: $entry"
+                    sudo dkms remove "$entry" --all 2>/dev/null || true
+                fi
+            done
+        else
+            warn "Module build/install did not succeed for the running kernel ($running_kver)."
+            warn "Fan/power features may be unavailable. Install kernel headers and re-run install.sh."
+        fi
     else
         warn "dkms not found — falling back to a manual build."
         warn "The module will NOT auto-rebuild after kernel updates."
@@ -678,6 +722,36 @@ install_service() {
     info "  Status: systemctl --user status gigamate.service"
 }
 
+# --- Install the privileged ACPI driver repair helper (all laptops) ---
+install_repair_helper() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    header "Installing ACPI driver repair helper"
+
+    local helper_src="$script_dir/data/gigamate-repair"
+    local helper_dir="/usr/lib/gigamate"
+    if [ -f "$helper_src" ]; then
+        sudo install -d -m 755 "$helper_dir"
+        sudo install -m 755 -o root -g root "$helper_src" "$helper_dir/gigamate-repair"
+        info "Installed helper: $helper_dir/gigamate-repair"
+    fi
+
+    local action_src="$script_dir/data/org.gigamate.repair.policy"
+    local action_dir="/usr/share/polkit-1/actions"
+    if [ -d "$action_dir" ] && [ -f "$action_src" ]; then
+        sudo install -m 644 -o root -g root "$action_src" "$action_dir/org.gigamate.repair.policy"
+        info "Installed polkit action: $action_dir/org.gigamate.repair.policy"
+    fi
+
+    local rule_src="$script_dir/data/50-gigamate-repair.rules"
+    local rule_dir="/etc/polkit-1/rules.d"
+    if [ -d "$rule_dir" ] && [ -f "$rule_src" ]; then
+        sudo install -m 644 -o root -g root "$rule_src" "$rule_dir/50-gigamate-repair.rules"
+        info "Installed polkit rule: $rule_dir/50-gigamate-repair.rules"
+    fi
+}
+
 # --- Install dGPU undervolt watcher service (NVIDIA only) ---
 install_dgpu_service() {
     local script_dir
@@ -800,6 +874,16 @@ migrate_config() {
 main() {
     parse_args "$@"
 
+    # Serialize concurrent installs/updates: the tray and CLI can both trigger
+    # one, and two racing runs collide in DKMS ("already contains"). A second
+    # concurrent run exits cleanly instead of corrupting the module tree.
+    local lock_file="${XDG_RUNTIME_DIR:-/tmp}/gigamate-update.lock"
+    exec 9>"$lock_file" 2>/dev/null || true
+    if ! flock -n 9 2>/dev/null; then
+        warn "Another GigaMate install/update is already running; skipping this one."
+        exit 0
+    fi
+
     if [ "$(id -u)" = "0" ]; then
         if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] && [ -f "${BASH_SOURCE[0]:-}" ]; then
             info "Re-running install as ${SUDO_USER} (per-user install)..."
@@ -844,6 +928,7 @@ main() {
     install_udev
     configure_gpu_power
     install_dgpu_helper
+    install_repair_helper
     # Migrate the old config/profiles *before* starting the tray: the tray
     # creates ~/.config/gigamate on launch, which would otherwise make
     # migrate_config take the "both exist" branch and skip user profiles.

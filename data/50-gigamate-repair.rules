@@ -1,0 +1,8 @@
+// GigaMate — allow wheel/sudo to rebuild+reload the ACPI kernel driver without
+// a password. The privileged helper does one DKMS/make+modprobe job and exits.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.gigamate.repair.driver" &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});

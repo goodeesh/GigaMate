@@ -574,7 +574,23 @@ def build_terminal_update_command(
     snippet = _download_verify_run(
         install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
         sha_url=install_script_sha256_url(ref) or None)
-    inner = f"{snippet}; exec bash"
+    return _open_terminal_with(f"{snippet}; exec bash",
+                               desktop=desktop, which=which,
+                               detect=detect, env=env)
+
+
+def _open_terminal_with(
+        inner: str,
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which,
+        detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
+        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+    """Argv opening the user's terminal running ``inner``, else None.
+
+    Prefers the desktop's configured default terminal (KDE/GNOME/$TERMINAL/
+    alternatives + its own X-TerminalArgExec flag), then scans common
+    emulators. The shell is kept afterwards so output stays visible.
+    """
     detect_fn = detect if detect is not None else (
         lambda: _default_detect(env, which))
     try:
@@ -645,4 +661,69 @@ def build_update_command(log_file: Path = UPDATE_LOG_FILE,
         install_script_url(ref), f"--update --yes --tag {shlex.quote(ref)}",
         sha_url=install_script_sha256_url(ref) or None)
     log_q = shlex.quote(str(log_file))
-    return ["bash", "-c", f"{{ {snippet}; exit $rc; }} >{log_q} 2>&1"]
+    inner = f"{{ {snippet}; exit $rc; }} >{log_q} 2>&1"
+    return _detached_update_argv(inner)
+
+
+def _detached_update_argv(inner: str) -> list:
+    """Wrap the updater so it survives the tray-service restart.
+
+    install.sh restarts ``gigamate.service`` (which spawns the updater), and
+    systemd's default ``KillMode=control-group`` SIGTERMs every process in that
+    cgroup — including the updater, so the tray reports a spurious "Updater
+    exited with status 15" even though the install succeeded. Running the
+    updater in its own transient scope places it in a separate cgroup, so the
+    restart cannot kill it. Falls back to a plain shell when ``systemd-run`` is
+    unavailable.
+    """
+    if shutil.which("systemd-run"):
+        return ["systemd-run", "--user", "--scope", "--collect", "--",
+                "bash", "-c", inner]
+    return ["bash", "-c", inner]
+
+
+REPAIR_HELPER_PATH = "/usr/lib/gigamate/gigamate-repair"
+
+
+def repair_available() -> bool:
+    """True when the privileged ACPI repair helper is installed and reachable."""
+    return os.path.exists(REPAIR_HELPER_PATH) and shutil.which("pkexec") is not None
+
+
+def repair_command() -> Optional[list]:
+    """Argv to run the privileged repair helper (None when not available)."""
+    if repair_available():
+        return ["pkexec", REPAIR_HELPER_PATH]
+    return None
+
+
+def terminal_repair_snippet() -> str:
+    """Privileged repair commands for a terminal when the helper is missing.
+
+    Rebuilds + reloads ``gigamate_acpi`` for the running kernel via DKMS,
+    handling the stale-registration case, then loads the module. Requires sudo
+    (prompts in the terminal).
+    """
+    return (
+        'v="$(ls -d /usr/src/gigamate_acpi-* 2>/dev/null | sort -V | tail -1'
+        ' | sed "s#.*gigamate_acpi-##")"; '
+        '[ -n "$v" ] || { echo "No gigamate_acpi source under /usr/src"; exit 1; }; '
+        'sudo dkms add -m gigamate_acpi -v "$v" 2>/dev/null || true; '
+        'sudo dkms install -m gigamate_acpi -v "$v" -k "$(uname -r)" --force || '
+        'sudo env CC=clang LLVM=1 dkms install -m gigamate_acpi -v "$v" -k "$(uname -r)" --force || '
+        '{ echo "DKMS build failed — install kernel headers for $(uname -r)"; exit 1; }; '
+        'sudo depmod -a; '
+        'sudo modprobe -r gigamate_acpi 2>/dev/null || true; '
+        'sudo modprobe gigamate_acpi && echo "GigaMate ACPI driver repaired."'
+    )
+
+
+def build_terminal_repair_command(
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which,
+        detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
+        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+    """Argv opening the user's terminal running the privileged repair commands."""
+    return _open_terminal_with(
+        f"{terminal_repair_snippet()}; exec bash",
+        desktop=desktop, which=which, detect=detect, env=env)

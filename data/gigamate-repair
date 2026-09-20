@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""GigaMate — privileged ACPI kernel-module repair helper.
+
+Installed root-owned (0755) at /usr/lib/gigamate/gigamate-repair and invoked
+via pkexec by the unprivileged Center/CLI. It (re)builds and (re)installs the
+``gigamate_acpi`` kernel module for the *running* kernel, then reloads it. It
+is deliberately self-contained (stdlib only) so it runs under the system
+``python3`` with a clean pkexec environment.
+
+This fixes the state where a GigaMate update (or a kernel upgrade) left the
+running kernel without a built module — e.g. after a DKMS "already contains"
+collision — so the tray reports "ACPI kernel driver not loaded".
+
+Commands (argv):
+    status   Report JSON without touching anything.
+    (none)   Rebuild + reinstall + reload (default action).
+
+Output: a single JSON object on stdout. Exit code 0 on success, 2 on failure.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+# Strict stdout contract: only the final JSON goes to stdout; diagnostics to stderr.
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-.].*)?$")
+
+
+def _log(msg):
+    sys.stderr.write(msg.rstrip() + "\n")
+    sys.stderr.flush()
+
+
+def _emit(obj, code=0):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+    return code
+
+
+def run_cmd(argv, run=None, env=None):
+    """Run argv capturing output; return (returncode, stdout, stderr). Never raises."""
+    run = run if run is not None else subprocess.run
+    try:
+        proc = run(argv, capture_output=True, text=True, env=env, timeout=600)
+        return proc.returncode, proc.stdout or "", proc.stderr or ""
+    except Exception as exc:
+        return -1, "", str(exc)
+
+
+def find_source(usr_src="/usr/src"):
+    """Return (src_dir, version) of the newest gigamate_acpi-* copy, else (None, None)."""
+    best_dir = None
+    best_key = None
+    try:
+        entries = sorted(os.listdir(usr_src))
+    except OSError:
+        entries = []
+    for name in entries:
+        if not name.startswith("gigamate_acpi-"):
+            continue
+        cand = os.path.join(usr_src, name)
+        if not os.path.isdir(cand) or not os.path.exists(os.path.join(cand, "Makefile")):
+            continue
+        ver = name[len("gigamate_acpi-"):]
+        m = _VERSION_RE.match(ver)
+        key = m.groups() if m else (0, 0, 0)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_dir = cand
+    if best_dir is None:
+        return None, None
+
+    # Prefer the version declared in dkms.conf over the dir name (they can drift).
+    version = os.path.basename(best_dir)[len("gigamate_acpi-"):]
+    dkms_conf = os.path.join(best_dir, "dkms.conf")
+    try:
+        for line in open(dkms_conf, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if line.startswith("PACKAGE_VERSION="):
+                v = line.split("=", 1)[1].strip().strip('"')
+                if v:
+                    version = v
+                break
+    except OSError:
+        pass
+    return best_dir, version
+
+
+def _dkms_status_lines(run=None):
+    code, out, err = run_cmd(["dkms", "status"], run=run)
+    if code != 0:
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def dkms_registered(version, run=None):
+    """True when ``gigamate_acpi/<version>`` appears anywhere in ``dkms status``."""
+    token = f"gigamate_acpi/{version}"
+    for ln in _dkms_status_lines(run=run):
+        if ln.startswith(token):
+            return True
+    return False
+
+
+def dkms_available(run=None):
+    code, _, _ = run_cmd(["dkms", "--version"], run=run)
+    return code == 0
+
+
+def dkms_install(version, kernel, run=None):
+    """Install the module for ``kernel`` via DKMS (clang fallback). Returns (ok, error)."""
+    base = ["dkms", "install", "-m", "gigamate_acpi", "-v", version, "-k", kernel, "--force"]
+    code, out, err = run_cmd(base, run=run)
+    if code == 0:
+        return True, ""
+    # CachyOS/zen kernels are often clang-built; retry with CC=clang LLVM=1.
+    env = dict(os.environ)
+    env["CC"] = "clang"
+    env["LLVM"] = "1"
+    code, out, err = run_cmd(base, run=run, env=env)
+    if code == 0:
+        return True, ""
+    return False, (err or out).strip() or f"dkms install failed (exit {code})"
+
+
+def dkms_add(version, run=None):
+    code, out, err = run_cmd(["dkms", "add", "-m", "gigamate_acpi", "-v", version], run=run)
+    return code == 0, (err or out).strip() or f"dkms add failed (exit {code})"
+
+
+def manual_install(src, kernel, run=None):
+    """Direct Kbuild install when DKMS is unavailable. Returns (ok, error)."""
+    kdir = f"/lib/modules/{kernel}/build"
+    if not os.path.isdir(kdir):
+        return False, f"kernel headers not found at {kdir}"
+    make = ["make", "-C", src, f"KDIR={kdir}"]
+    code, out, err = run_cmd(make, run=run)
+    if code != 0:
+        env = dict(os.environ)
+        env["CC"] = "clang"
+        env["LLVM"] = "1"
+        code, out, err = run_cmd(make, run=run, env=env)
+    if code != 0:
+        return False, (err or out).strip() or f"make failed (exit {code})"
+    code, out, err = run_cmd(make + ["install"], run=run)
+    if code != 0:
+        return False, (err or out).strip() or f"make install failed (exit {code})"
+    return True, ""
+
+
+def reload_module(run=None):
+    """Unload + reload gigamate_acpi; returns (loaded, error)."""
+    run_cmd(["modprobe", "-r", "gigamate_acpi"], run=run)
+    code, _, err = run_cmd(["modprobe", "gigamate_acpi"], run=run)
+    if code != 0:
+        return False, (err or "modprobe gigamate_acpi failed").strip()
+    return True, ""
+
+
+def module_loaded():
+    return os.path.isdir("/sys/devices/platform/gigamate_acpi")
+
+
+def cmd_status():
+    src, ver = find_source()
+    kernel = os.uname().release
+    return _emit({
+        "ok": True,
+        "version": ver,
+        "kernel": kernel,
+        "source": src,
+        "dkms_registered": dkms_registered(ver) if ver else False,
+        "module_loaded": module_loaded(),
+    })
+
+
+def cmd_repair():
+    kernel = os.uname().release
+    steps = []
+
+    src, ver = find_source()
+    if src is None:
+        return _emit({
+            "ok": False,
+            "version": None,
+            "kernel": kernel,
+            "module_loaded": module_loaded(),
+            "steps": steps,
+            "error": "gigamate_acpi module source not found under /usr/src. "
+                     "Re-run install.sh to install the kernel module, then repair again.",
+        }, code=2)
+
+    steps.append(f"source: {src} (version {ver})")
+
+    if dkms_available():
+        installed = False
+        if not dkms_registered(ver):
+            ok, err = dkms_add(ver)
+            steps.append("dkms add" + (" OK" if ok else f" FAILED ({err})"))
+            if not ok:
+                # Registration failed (e.g. a stale tree); fall back to a manual build.
+                ok, err = manual_install(src, kernel)
+                steps.append("manual build+install" + (" OK" if ok else f" FAILED ({err})"))
+                if not ok:
+                    return _emit({"ok": False, "version": ver, "kernel": kernel,
+                                  "module_loaded": module_loaded(), "steps": steps,
+                                  "error": err}, code=2)
+                installed = True
+        if not installed:
+            ok, err = dkms_install(ver, kernel)
+            steps.append("dkms install" + (" OK" if ok else f" FAILED ({err})"))
+            if not ok:
+                return _emit({"ok": False, "version": ver, "kernel": kernel,
+                              "module_loaded": module_loaded(), "steps": steps,
+                              "error": err}, code=2)
+    else:
+        ok, err = manual_install(src, kernel)
+        steps.append("manual build+install" + (" OK" if ok else f" FAILED ({err})"))
+        if not ok:
+            return _emit({"ok": False, "version": ver, "kernel": kernel,
+                          "module_loaded": module_loaded(), "steps": steps,
+                          "error": err}, code=2)
+
+    loaded, err = reload_module()
+    steps.append("modprobe gigamate_acpi" + (" OK" if loaded else f" FAILED ({err})"))
+    if not loaded:
+        return _emit({"ok": False, "version": ver, "kernel": kernel,
+                      "module_loaded": False, "steps": steps,
+                      "error": err}, code=2)
+
+    return _emit({
+        "ok": True,
+        "version": ver,
+        "kernel": kernel,
+        "module_loaded": module_loaded(),
+        "steps": steps,
+        "error": None,
+    })
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] == "status":
+        return cmd_status()
+    return cmd_repair()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -10,6 +10,7 @@ The primary user interface for GigaMate. Provides:
 
 import sys
 import os
+import time
 import signal
 import threading
 import random
@@ -71,6 +72,7 @@ APP_ID = "gigamate"
 APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
+_ACPI_RETRY_SEC = 5.0  # throttle for re-probing the ACPI backend when absent
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
 UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000  # daily; one tiny HTTPS req/day
 APP_ICON_PATHS = ICON_PATHS
@@ -1162,9 +1164,42 @@ class GigaMateTrayApp:
         except Exception:
             pass
 
+    def _ensure_acpi_controller(self) -> None:
+        """Self-heal: re-probe the ACPI backend if it became available later.
+
+        The ACPI controller is initialized once at startup; if the gigamate_acpi
+        kernel module was missing then (e.g. after a botched update), it stays
+        ``None`` and the tray keeps showing "Status: reading..." even after the
+        driver is repaired (via ``gigamate repair``). Retry periodically and,
+        when the backend appears, rebuild the menu so the status/profile
+        sections come back without needing a tray restart.
+        """
+        if self._acpi_controller is not None and self._acpi_controller.available:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_acpi_retry_at", 0.0) < _ACPI_RETRY_SEC:
+            return
+        self._acpi_retry_at = now
+        try:
+            ctrl = AcpiController()
+            available = bool(ctrl.available)
+        except Exception:
+            ctrl = None
+            available = False
+        if ctrl is None or not available:
+            return
+        self._acpi_controller = ctrl
+        self._acpi_caps = ctrl.capabilities
+        self._last_status_text = None
+        try:
+            self._rebuild_menu()
+        except Exception:
+            pass
+
     def _update_status(self) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
         self._sync_from_external_config()
+        self._ensure_acpi_controller()
         gpu = get_gpu_state()
         self._refresh_tray_icon(gpu)
         if not self._status_items:
