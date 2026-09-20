@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from unittest.mock import patch
 
 from gigamate import updates
 from gigamate.updates import (
@@ -217,6 +218,50 @@ class TestBuildCommand:
 
         ver = updates.fetch_latest_version(urlopen=fake_urlopen)
         assert ver == "v3.1.0"
+
+
+class TestDetachedUpdate:
+    def test_systemd_run_wraps_when_available(self):
+        with patch("gigamate.updates.shutil.which", return_value="/usr/bin/systemd-run"):
+            argv = updates.build_update_command()
+        assert argv[0] == "systemd-run"
+        assert "--scope" in argv
+        assert argv[-3] == "bash" and argv[-2] == "-c"
+        assert "--update" in argv[-1]
+
+    def test_plain_shell_fallback(self):
+        with patch("gigamate.updates.shutil.which", return_value=None):
+            argv = updates.build_update_command()
+        assert argv[0] == "bash"
+        assert argv[1] == "-c"
+
+
+class TestRepairHelpers:
+    def test_repair_command_none_when_helper_missing(self):
+        with patch("gigamate.updates.os.path.exists", return_value=False), \
+             patch("gigamate.updates.shutil.which", return_value="/usr/bin/pkexec"):
+            assert updates.repair_command() is None
+            assert updates.repair_available() is False
+
+    def test_repair_command_when_available(self):
+        with patch("gigamate.updates.os.path.exists", return_value=True), \
+             patch("gigamate.updates.shutil.which", return_value="/usr/bin/pkexec"):
+            cmd = updates.repair_command()
+            assert cmd == ["pkexec", updates.REPAIR_HELPER_PATH]
+            assert updates.repair_available() is True
+
+    def test_terminal_repair_snippet(self):
+        snippet = updates.terminal_repair_snippet()
+        assert "dkms install" in snippet
+        assert "modprobe gigamate_acpi" in snippet
+        assert "uname -r" in snippet
+
+    def test_build_terminal_repair_prefers_detected(self):
+        argv = updates.build_terminal_repair_command(
+            which=lambda name: "/usr/bin/kitty" if name == "kitty" else None,
+            detect=lambda: ("/usr/bin/kitty", "-e"))
+        assert argv[0] == "/usr/bin/kitty"
+        assert "dkms install" in " ".join(argv)
 
 
 class TestAdminStatus:

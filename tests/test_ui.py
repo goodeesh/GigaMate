@@ -535,6 +535,70 @@ def test_settings_page(qapp):
     assert page.chk_dgpu_auto.isChecked() is False
 
 
+def test_tray_self_heals_acpi_after_repair():
+    """The tray must recover its ACPI status once the driver is back."""
+    GigaMateTrayApp = _import_tray_app()
+
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._acpi_controller = None
+        tray._acpi_caps = None
+        tray._acpi_retry_at = 0.0
+        tray._last_status_text = "Status: reading..."
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = True
+        with patch("gigamate.tray.AcpiController", return_value=mock_ctrl), \
+             patch.object(tray, "_rebuild_menu") as mock_rebuild:
+            tray._ensure_acpi_controller()
+        assert tray._acpi_controller is mock_ctrl
+        assert tray._acpi_caps is mock_ctrl.capabilities
+        assert tray._last_status_text is None
+        assert mock_rebuild.called
+
+
+def test_tray_self_heal_is_throttled():
+    """Re-probing the ACPI backend must not spam AcpiController() every tick."""
+    GigaMateTrayApp = _import_tray_app()
+
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._acpi_controller = None
+        tray._acpi_retry_at = 0.0
+        with patch("gigamate.tray.AcpiController", return_value=MagicMock(available=False)) as mock_cls:
+            tray._ensure_acpi_controller()  # first attempt
+            tray._acpi_retry_at = 999999.0  # now inside the throttle window
+            tray._ensure_acpi_controller()  # second attempt must be skipped
+            assert mock_cls.call_count == 1
+
+
+def test_settings_page_has_repair_driver_button(qapp):
+    from gigamate.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    assert page.btn_repair_driver is not None
+    assert page.btn_restart_service is not None
+
+
+def test_settings_repair_finished_parses_json(qapp):
+    """A successful helper run restarts the tray and refreshes capabilities."""
+    import json as json_mod
+
+    from gigamate.ui.pages.settings_page import SettingsPage
+
+    page = SettingsPage()
+    page._repair_output = [json_mod.dumps({"ok": True, "version": "3.1.1"})]
+    with patch("gigamate.ui.pages.settings_page.subprocess.run") as mock_run, \
+         patch("gigamate.ui.pages.settings_page.invalidate_capabilities") as mock_inv, \
+         patch.object(page, "reload_from_config") as mock_reload, \
+         patch.object(page, "_show_repair_info") as mock_show:
+        page._on_repair_finished(0, 0)
+        assert mock_inv.called
+        assert mock_reload.called
+        args = [c.args[0] for c in mock_run.call_args_list]
+        assert any("systemctl" in a and "gigamate.service" in a for a in args)
+        mock_show.assert_called_once_with("Repair complete", "The ACPI kernel driver was rebuilt and reloaded.")
+
+
 def test_battery_page_when_battery_missing(qapp):
     """Verify BatteryPage gracefully handles desktop / continuous AC mode."""
     from gigamate.ui.pages.battery_page import BatteryPage

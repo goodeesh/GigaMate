@@ -834,6 +834,8 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
         print("       (builds and loads the bundled gigamate_acpi module, no extra packages)")
         print("    2. If you already have the acpi_call module installed,")
         print("       it is used automatically as a fallback.")
+        print("    3. If the module exists but is missing for the running kernel,")
+        print("       run 'gigamate repair' to rebuild and reload it.")
         return
 
     backend_name = {"module": "kernel module", "acpi_call": "acpi_call", "mock": "mock"}.get(
@@ -1127,6 +1129,66 @@ def cmd_version(args) -> None:
     print(f"GigaMate v{__version__}")
     print("Gigabyte laptop management for Linux")
     print()
+
+
+def cmd_repair(args) -> None:
+    """Rebuild + reload the ACPI kernel driver for the running kernel."""
+    import json
+    import subprocess
+
+    from .updates import (
+        REPAIR_HELPER_PATH,
+        build_terminal_repair_command,
+        repair_available,
+        repair_command,
+    )
+
+    print("GigaMate — ACPI driver repair")
+    print()
+
+    if not repair_available():
+        print(f"  Repair helper not installed: {REPAIR_HELPER_PATH}")
+        print("  Re-run install.sh to install it (or use the terminal commands below).")
+        print()
+        term_cmd = build_terminal_repair_command()
+        if term_cmd:
+            try:
+                subprocess.Popen(term_cmd, start_new_session=True)
+                print("  Opened a terminal running the repair (sudo will ask there).")
+                return
+            except Exception:
+                pass
+        print("  Run manually in a terminal:")
+        print("    sudo dkms install gigamate_acpi/<version> -k $(uname -r) --force")
+        print("    sudo modprobe gigamate_acpi")
+        return
+
+    cmd = repair_command()
+    if getattr(args, "status", False):
+        cmd = cmd + ["status"]
+    print(f"  Running: {' '.join(cmd)}")
+    print()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    except Exception as exc:
+        print(f"  Repair failed to start: {exc}")
+        sys.exit(1)
+    out = (proc.stdout or "").strip()
+    if out:
+        print(out)
+    if proc.stderr and proc.stderr.strip():
+        print(proc.stderr.strip(), file=sys.stderr)
+    try:
+        result = json.loads(out.splitlines()[-1]) if out else {}
+        ok = bool(result.get("ok"))
+    except Exception:
+        ok = proc.returncode == 0
+    print()
+    if ok:
+        print("  ACPI driver repaired and reloaded.")
+        sys.exit(0)
+    print("  Repair failed — see the output above.", file=sys.stderr)
+    sys.exit(1)
 
 
 def cmd_update(args) -> None:
@@ -1491,6 +1553,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     # --- version subcommand ---
     sub.add_parser("version", help="Show version")
 
+    # --- repair subcommand ---
+    repair_parser = sub.add_parser(
+        "repair", help="Rebuild + reload the ACPI kernel driver for the running kernel")
+    repair_parser.add_argument("--status", action="store_true",
+                               help="Only report driver/helper state, do not repair")
+
     # --- update subcommand ---
     update_parser = sub.add_parser("update", help="Check for / install updates")
     update_parser.add_argument("--check", action="store_true",
@@ -1573,6 +1641,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         _dispatch_calibrate(args)
     elif args.command == "version":
         cmd_version(args)
+    elif args.command == "repair":
+        cmd_repair(args)
     elif args.command == "update":
         cmd_update(args)
     elif args.command == "battery":

@@ -97,6 +97,8 @@ gigamate profile gaming          # Switch to Gaming mode
 gigamate profile cycle           # Cycle to next mode + trigger OSD
 gigamate detect                  # Show keyboard + ACPI info
 gigamate detect --acpi           # Probe ACPI capabilities
+gigamate repair                  # Rebuild + reload the ACPI driver for the running kernel
+gigamate repair --status         # Report ACPI driver/helper state only
 gigamate calibrate all           # Complete model calibration
 gigamate profile contribute      # Share your profile via PR
 ```
