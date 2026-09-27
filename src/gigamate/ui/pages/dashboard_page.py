@@ -84,18 +84,18 @@ class DashboardPage(QWidget):
         # Warning box for uninstalled/unloaded ACPI driver or non-Gigabyte hardware
         self.acpi_warning_box = QFrame()
         self.acpi_warning_box.setStyleSheet(
-            "background-color: #2c1b12; border: 1px solid #744210; border-radius: 8px; padding: 12px;"
+            "background-color: #26160c; border: 1px solid #6b3512; border-radius: 10px; padding: 14px;"
         )
         wb_lay = QVBoxLayout(self.acpi_warning_box)
-        wb_lay.setContentsMargins(12, 10, 12, 10)
-        wb_lay.setSpacing(4)
+        wb_lay.setContentsMargins(14, 12, 14, 12)
+        wb_lay.setSpacing(6)
         self.wb_title = QLabel("⚠️ ACPI Kernel Driver Not Loaded")
-        self.wb_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 600;")
+        self.wb_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 700;")
         self.wb_desc = QLabel(
             "Hardware fan control and live telemetry require the gigamate_acpi kernel driver. "
             "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
         )
-        self.wb_desc.setStyleSheet("color: #cbd5e0; font-size: 12px;")
+        self.wb_desc.setStyleSheet("color: #e2e8f0; font-size: 12px; line-height: 1.4;")
         self.wb_desc.setWordWrap(True)
         wb_lay.addWidget(self.wb_title)
         wb_lay.addWidget(self.wb_desc)
@@ -158,32 +158,32 @@ class DashboardPage(QWidget):
         tile = QFrame()
         tile.setProperty("class", "MetricTile")
         t_layout = QVBoxLayout(tile)
-        t_layout.setContentsMargins(14, 12, 14, 12)
-        t_layout.setSpacing(2)
+        t_layout.setContentsMargins(16, 14, 16, 14)
+        t_layout.setSpacing(4)
 
         hdr = QHBoxLayout()
-        hdr.setSpacing(6)
+        hdr.setSpacing(8)
         hdr.setContentsMargins(0, 0, 0, 0)
         icon_lbl = QLabel(icon_str)
-        icon_lbl.setStyleSheet("font-size: 13px;")
+        icon_lbl.setStyleSheet("font-size: 14px;")
         hdr.addWidget(icon_lbl)
 
         lbl_title = QLabel(title)
         lbl_title.setObjectName(f"{object_name}_title" if object_name else "")
-        lbl_title.setStyleSheet("color: #718096; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        lbl_title.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;")
         hdr.addWidget(lbl_title)
         hdr.addStretch()
         t_layout.addLayout(hdr)
 
         lbl_val = QLabel("--")
         lbl_val.setObjectName(object_name)
-        lbl_val.setStyleSheet("color: #ffffff; font-size: 20px; font-weight: 700; margin-top: 2px;")
+        lbl_val.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
         t_layout.addWidget(lbl_val)
 
         if subtext_obj:
             lbl_sub = QLabel("")
             lbl_sub.setObjectName(subtext_obj)
-            lbl_sub.setStyleSheet("color: #8896ab; font-size: 11px;")
+            lbl_sub.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
             t_layout.addWidget(lbl_sub)
 
         return tile
@@ -326,10 +326,17 @@ class DashboardPage(QWidget):
             if cpu_lbl:
                 if state.temp_cpu is not None:
                     cpu_lbl.setText(f"{state.temp_cpu} °C")
+                    if state.temp_cpu >= 85:
+                        cpu_lbl.setStyleSheet("color: #fc8181; font-size: 22px; font-weight: 800; margin-top: 2px;")
+                    elif state.temp_cpu >= 75:
+                        cpu_lbl.setStyleSheet("color: #f6ad55; font-size: 22px; font-weight: 800; margin-top: 2px;")
+                    else:
+                        cpu_lbl.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
                     if cpu_sub:
                         cpu_sub.setText("Optimal Thermal" if state.temp_cpu < 65 else "Active Load")
                 else:
                     cpu_lbl.setText("--")
+                    cpu_lbl.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
                     if cpu_sub:
                         cpu_sub.setText("Monitoring")
 

@@ -9,3 +9,4 @@ Terminal=false
 Categories=Settings;HardwareSettings;System;
 Keywords=gigabyte;aero;aorus;keyboard;rgb;fan;acpi;battery;gpu;sleep;power;
 StartupNotify=true
+StartupWMClass=gigamate-center

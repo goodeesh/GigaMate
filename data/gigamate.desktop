@@ -8,3 +8,4 @@ Terminal=false
 NoDisplay=true
 Categories=Settings;X-Hardware;
 Keywords=gigabyte;aero;aorus;keyboard;rgb;fan;acpi;gimate;
+StartupWMClass=gigamate-center

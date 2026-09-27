@@ -1,19 +1,20 @@
 """GigaMate Center — Discrete GPU (NVIDIA) sleep-aware tuning.
 
-Three independent, sleep-aware controls, each a slider with its readout and a
-Reset (stock) button beside it:
+The GPU tuning interface is organized into two primary cards:
 
-* Undervolt (V/F curve offset) — slider from 0 to +255 MHz.
-* Max clock cap — slider from (normal max - 800) MHz up to a little above the
-  normal max; the top of the travel is "Stock (unlocked)".
-* Memory clock — a slider stepping through the memory clocks the GPU reports,
-  so it can only ever land on a value the hardware accepts. The top is the
-  highest supported clock (a guaranteed-max pin); lower values cap it.
+* **Core Clock Tuning (Undervolt & Curve Flattening)**:
+  - **V/F curve offset**: slider from 0 to +255 MHz (shifts the entire curve up).
+  - **Max boost clock cap**: slider to cap the upper boost limit ("flatten above N MHz")
+    preventing instability when running an aggressive undervolt.
 
-A single **Apply** button at the bottom commits all three in one go (one config
+* **Memory Clock (VRAM Overclock)**:
+  - **Memory V/F offset**: slider from -1000 MHz to +2000 MHz (independent memory
+    frequency tuning to increase VRAM bandwidth).
+
+A single **Apply** button at the bottom commits all controls together in one go (one config
 write, one helper call). Moving a slider only stages a value — nothing reaches
-the hardware until Apply. Reset sits next to each slider and takes effect
-immediately, since "put this one back to stock" is unambiguous on its own.
+the hardware until Apply. Reset buttons beside each control take effect
+immediately to return that specific control to stock.
 
 This page shows what is *configured and applied*, never live hardware telemetry:
 temperature, clocks, power and VRAM are MangoHud's and nvtop's job, and every
@@ -21,12 +22,6 @@ NVML read risks resuming a dGPU the kernel has powered down. The applied values
 come from the state file the watcher service publishes, so a refresh is a file
 read and can never wake the GPU; NVML is touched only for a probe, and only
 while the dGPU is already awake.
-
-The cap can only *lower* the boost clock: NVML's locked-clock API bounds clocks
-within the GPU's already-permitted range, so it cannot raise them. The memory
-clock behaves the same way — it can only select a clock the GPU already
-supports. All controls apply only while the dGPU is awake and are cleared on
-suspend / idle / reboot.
 """
 
 from typing import Optional
@@ -184,8 +179,7 @@ class GpuPage(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(20)
         layout.addWidget(self._build_state_card())
-        layout.addWidget(self._build_undervolt_card())
-        layout.addWidget(self._build_max_clock_card())
+        layout.addWidget(self._build_core_clock_card())
         layout.addWidget(self._build_mem_clock_card())
         layout.addLayout(self._build_apply_bar())
         layout.addStretch()
@@ -207,22 +201,45 @@ class GpuPage(QWidget):
         sc.addWidget(self.gpu_holders_lbl)
         return state_card
 
-    def _build_undervolt_card(self) -> QFrame:
-        uv_card = QFrame()
-        uv_card.setProperty("class", "Card")
-        uc = QVBoxLayout(uv_card)
-        uc.setSpacing(10)
+    def _build_core_clock_card(self) -> QFrame:
+        card = QFrame()
+        card.setProperty("class", "Card")
+        box = QVBoxLayout(card)
+        box.setSpacing(14)
 
-        uv_title = QLabel("Undervolt (V/F curve offset)")
-        uv_title.setProperty("class", "CardTitle")
-        uc.addWidget(uv_title)
+        title = QLabel("Core Clock Tuning (Undervolt & Curve Flattening)")
+        title.setProperty("class", "CardTitle")
+        box.addWidget(title)
+
+        tech_explainer = QLabel(
+            "<b>How modern NVIDIA undervolting works:</b><br/>"
+            "• <b>Curve Offset (Overclock / Undervolt):</b> Shifts the voltage/frequency curve upward so the core reaches higher clock speeds at lower voltages, reducing heat and power draw.<br/>"
+            "• <b>Boost Clock Cap (Flattening):</b> An aggressive offset pushes top frequencies into unstable territory under peak boost. Capping the max clock \"flattens\" the top of the curve, keeping the efficiency gains of the undervolt while maintaining total stability."
+        )
+        tech_explainer.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.4;")
+        tech_explainer.setWordWrap(True)
+        box.addWidget(tech_explainer)
+
         self.uv_support_lbl = QLabel("")
         self.uv_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
         self.uv_support_lbl.setWordWrap(True)
-        uc.addWidget(self.uv_support_lbl)
+        box.addWidget(self.uv_support_lbl)
+
+        # ── Sub-section 1: V/F Curve Offset ──
+        uv_sub_title = QLabel("1. V/F Curve Offset (Core Undervolt)")
+        uv_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600; margin-top: 4px;")
+        box.addWidget(uv_sub_title)
+
+        uv_sub_desc = QLabel(
+            "Shift frequency up across all voltage points (0 to +255 MHz). "
+            "Higher values reduce voltage for any given clock."
+        )
+        uv_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
+        uv_sub_desc.setWordWrap(True)
+        box.addWidget(uv_sub_desc)
 
         uv_row = QHBoxLayout()
-        uv_row.setSpacing(8)
+        uv_row.setSpacing(10)
         self.uv_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
         self.uv_slider.setMinimum(0)
         self.uv_slider.setMaximum(dgpu_tune.MAX_OFFSET_MHZ)
@@ -230,68 +247,65 @@ class GpuPage(QWidget):
         self.uv_slider.setValue(0)
         self.uv_slider.valueChanged.connect(self._on_uv_slider)
         self.uv_val = QLabel("+0 MHz")
-        self.uv_val.setStyleSheet("color: #ffffff; font-weight: 700; min-width: 70px;")
+        self.uv_val.setProperty("class", "ValueReadoutPill")
+        self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.uv_val.setMinimumWidth(80)
         self.uv_reset_btn = QPushButton("Reset")
         self.uv_reset_btn.setToolTip("Return the V/F offset to stock (0 MHz) now")
         self.uv_reset_btn.clicked.connect(lambda: self._reset_uv())
         uv_row.addWidget(self.uv_slider, 1)
         uv_row.addWidget(self.uv_val)
         uv_row.addWidget(self.uv_reset_btn)
-        uc.addLayout(uv_row)
+        box.addLayout(uv_row)
 
         self.uv_status_lbl = QLabel("")
-        self.uv_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px;")
-        uc.addWidget(self.uv_status_lbl)
+        self.uv_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        box.addWidget(self.uv_status_lbl)
 
-        uv_note = QLabel(
-            "Higher offset = lower voltage for a given clock. If the GPU becomes "
-            "unstable, lower the value. Applied only while the dGPU is awake; "
-            "cleared automatically when it suspends and reset on reboot."
+        # Divider
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setFrameShadow(QFrame.Shadow.Sunken)
+        divider.setStyleSheet("color: #232b3d; margin-top: 6px; margin-bottom: 6px;")
+        box.addWidget(divider)
+
+        # ── Sub-section 2: Max Clock Cap (Curve Flattening) ──
+        mc_sub_title = QLabel("2. Max Boost Clock Cap (Curve Flattening)")
+        mc_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600;")
+        box.addWidget(mc_sub_title)
+
+        mc_sub_desc = QLabel(
+            "Upper-bound the boost clock. The top of the slider is Stock (unlocked). "
+            "Lowering it flattens the curve above the specified MHz to prevent instability."
         )
-        uv_note.setStyleSheet("color: #718096; font-size: 11px;")
-        uv_note.setWordWrap(True)
-        uc.addWidget(uv_note)
-        return uv_card
-
-    def _build_max_clock_card(self) -> QFrame:
-        mc_card = QFrame()
-        mc_card.setProperty("class", "Card")
-        mcc = QVBoxLayout(mc_card)
-        mcc.setSpacing(10)
-
-        mc_title = QLabel("Max clock cap")
-        mc_title.setProperty("class", "CardTitle")
-        mcc.addWidget(mc_title)
-        mc_note = QLabel(
-            "Upper-bound the boost clock — useful with an aggressive undervolt to "
-            "stay at a stable voltage point. The cap can only lower the clock; the "
-            "top of the slider is stock (unlocked). Requires the dGPU to be awake."
-        )
-        mc_note.setStyleSheet("color: #8896ab; font-size: 11px;")
-        mc_note.setWordWrap(True)
-        mcc.addWidget(mc_note)
+        mc_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
+        mc_sub_desc.setWordWrap(True)
+        box.addWidget(mc_sub_desc)
 
         mc_row = QHBoxLayout()
-        mc_row.setSpacing(8)
+        mc_row.setSpacing(10)
         self.max_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
         self.max_slider.setRange(self._normal_min, self._normal_max)
         self.max_slider.setSingleStep(25)
         self.max_slider.setValue(self._normal_max)
         self.max_slider.valueChanged.connect(self._on_max_slider)
         self.max_val = QLabel("Stock (unlocked)")
-        self.max_val.setStyleSheet("color: #ffffff; font-weight: 700; min-width: 150px;")
+        self.max_val.setProperty("class", "ValueReadoutPill")
+        self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.max_val.setMinimumWidth(160)
         self.max_reset_btn = QPushButton("Reset")
         self.max_reset_btn.setToolTip("Unlock the boost clock now")
         self.max_reset_btn.clicked.connect(lambda: self._reset_max())
         mc_row.addWidget(self.max_slider, 1)
         mc_row.addWidget(self.max_val)
         mc_row.addWidget(self.max_reset_btn)
-        mcc.addLayout(mc_row)
+        box.addLayout(mc_row)
 
         self.max_status_lbl = QLabel("")
-        self.max_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px;")
-        mcc.addWidget(self.max_status_lbl)
-        return mc_card
+        self.max_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        box.addWidget(self.max_status_lbl)
+
+        return card
 
     def _build_mem_clock_card(self) -> QFrame:
         card = QFrame()
@@ -299,16 +313,16 @@ class GpuPage(QWidget):
         box = QVBoxLayout(card)
         box.setSpacing(10)
 
-        title = QLabel("Memory clock offset (overclock)")
+        title = QLabel("Memory Clock (VRAM Overclock)")
         title.setProperty("class", "CardTitle")
         box.addWidget(title)
+
         note = QLabel(
-            "Shift the memory clock by a signed offset. Positive values overclock "
-            "it (more bandwidth, more heat), negative values underclock it, 0 is "
-            "stock. The GPU/driver may reject offsets it cannot run — the applied "
-            "value is read back from the card. Needs the dGPU to be awake."
+            "Independent memory frequency offset. Positive values overclock VRAM to increase "
+            "memory bandwidth (improving bandwidth-heavy games and workloads), negative values "
+            "underclock, and 0 is stock. The GPU driver automatically validates supported offsets."
         )
-        note.setStyleSheet("color: #8896ab; font-size: 11px;")
+        note.setStyleSheet("color: #8896ab; font-size: 11px; line-height: 1.4;")
         note.setWordWrap(True)
         box.addWidget(note)
 
@@ -318,7 +332,7 @@ class GpuPage(QWidget):
         box.addWidget(self.mem_support_lbl)
 
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(10)
         self.mem_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
         self.mem_slider.setRange(dgpu_tune.MEM_OFFSET_MIN_MHZ, dgpu_tune.MEM_OFFSET_MAX_MHZ)
         self.mem_slider.setSingleStep(25)
@@ -326,7 +340,9 @@ class GpuPage(QWidget):
         self.mem_slider.setValue(0)
         self.mem_slider.valueChanged.connect(self._on_mem_slider)
         self.mem_val = QLabel("+0 MHz")
-        self.mem_val.setStyleSheet("color: #ffffff; font-weight: 700; min-width: 110px;")
+        self.mem_val.setProperty("class", "ValueReadoutPill")
+        self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mem_val.setMinimumWidth(110)
         self.mem_reset_btn = QPushButton("Reset")
         self.mem_reset_btn.setToolTip("Return the memory clock offset to stock now")
         self.mem_reset_btn.clicked.connect(lambda: self._reset_mem())
@@ -336,21 +352,22 @@ class GpuPage(QWidget):
         box.addLayout(row)
 
         self.mem_status_lbl = QLabel("")
-        self.mem_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px;")
+        self.mem_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
         box.addWidget(self.mem_status_lbl)
         return card
 
     def _build_apply_bar(self) -> QHBoxLayout:
         """The single commit point for all three controls."""
         row = QHBoxLayout()
-        row.setSpacing(8)
-        self.apply_btn = QPushButton("Apply")
-        self.apply_btn.setProperty("class", "ProfileButton")
-        self.apply_btn.setToolTip("Apply the undervolt, clock cap and memory clock together")
+        row.setSpacing(12)
+        self.apply_btn = QPushButton("Apply Tuning")
+        self.apply_btn.setProperty("class", "PrimaryButton")
+        self.apply_btn.setMinimumHeight(38)
+        self.apply_btn.setToolTip("Apply the core offset, boost clock cap and memory offset together")
         self.apply_btn.clicked.connect(self._apply_all)
         row.addWidget(self.apply_btn)
         self.apply_hint_lbl = QLabel("")
-        self.apply_hint_lbl.setStyleSheet("color: #718096; font-size: 11px;")
+        self.apply_hint_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 500;")
         self.apply_hint_lbl.setWordWrap(True)
         row.addWidget(self.apply_hint_lbl, 1)
         return row

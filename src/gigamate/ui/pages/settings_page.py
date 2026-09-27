@@ -182,8 +182,8 @@ class SettingsPage(QWidget):
         chip = QFrame()
         chip.setProperty("class", "StatusChip")
         c_lay = QVBoxLayout(chip)
-        c_lay.setContentsMargins(14, 10, 14, 10)
-        c_lay.setSpacing(2)
+        c_lay.setContentsMargins(16, 12, 16, 12)
+        c_lay.setSpacing(3)
 
         hdr = QHBoxLayout()
         hdr.setSpacing(6)
@@ -193,7 +193,7 @@ class SettingsPage(QWidget):
         hdr.addWidget(icon_lbl)
 
         t_lbl = QLabel(title)
-        t_lbl.setStyleSheet("color: #718096; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
+        t_lbl.setStyleSheet("color: #8896ab; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;")
         hdr.addWidget(t_lbl)
         hdr.addStretch()
         c_lay.addLayout(hdr)
@@ -204,7 +204,12 @@ class SettingsPage(QWidget):
 
         if sub_text:
             sub_lbl = QLabel(sub_text)
-            sub_lbl.setStyleSheet("color: #8896ab; font-size: 10px; font-weight: 500;")
+            if "Active" in sub_text or "Supported" in sub_text or "Mapped" in sub_text:
+                sub_lbl.setStyleSheet("color: #48bb78; font-size: 11px; font-weight: 600;")
+            elif "Required" in sub_text or "Uncalibrated" in sub_text:
+                sub_lbl.setStyleSheet("color: #ed8936; font-size: 11px; font-weight: 600;")
+            else:
+                sub_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 500;")
             c_lay.addWidget(sub_lbl)
 
         return chip

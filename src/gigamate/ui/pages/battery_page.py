@@ -92,12 +92,30 @@ class BatteryPage(QWidget):
         self.slider_container = QWidget()
         sc_layout = QVBoxLayout(self.slider_container)
         sc_layout.setContentsMargins(0, 0, 0, 0)
-        sc_layout.setSpacing(10)
+        sc_layout.setSpacing(12)
+
+        # Quick preset buttons
+        presets_row = QHBoxLayout()
+        presets_row.setSpacing(8)
+        p_label = QLabel("Quick Presets:")
+        p_label.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        presets_row.addWidget(p_label)
+
+        for p_val, p_text in [(60, "60% Storage"), (80, "80% Daily Care"), (100, "100% Full")]:
+            btn = QPushButton(p_text)
+            btn.setProperty("class", "PresetButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, v=p_val: self._set_slider_value(v))
+            presets_row.addWidget(btn)
+        presets_row.addStretch()
+        sc_layout.addLayout(presets_row)
 
         slider_layout = QHBoxLayout()
-        slider_layout.setSpacing(14)
+        slider_layout.setSpacing(12)
         self.slider_label = QLabel("Limit: 80%")
-        self.slider_label.setStyleSheet("color: #ffffff; font-weight: 600; font-size: 14px; min-width: 90px;")
+        self.slider_label.setProperty("class", "ValueReadoutPill")
+        self.slider_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.slider_label.setMinimumWidth(100)
 
         self.limit_slider = QSlider(Qt.Orientation.Horizontal)
         self.limit_slider.setRange(40, 100)
@@ -107,6 +125,7 @@ class BatteryPage(QWidget):
 
         self.apply_limit_btn = QPushButton("Apply Limit")
         self.apply_limit_btn.setProperty("class", "PrimaryButton")
+        self.apply_limit_btn.setMinimumHeight(34)
         self.apply_limit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.apply_limit_btn.clicked.connect(self._apply_charge_limit)
 
@@ -116,7 +135,7 @@ class BatteryPage(QWidget):
         sc_layout.addLayout(slider_layout)
 
         self.limit_status_label = QLabel("")
-        self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px;")
+        self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px; font-weight: 500;")
         sc_layout.addWidget(self.limit_status_label)
         c_layout.addWidget(self.slider_container)
 

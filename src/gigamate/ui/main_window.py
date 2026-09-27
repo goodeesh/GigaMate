@@ -230,7 +230,8 @@ class MainWindow(QMainWindow):
 
         title_lbl = QLabel("GigaMate")
         title_lbl.setObjectName("AppTitle")
-        sub_lbl = QLabel("Command Center 3.0")
+        from .. import __version__
+        sub_lbl = QLabel(f"Command Center v{__version__}")
         sub_lbl.setObjectName("AppSubtitle")
 
         title_box.addWidget(title_lbl)
@@ -244,11 +245,11 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
 
-        self.btn_dashboard = self._add_nav_btn("⚡  Dashboard", 0, sb_layout)
-        self.btn_battery = self._add_nav_btn("🔋  Battery Care", 1, sb_layout)
-        self.btn_rgb = self._add_nav_btn("🎨  RGB Lighting", 2, sb_layout)
-        self.btn_gpu = self._add_nav_btn("⚡  GPU", 3, sb_layout)
-        self.btn_settings = self._add_nav_btn("⚙️  Settings", 4, sb_layout)
+        self.btn_dashboard = self._add_nav_btn("  Dashboard", 0, sb_layout)
+        self.btn_battery = self._add_nav_btn("  Battery Care", 1, sb_layout)
+        self.btn_rgb = self._add_nav_btn("  RGB Lighting", 2, sb_layout)
+        self.btn_gpu = self._add_nav_btn("  GPU Tuning", 3, sb_layout)
+        self.btn_settings = self._add_nav_btn("  Settings", 4, sb_layout)
 
         sb_layout.addStretch()
 
@@ -510,6 +511,10 @@ def run_gui() -> None:
     is_external_app = app is not None
     if app is None:
         app = QApplication(sys.argv)
+
+    app.setApplicationName("gigamate-center")
+    app.setApplicationDisplayName("GigaMate Center")
+    app.setDesktopFileName("gigamate-center.desktop")
 
     app.setStyleSheet(DARK_THEME)
     window = MainWindow()
