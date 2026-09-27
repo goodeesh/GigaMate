@@ -25,8 +25,9 @@ Key invariant: this module never links NVML itself and never holds a GPU handle
 open — doing so would keep the dGPU awake. It reads ``power/runtime_status``
 from sysfs (which does not wake the GPU) and only shells out to the helper when
 a change is actually needed. The tuning is applied only while the GPU is awake;
-it is cleared when it suspends (and when it is awake but idle), and re-applied
-whenever the desired values change or the GPU becomes busy again.
+it is cleared when it suspends (and when it is awake but idle *and no process
+holds it open*), and re-applied whenever the desired values change, the GPU
+becomes busy again, or a process starts using it.
 
 Configuration keys (see ``config.py``):
     dgpu_undervolt_enabled    bool   undervolt on/off
@@ -599,7 +600,9 @@ class DgpuWatcher:
         util = res.get("util")
         with self._lock:
             self._status["util"] = util
-        if util == 0:
+        # Only idle-clear when the dGPU is genuinely idle: no process holds it
+        # open. A held dGPU is in use even at 0% util, so keep the tuning.
+        if util == 0 and not gpu_in_use():
             if self._idle_since is None:
                 self._idle_since = now
             elif now - self._idle_since >= IDLE_CLEAR_SEC:
@@ -612,6 +615,11 @@ class DgpuWatcher:
 
     def _poll_and_maybe_reapply(self, now: float) -> None:
         self._last_poll = now
+        # A process holding the dGPU open means it is in use: re-apply without
+        # waiting for the utilization threshold (and without an NVML read).
+        if gpu_in_use():
+            self._do_apply(now)
+            return
         res = get_state()
         if not res.get("ok"):
             with self._lock:
@@ -783,6 +791,8 @@ def human_status() -> str:
         return f"error: {st['last_error']}"
     if not st.get("auto", True):
         return f"{label} pending (auto-apply off)"
+    if st.get("idle_cleared"):
+        return f"{label} paused while idle (re-applies when busy)"
     return f"{label} pending"
 
 

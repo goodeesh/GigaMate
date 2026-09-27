@@ -22,6 +22,7 @@ def _patches(rstatus="active", pstate="D0", util=0):
         mock.patch.object(dgpu_tune, "probe", return_value={"supported": True}),
         mock.patch.object(dgpu_tune, "get_state",
                           return_value={"ok": True, "offset_mhz": 0, "util": util}),
+        mock.patch.object(dgpu_tune, "gpu_in_use", return_value=False),
         mock.patch.object(dgpu_tune, "_write_state_file", return_value=None),
     ]
 
@@ -163,6 +164,65 @@ def test_idle_clear_and_reapply():
     finally:
         for p in ps:
             p.stop()
+
+
+def test_idle_clear_skipped_while_gpu_held():
+    """A process holding the dGPU keeps the tuning applied even at 0% util."""
+    w = dgpu_tune.DgpuWatcher()
+    w.set_desired(True, 100, True)
+    w._applied_offset = 100
+    w._last_poll = 1000.0
+    ps = _patches()
+    for p in ps:
+        p.start()
+    try:
+        t = 1000.0 + dgpu_tune.IDLE_POLL_SEC
+        with mock.patch.object(dgpu_tune, "get_state",
+                               return_value={"ok": True, "offset_mhz": 100, "util": 0}), \
+             mock.patch.object(dgpu_tune, "gpu_in_use", return_value=True), \
+             mock.patch.object(dgpu_tune, "clear_tune") as cl:
+            for step in (t, t + dgpu_tune.IDLE_CLEAR_SEC + dgpu_tune.IDLE_POLL_SEC):
+                w.tick(now=step)
+            assert cl.called is False
+            assert w.status()["applied"] is True
+    finally:
+        for p in ps:
+            p.stop()
+
+
+def test_reapply_when_gpu_becomes_held():
+    """While idle-cleared, a process holding the dGPU re-applies without util."""
+    w = dgpu_tune.DgpuWatcher()
+    w.set_desired(True, 100, True)
+    w._idle_cleared = True
+    w._last_poll = 1000.0
+    ps = _patches()
+    for p in ps:
+        p.start()
+    try:
+        with mock.patch.object(dgpu_tune, "gpu_in_use", return_value=True), \
+             mock.patch.object(dgpu_tune, "apply_tune",
+                               return_value={"ok": True, "offset_mhz": 100}) as ap, \
+             mock.patch.object(dgpu_tune, "get_state") as gs:
+            w.tick(now=1000.0 + dgpu_tune.IDLE_POLL_SEC)
+            assert ap.called is True
+            assert w.status()["applied"] is True
+            gs.assert_not_called()  # holder check avoids the NVML read
+    finally:
+        for p in ps:
+            p.stop()
+
+
+def test_human_status_idle_paused():
+    w = dgpu_tune.DgpuWatcher()
+    w.set_desired(True, 100, True)
+    st = w.status()
+    st.update({"supported": True, "runtime": "active", "enabled": True,
+               "applied": False, "idle_cleared": True, "auto": True,
+               "last_error": None, "desired_offset": 100})
+    w._status = st
+    with mock.patch.object(dgpu_tune, "watcher", w):
+        assert "paused while idle" in dgpu_tune.human_status()
 
 
 def test_max_clock_applies_independently():

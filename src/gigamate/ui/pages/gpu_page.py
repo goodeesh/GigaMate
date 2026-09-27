@@ -422,8 +422,8 @@ class GpuPage(QWidget):
                 "Unapplied: " + ", ".join(staged) + " — press Apply to send them to the GPU.")
         else:
             self.apply_hint_lbl.setText(
-                "Sliders match the saved settings. Everything is applied only while "
-                "the dGPU is awake.")
+                "Sliders match the saved settings. Tuning is applied while the dGPU "
+                "is awake and in use; it pauses when the dGPU is idle or asleep.")
 
     # ── actions ──
     def _apply_all(self) -> None:
@@ -558,14 +558,22 @@ class GpuPage(QWidget):
             self.uv_val.setText(f"+{pos} MHz")
             self._uv_cfg_key = (enabled, pos)
 
+        st = self._hw or {}
+        idle_cleared = bool(st.get("idle_cleared"))
+        auto = st.get("auto", True)
         if enabled and offset > 0 and hw_off == offset:
             state = f"Applied: +{offset} MHz"
         elif enabled and offset > 0 and not self._gpu_awake:
             # The hardware reads 0 while the dGPU is asleep (D3cold wiped it), so
             # report what is configured rather than pretending it is off.
             state = f"Configured: +{offset} MHz — applies when the dGPU wakes"
+        elif enabled and offset > 0 and idle_cleared:
+            state = (f"Configured: +{offset} MHz — paused while the dGPU is idle "
+                     "(re-applies under load)")
+        elif enabled and offset > 0 and not auto:
+            state = f"Configured: +{offset} MHz — pending (auto-apply off)"
         elif enabled and offset > 0:
-            state = "Configured — not applied yet (dGPU asleep or pending)"
+            state = f"Configured: +{offset} MHz — pending apply"
         elif hw_off not in (None, 0):
             state = f"Stock requested; hardware still at +{hw_off} MHz"
         else:
@@ -576,7 +584,10 @@ class GpuPage(QWidget):
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_max_clock_enabled", False))
         wanted = int(cfg.get("dgpu_max_clock_mhz", 0) or 0)
-        applied_max = dgpu_tune.read_state_file().get("applied_max") or 0
+        st = self._hw or {}
+        applied_max = st.get("applied_max") or 0
+        idle_cleared = bool(st.get("idle_cleared"))
+        auto = st.get("auto", True)
 
         if enabled and wanted > 0:
             # Widen the low end if a smaller cap was set out-of-band (e.g. CLI).
@@ -602,8 +613,13 @@ class GpuPage(QWidget):
             state = f"Applied: cap {wanted} MHz"
         elif enabled and wanted > 0 and not self._gpu_awake:
             state = f"Configured: cap {wanted} MHz — applies when the dGPU wakes"
+        elif enabled and wanted > 0 and idle_cleared:
+            state = (f"Configured: cap {wanted} MHz — paused while the dGPU is idle "
+                     "(re-applies under load)")
+        elif enabled and wanted > 0 and not auto:
+            state = f"Configured: cap {wanted} MHz — pending (auto-apply off)"
         elif enabled and wanted > 0:
-            state = "Configured — not applied yet (dGPU asleep or pending)"
+            state = f"Configured: cap {wanted} MHz — pending apply"
         elif applied_max:
             state = f"Off requested; hardware still capped at {applied_max} MHz"
         else:
@@ -614,7 +630,10 @@ class GpuPage(QWidget):
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_mem_clock_enabled", False))
         wanted = int(cfg.get("dgpu_mem_clock_mhz", 0) or 0)
-        applied = dgpu_tune.read_state_file().get("applied_mem") or 0
+        st = self._hw or {}
+        applied = st.get("applied_mem") or 0
+        idle_cleared = bool(st.get("idle_cleared"))
+        auto = st.get("auto", True)
         # Read the helper version from the probe cache: asking for it must never
         # open NVML on a card the kernel has powered down. An unknown version is
         # not treated as stale — we simply have nothing to say.
@@ -661,8 +680,13 @@ class GpuPage(QWidget):
             state = f"Applied: pinned at {wanted} MHz"
         elif enabled and wanted > 0 and not self._gpu_awake:
             state = f"Configured: pin {wanted} MHz — applies when the dGPU wakes"
+        elif enabled and wanted > 0 and idle_cleared:
+            state = (f"Configured: pin {wanted} MHz — paused while the dGPU is idle "
+                     "(re-applies under load)")
+        elif enabled and wanted > 0 and not auto:
+            state = f"Configured: pin {wanted} MHz — pending (auto-apply off)"
         elif enabled and wanted > 0:
-            state = "Configured — not applied yet (dGPU asleep or pending)"
+            state = f"Configured: pin {wanted} MHz — pending apply"
         elif applied:
             state = f"Off requested; hardware still pinned at {applied} MHz"
         elif not enabled and selected != self._mem_cfg_key:

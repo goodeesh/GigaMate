@@ -458,6 +458,33 @@ def test_gpu_page_shows_configured_value_while_asleep(qapp):
     page.deleteLater()
 
 
+def test_gpu_page_reports_paused_while_awake_idle(qapp):
+    """Awake but idle-cleared must not claim 'asleep or pending'."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({"dgpu_undervolt_enabled": True, "dgpu_undervolt_offset_mhz": 100})
+    config_mod.save(cfg)
+
+    awake = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    page = gp.GpuPage()
+    state_file = {"ts": 1.0, "offset_mhz": 0, "applied_offset": 0, "applied_max": 0,
+                  "applied_mem": 0, "idle_cleared": True, "runtime": "active", "auto": True}
+    probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+             "mem_max_clock_mhz": 12001,
+             "mem_supported_clocks": [9001, 11001, 12001],
+             "mem_lock_api": True, "helper_version": 2}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=awake, probe=probe,
+                                       state_file=state_file)):
+        page.reload_from_config()
+    text = page.uv_status_lbl.text()
+    assert "paused while the dGPU is idle" in text
+    assert "asleep or pending" not in text
+    page.deleteLater()
+
+
 def test_every_page_fits_the_narrowest_window(qapp):
     """No page may need more width than the window can give it.
 
