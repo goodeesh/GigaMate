@@ -86,7 +86,7 @@ Profiles define keyboard RGB and optional ACPI capabilities.
 ```json
 {
   "name": "Gigabyte Aero X16 (EG61VH)",
-  "version": 2,
+  "version": 3,
   "vid": "0x0414",
   "pid": "0x8105",
   "interfaces": [1, 3],
@@ -96,6 +96,7 @@ Profiles define keyboard RGB and optional ACPI capabilities.
     "has_fan_control": true,
     "has_temperature": true,
     "has_power_profiles": true,
+    "confidence": "verified",
     "fan_count": 2,
     "fan_labels": ["CPU Fan", "GPU Fan"],
     "profiles": {
@@ -106,6 +107,42 @@ Profiles define keyboard RGB and optional ACPI capabilities.
   }
 }
 ```
+
+### ACPI-only profile (no Gigabyte USB keyboard)
+
+Laptops without a Gigabyte USB keyboard (e.g. GIGABYTE GAMING A16) key their
+profile on **DMI** and are named `dmi_<slug>.json`:
+
+```json
+{
+  "name": "Gigabyte GAMING A16 CMH",
+  "version": 3,
+  "dmi": {"product_names": ["GIGABYTE GAMING A16 CMH"]},
+  "interfaces": [],
+  "control_interface": 0,
+  "colour_map": {},
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "confidence": "experimental",
+    "fan_count": 2,
+    "fan_labels": ["CPU Fan", "GPU Fan"],
+    "profiles": {
+      "0": {"name": "Eco"},
+      "1": {"name": "Balanced"},
+      "2": {"name": "Boost"}
+    },
+    "backend": "module"
+  }
+}
+```
+
+Use `"confidence": "experimental"` for any model whose profile switching you
+have **not** confirmed on real hardware — it ships as opt-in and is promoted to
+`"verified"` once a user reports it works. See
+[docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md) for the registry and
+promotion protocol.
 
 See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md) for the full reference.
 

@@ -1,0 +1,28 @@
+{
+  "name": "Gigabyte GAMING A16 / A18 (family)",
+  "version": 3,
+  "dmi": {
+    "product_families": ["GIGABYTE GAMING"]
+  },
+  "interfaces": [],
+  "control_interface": 0,
+  "colour_map": {},
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "confidence": "experimental",
+    "fan_count": 2,
+    "fan_labels": ["CPU Fan", "GPU Fan"],
+    "sensor_labels": {
+      "temp_cpu": "CPU Temp",
+      "temp_socket": "Socket Temp"
+    },
+    "profiles": {
+      "0": {"name": "Eco", "desc": "Lowest GPU power"},
+      "1": {"name": "Balanced", "desc": "Default GPU power"},
+      "2": {"name": "Boost", "desc": "Max GPU TGP (~70-80 W with Dynamic Boost)"}
+    },
+    "backend": "module"
+  }
+}

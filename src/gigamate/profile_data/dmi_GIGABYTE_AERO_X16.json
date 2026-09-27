@@ -1,0 +1,29 @@
+{
+  "name": "Gigabyte AERO X16 (family)",
+  "version": 3,
+  "dmi": {
+    "product_name_prefixes": ["GIGABYTE AERO X16"]
+  },
+  "interfaces": [],
+  "control_interface": 0,
+  "colour_map": {},
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "confidence": "experimental",
+    "fan_count": 2,
+    "fan_labels": ["CPU Fan", "GPU Fan"],
+    "sensor_labels": {
+      "temp_cpu": "CPU Temp",
+      "temp_socket": "Socket Temp"
+    },
+    "profiles": {
+      "0": {"name": "Quiet", "desc": "Low fan noise, capped GPU power"},
+      "1": {"name": "Balanced", "desc": "Balanced performance and noise"},
+      "2": {"name": "Performance", "desc": "High performance, more fan noise"},
+      "3": {"name": "Gaming", "desc": "Maximum GPU power"}
+    },
+    "backend": "module"
+  }
+}

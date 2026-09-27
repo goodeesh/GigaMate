@@ -193,21 +193,30 @@ def test_gpu_page_sliders_not_reset_while_dragging(qapp):
 
 
 def test_dashboard_profile_selection(qapp):
+    from unittest.mock import patch
     from gigamate.ui.main_window import MainWindow
-    from gigamate.acpi import FanProfile
+    from gigamate.profiles import AcpiConfig, DeviceProfile, ModelMatch
 
-    win = MainWindow()
-    dash = win.page_dashboard
+    prof = DeviceProfile(
+        vid=0x0414, pid=0x8105, name="Test",
+        acpi=AcpiConfig(has_power_profiles=True, profiles={
+            "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
+            "2": {"name": "Performance"}, "3": {"name": "Gaming"}}))
+    match = ModelMatch(prof, "builtin-usb", False)
 
-    # Select Quiet
-    dash._select_profile(FanProfile.QUIET)
-    assert dash._profile_buttons[FanProfile.QUIET].isChecked()
-    assert not dash._profile_buttons[FanProfile.GAMING].isChecked()
+    with patch("gigamate.ui.pages.dashboard_page.resolve_model", return_value=match):
+        win = MainWindow()
+        dash = win.page_dashboard
 
-    # Select Gaming
-    dash._select_profile(FanProfile.GAMING)
-    assert dash._profile_buttons[FanProfile.GAMING].isChecked()
-    assert not dash._profile_buttons[FanProfile.QUIET].isChecked()
+        # Select Quiet (id 0)
+        dash._select_profile(0)
+        assert dash._profile_buttons[0].isChecked()
+        assert not dash._profile_buttons[3].isChecked()
+
+        # Select Gaming (id 3)
+        dash._select_profile(3)
+        assert dash._profile_buttons[3].isChecked()
+        assert not dash._profile_buttons[0].isChecked()
 
 
 def test_rgb_page_color_highlighting(qapp):
@@ -657,6 +666,7 @@ def test_dashboard_page_when_acpi_driver_missing(qapp):
         acpi_driver_missing=True,
         has_power_profiles=False,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -701,6 +711,7 @@ def test_dashboard_page_when_non_gigabyte(qapp):
         acpi_driver_missing=False,
         has_power_profiles=False,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -766,6 +777,69 @@ def test_dashboard_page_single_fan(qapp):
         assert title.text() == "System Fan Speed"
 
 
+def _experimental_match():
+    from gigamate.profiles import AcpiConfig, DeviceProfile, DmiConfig, ModelMatch
+
+    prof = DeviceProfile(
+        name="Gigabyte GAMING A16 / A18 (family)",
+        dmi=DmiConfig(product_families=["GIGABYTE GAMING"]),
+        acpi=AcpiConfig(
+            has_fan_control=True, has_temperature=True, has_power_profiles=True,
+            confidence="experimental", fan_count=2,
+            profiles={"0": {"name": "Eco"}, "1": {"name": "Balanced"},
+                      "2": {"name": "Boost"}},
+        ),
+    )
+    return ModelMatch(prof, "builtin-dmi", True)
+
+
+def _dashboard_with_match(caps, match, cfg, qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.ui.pages.dashboard_page import DashboardPage
+    from gigamate.acpi import FanState
+    from gigamate.gpu import GpuState
+
+    with patch("gigamate.ui.pages.dashboard_page.AcpiController") as c_cls, \
+         patch("gigamate.ui.pages.dashboard_page.resolve_model", return_value=match), \
+         patch("gigamate.ui.pages.dashboard_page.load_config", return_value=cfg), \
+         patch("gigamate.ui.pages.dashboard_page.get_gpu_state",
+               return_value=GpuState(present=False)):
+        c = MagicMock()
+        c.available = True
+        c.capabilities = caps
+        c.get_profile.return_value = None
+        c.read_state.return_value = FanState()
+        c_cls.return_value = c
+        page = DashboardPage()
+        page.show()
+        qapp.processEvents()
+    return page
+
+
+def test_dashboard_experimental_hidden_until_consent(qapp):
+    from gigamate.acpi import AcpiCapabilities
+
+    caps = AcpiCapabilities(has_temperature=True, has_fan_rpm=True,
+                            has_fan_duty=True, fan_count=2)
+    page = _dashboard_with_match(caps, _experimental_match(),
+                                 {"experimental_profiles_enabled": False}, qapp)
+    # Buttons are generated from the model's 3-entry set and disabled.
+    assert sorted(page._profile_buttons.keys()) == [0, 1, 2]
+    assert all(not b.isEnabled() for b in page._profile_buttons.values())
+    assert page.btn_enable_experimental.isVisible() is True
+
+
+def test_dashboard_experimental_enabled_after_consent(qapp):
+    from gigamate.acpi import AcpiCapabilities
+
+    caps = AcpiCapabilities(has_temperature=True, has_fan_rpm=True,
+                            has_fan_duty=True, fan_count=2)
+    page = _dashboard_with_match(caps, _experimental_match(),
+                                 {"experimental_profiles_enabled": True}, qapp)
+    assert all(b.isEnabled() for b in page._profile_buttons.values())
+    assert page.btn_enable_experimental.isVisible() is False
+
+
 def test_rgb_page_when_keyboard_not_detected(qapp):
     """Verify RgbPage shows notice when no compatible keyboard is detected."""
     from gigamate.ui.pages.rgb_page import RgbPage
@@ -780,6 +854,7 @@ def test_rgb_page_when_keyboard_not_detected(qapp):
         acpi_driver_missing=False,
         has_power_profiles=False,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -818,6 +893,7 @@ def test_rgb_page_when_keyboard_uncalibrated(qapp):
         acpi_driver_missing=False,
         has_power_profiles=True,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=True,
         has_fan_rpm=True,
         fan_count=2,
@@ -899,6 +975,7 @@ def _onboarding_caps():
         acpi_driver_missing=True,
         has_power_profiles=False,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=2,
@@ -1018,7 +1095,7 @@ def test_onboarding_unsupported_opts_out_everything(qapp):
     caps = HardwareCapabilities(
         product_name="Generic PC", is_gigabyte_laptop=False, acpi_available=False,
         acpi_backend="none", acpi_driver_loaded=False, acpi_driver_missing=False,
-        has_power_profiles=False, profile_verified=False, has_temperature=False, has_fan_rpm=False, fan_count=0,
+        has_power_profiles=False, profile_verified=False, profile_experimental=False, has_temperature=False, has_fan_rpm=False, fan_count=0,
         battery_present=False, charge_limit_supported=False, battery_name="None",
         keyboard_detected=False, keyboard_profile_loaded=False, keyboard_profile_name=None,
         keyboard_vid_pid=None, has_dgpu=False, gpu_name="Integrated Only",

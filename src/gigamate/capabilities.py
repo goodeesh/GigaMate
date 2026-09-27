@@ -20,7 +20,7 @@ from .profiles import (
     get_dmi_chassis_type,
     get_dmi_product_name,
     get_dmi_vendor,
-    has_verified_profiles,
+    resolve_model,
     resolve_profile,
 )
 
@@ -58,7 +58,8 @@ class HardwareCapabilities:
     acpi_driver_loaded: bool  # True if gigamate_acpi sysfs is active
     acpi_driver_missing: bool  # True if it is a Gigabyte laptop, but ACPI driver is not loaded
     has_power_profiles: bool
-    profile_verified: bool  # True only when a model profile declares has_power_profiles
+    profile_verified: bool  # True when a model profile declares a profile set
+    profile_experimental: bool  # True when that model profile is experimental
     has_temperature: bool
     has_fan_rpm: bool
     fan_count: int
@@ -156,10 +157,12 @@ def _probe_system_capabilities() -> HardwareCapabilities:
             keyboard_profile_name = prof.name
 
     # Profile switching is a per-model contract, never derived from the probe.
-    # Only a matching model profile that declares has_power_profiles enables it.
-    profile_verified = has_verified_profiles(
-        resolve_profile(detected_kbd[0], detected_kbd[1]) if detected_kbd else None
-    )
+    # USB-keyed profiles first, then DMI-keyed (ACPI-only laptops): the first
+    # match that declares a profile set enables controls (with a warning when
+    # the model is experimental and unconfirmed).
+    model_match = resolve_model(detected_kbd[0], detected_kbd[1]) if detected_kbd else resolve_model()
+    profile_verified = model_match is not None
+    profile_experimental = bool(model_match and model_match.experimental)
 
     # 5. GPU Subsystem
     gpu_state = get_gpu_state()
@@ -176,6 +179,7 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         acpi_driver_missing=acpi_missing,
         has_power_profiles=acpi_caps.has_power_profiles,
         profile_verified=profile_verified,
+        profile_experimental=profile_experimental,
         has_temperature=acpi_caps.has_temperature,
         has_fan_rpm=acpi_caps.has_fan_rpm,
         fan_count=acpi_caps.fan_count,

@@ -22,12 +22,18 @@
 
 ## File naming
 
-Profiles are named `{VID}_{PID}.json` where VID and PID are 4-digit
-hexadecimal USB identifiers (uppercase).
+USB-keyed profiles are named `{VID}_{PID}.json` (4-digit uppercase hex USB ids).
 
 ```
 0414_8105.json   → VID=0x0414, PID=0x8105
 1044_7A43.json   → VID=0x1044, PID=0x7A43
+```
+
+DMI-keyed profiles (no Gigabyte USB keyboard) are named `dmi_<slug>.json`:
+
+```
+dmi_GIGABYTE_GAMING.json
+dmi_gigabyte_gaming_a16_cmh.json
 ```
 
 ---
@@ -36,10 +42,11 @@ hexadecimal USB identifiers (uppercase).
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "name": "Full Model Name",
   "vid": "0x0414",
   "pid": "0x8105",
+  "dmi": { "product_names": ["GIGABYTE GAMING A16 CMH"], "product_name_prefixes": [], "product_families": ["GIGABYTE GAMING"] },
   "interfaces": [1, 3],
   "control_interface": 3,
   "colour_map": { ... },
@@ -47,21 +54,62 @@ hexadecimal USB identifiers (uppercase).
 }
 ```
 
+A profile needs **either** a USB key (`vid`+`pid`) **or** a DMI key (`dmi`),
+never neither. DMI-keyed profiles are for laptops without a Gigabyte USB
+keyboard (e.g. GIGABYTE GAMING A16) and are named `dmi_<slug>.json`.
+
 ---
 
 ## Top-level fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `version` | int | optional (default 1) | Schema version. v2 adds ACPI support. |
+| `version` | int | optional (default 1) | Schema version. v3 adds DMI keys and `acpi.confidence`. |
 | `name` | string | yes | Human-readable model name, e.g. `"Gigabyte Aero X16 (EG61VH)"` |
-| `vid` | string | yes | USB Vendor ID as hex string, e.g. `"0x0414"` |
-| `pid` | string | yes | USB Product ID as hex string, e.g. `"0x8105"` |
+| `vid` | string | see note | USB Vendor ID as hex string, e.g. `"0x0414"` |
+| `pid` | string | see note | USB Product ID as hex string, e.g. `"0x8105"` |
+| `dmi` | object | see note | DMI key for ACPI-only laptops (below). Required when `vid`/`pid` are absent. |
 | `interfaces` | array of int | yes | USB interfaces to detach for RGB control, e.g. `[1, 3]` |
 | `control_interface` | int | yes | USB interface for ctrl_transfer, typically `3` |
-| `colour_map` | object | yes | Keyboard RGB colour definitions |
+| `colour_map` | object | yes | Keyboard RGB colour definitions (empty for ACPI-only profiles) |
 | `acpi` | object | no | ACPI/fan/power profile capabilities |
 | `hotkeys` | object | no | Hardware hotkey definitions (e.g. mode/performance switch, vendor key) |
+
+---
+
+## DMI section (ACPI-only models)
+
+```json
+"dmi": {
+  "product_names": ["GIGABYTE GAMING A16 CMH"],
+  "product_name_prefixes": ["GIGABYTE AERO X16"],
+  "product_families": ["GIGABYTE GAMING"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `product_names` | array of string | Exact `/sys/class/dmi/id/product_name` matches |
+| `product_name_prefixes` | array of string | `product_name` startswith matches (covers all variants of a line) |
+| `product_families` | array of string | Exact `product_family` matches (broadest; used last) |
+
+Matching (see `profiles.match_dmi_profile`) is **specificity-first**: exact
+name / prefix beats family. All DMI matching additionally requires the DMI
+vendor to be Gigabyte and the chassis to be a laptop; profile switching also
+requires a working ACPI backend. RGB profiles must use a USB key.
+
+**Resolution precedence** (`profiles.resolve_model`): user USB → built-in USB →
+user DMI → built-in DMI. The first entry that *declares* a profile set wins; a
+USB-keyed profile with no `acpi` never suppresses a later DMI profile's
+profiles.
+
+### `acpi.confidence`
+
+`"verified"` (default) or `"experimental"`. Experimental profiles are for
+community-evidenced, unconfirmed models: their controls are shown but disabled
+until the user opts in (`experimental_profiles_enabled`). An experimental
+profile must declare `has_power_profiles` and a non-empty `profiles` set. See
+[docs/EXPERIMENTAL_MODELS.md](EXPERIMENTAL_MODELS.md).
 
 ---
 
@@ -147,6 +195,7 @@ via its AMW0 WMI device.
 | `sensor_labels` | object | `{}` | Friendly names for temperature sensors |
 | `profiles` | object | `{}` | Available power profiles (see below) |
 | `backend` | string | `"module"` | Preferred ACPI backend: `"module"` or `"acpi_call"` |
+| `confidence` | string | `"verified"` | `"verified"` (confirmed on real hardware) or `"experimental"` (community-evidenced, opt-in; requires `has_power_profiles` + `profiles`) |
 
 ### profiles sub-fields
 
@@ -224,13 +273,15 @@ and submit them as part of a profile.
 See the [built-in Aero X16 profile](../src/gigamate/profile_data/0414_8105.json)
 for a complete example with all 11 colours and full ACPI section.
 
-### ACPI-only profile (for laptops with non-Gigabyte USB keyboard)
+### ACPI-only profile (DMI-keyed, no Gigabyte USB keyboard)
 
 ```json
 {
-  "name": "Gigabyte Aero 17 (Custom Keyboard)",
-  "vid": "0x0414",
-  "pid": "0x9999",
+  "name": "Gigabyte GAMING A16 CMH",
+  "version": 3,
+  "dmi": {
+    "product_names": ["GIGABYTE GAMING A16 CMH"]
+  },
   "interfaces": [],
   "control_interface": 0,
   "colour_map": {},
@@ -238,22 +289,25 @@ for a complete example with all 11 colours and full ACPI section.
     "has_fan_control": true,
     "has_temperature": true,
     "has_power_profiles": true,
+    "confidence": "experimental",
     "fan_count": 2,
     "fan_labels": ["CPU Fan", "GPU Fan"],
     "sensor_labels": {
       "temp_cpu": "CPU Temp",
-      "temp_socket": "PCH Temp"
+      "temp_socket": "Socket Temp"
     },
     "profiles": {
-      "0": {"name": "Quiet", "desc": "Low noise"},
-      "1": {"name": "Balanced", "desc": "Default"},
-      "2": {"name": "Performance", "desc": "High performance"},
-      "3": {"name": "Gaming", "desc": "Max GPU"}
+      "0": {"name": "Eco", "desc": "Lowest GPU power"},
+      "1": {"name": "Balanced", "desc": "Default GPU power"},
+      "2": {"name": "Boost", "desc": "Max GPU TGP"}
     },
     "backend": "module"
   }
 }
 ```
+
+(DMI-keyed profiles are stored as `dmi_<slug>.json`. `gigamate calibrate acpi`
+generates one automatically when no Gigabyte USB keyboard is detected.)
 
 ---
 

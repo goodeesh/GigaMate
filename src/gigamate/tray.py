@@ -36,7 +36,8 @@ from pathlib import Path
 from .protocol import set_static, set_off, get_keyboard
 from .profiles import (
     detect_device, resolve_profile, save_user_profile, DeviceProfile,
-    get_dmi_product_name, load_builtin_profiles, has_verified_profiles,
+    get_dmi_product_name, load_builtin_profiles,
+    resolve_model, profile_usable, ModelMatch,
 )
 from .config import CONFIG_FILE, load as load_config, update_config
 from .acpi import (
@@ -116,6 +117,7 @@ class GigaMateTrayApp:
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
         self._acpi_caps: Optional[AcpiCapabilities] = None
+        self._model: Optional[ModelMatch] = None
         self._profile_items: Dict[int, Gtk.RadioMenuItem] = {}
         self._status_items: List[Gtk.MenuItem] = []
         self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
@@ -146,6 +148,7 @@ class GigaMateTrayApp:
         self._building = True
         self._detect_on_startup()
         self._init_acpi()
+        self._resolve_model()
         self._init_hotkeys()
         self._build_menu()
         self._building = False
@@ -189,6 +192,20 @@ class GigaMateTrayApp:
         else:
             self._acpi_controller = None
             self._acpi_caps = None
+
+    def _resolve_model(self) -> None:
+        """Resolve the model profile that gates power-profile switching.
+
+        USB-keyed profiles first, then DMI-keyed (ACPI-only laptops). Carries the
+        experimental flag and consent state via :func:`profile_usable`.
+        """
+        try:
+            if self._detected_vid:
+                self._model = resolve_model(self._detected_vid, self._detected_pid)
+            else:
+                self._model = resolve_model()
+        except Exception:
+            self._model = None
 
     def _resolve_hotkey_specs(self):
         """Hotkey specs, strictly model-scoped (no cross-model spillover).
@@ -278,7 +295,9 @@ class GigaMateTrayApp:
         self._last_config_mtime = mtime
 
         new_cfg = load_config()
+        old_experimental = bool(getattr(self, "_config", {}).get("experimental_profiles_enabled", False))
         self._config = new_cfg
+        new_experimental = bool(new_cfg.get("experimental_profiles_enabled", False))
 
         new_colour = new_cfg.get("colour")
         new_bright = new_cfg.get("brightness")
@@ -333,6 +352,12 @@ class GigaMateTrayApp:
             self._battery_cap_limit = new_limit
         finally:
             self._building = old_building
+
+        # Consent changed externally (e.g. `gigamate profile experimental on`):
+        # re-resolve the model and rebuild so the controls appear/disappear.
+        if new_experimental != old_experimental:
+            self._resolve_model()
+            self._rebuild_menu()
 
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
@@ -801,25 +826,30 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
 
     def _append_power_profile_section(self) -> None:
-        """Add Power Profile radio group (only for verified model profiles).
+        """Add Power Profile radio group (verified models, experimental after opt-in).
 
         Profile switching is a per-model contract: it is only shown when a
-        matching model profile declares ``has_power_profiles`` with a curated
-        profile set. Backend detection alone never enables the menu, because
-        different EC generations implement different commands and a write can
-        be accepted without doing anything.
+        matching model profile declares a profile set. Experimental (unconfirmed)
+        models are shown but disabled until the user opts in.
         """
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
-        if not has_verified_profiles(self._profile):
+        match = self._model
+        if match is None or match.profile.acpi is None:
             return
 
-        profile_names = self._profile.acpi.profiles
+        profile_names = match.profile.acpi.profiles
         if not profile_names:
             return
 
+        usable = profile_usable(match, self._config)
+        experimental = match.experimental
+
         self._menu.append(Gtk.SeparatorMenuItem())
-        header = Gtk.MenuItem(label="Power Profile")
+        title = "Power Profile"
+        if experimental:
+            title += " (experimental)" if usable else " (experimental — disabled)"
+        header = Gtk.MenuItem(label=title)
         header.set_sensitive(False)
         self._menu.append(header)
 
@@ -833,11 +863,40 @@ class GigaMateTrayApp:
             item = Gtk.RadioMenuItem(group=group, label=label)
             if group is None:
                 group = item
-            if self._current_acpi_profile == pid_int:
+            if usable and self._current_acpi_profile == pid_int:
                 item.set_active(True)
+            item.set_sensitive(usable)
             item.connect("toggled", self._on_profile_changed, pid_int)
             self._menu.append(item)
             self._profile_items[pid_int] = item
+
+        if experimental and not usable:
+            enable = Gtk.MenuItem(label="Enable experimental profiles…")
+            enable.connect("activate", self._on_enable_experimental)
+            self._menu.append(enable)
+
+    def _on_enable_experimental(self, *args) -> None:
+        """One-time consent dialog for experimental (unconfirmed) profiles."""
+        dlg = Gtk.MessageDialog(
+            transient_for=None, flags=0, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO, text="Enable experimental profiles?")
+        dlg.format_secondary_text(
+            "Profile switching for this model is community-evidenced but "
+            "unconfirmed — it may do nothing. Enable it anyway?\n\n"
+            "You can report what it does with 'gigamate profile report'.")
+        response = dlg.run()
+        dlg.destroy()
+        if response != Gtk.ResponseType.YES:
+            return
+        try:
+            update_config(lambda c: {**c, "experimental_profiles_enabled": True})
+        except Exception:
+            pass
+        try:
+            self._config = load_config()
+        except Exception:
+            pass
+        self._rebuild_menu()
 
     def _append_status_section(self) -> None:
         """Add a single-line live status display (ACPI sensors and/or dGPU state)."""
@@ -855,9 +914,9 @@ class GigaMateTrayApp:
 
     def _append_settings_items(self) -> None:
         """Add settings items at the bottom of the menu."""
-        # System power-profile sync only makes sense when a verified model
+        # System power-profile sync only makes sense when a usable model
         # profile exists to map from; without one there is nothing to sync.
-        if is_system_power_available() and has_verified_profiles(self._profile):
+        if is_system_power_available() and profile_usable(self._model, self._config):
             self._sync_power_item = Gtk.CheckMenuItem(label="Sync system power profile")
             self._sync_power_item.set_active(self._sync_system_power)
             self._sync_power_item.connect("toggled", self._on_sync_power_toggled)
@@ -1191,6 +1250,7 @@ class GigaMateTrayApp:
         self._acpi_controller = ctrl
         self._acpi_caps = ctrl.capabilities
         self._last_status_text = None
+        self._resolve_model()
         try:
             self._rebuild_menu()
         except Exception:
@@ -1231,13 +1291,14 @@ class GigaMateTrayApp:
                     parts.append(f"{state.duty_cpu}%")
 
                 # Profile
-                if state.profile is not None and self._profile is not None and self._profile.acpi:
-                    profiles = self._profile.acpi.profiles
+                if state.profile is not None and self._model is not None \
+                        and self._model.profile.acpi:
+                    profiles = self._model.profile.acpi.profiles
                     entry = profiles.get(str(state.profile.value), {})
                     pname = entry.get("name", str(state.profile.value))
                     parts.append(f"Profile: {pname}")
 
-        # Discrete GPU state (reuse the value fetched for the icon)
+        # Discrete GPU state (reuse the value fetched for the icon).
         if gpu.present:
             parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
 
@@ -1321,6 +1382,7 @@ class GigaMateTrayApp:
             if profile is not None:
                 self._profile = profile
                 self._unsupported = False
+                self._resolve_model()
                 self._init_hotkeys()
                 self._rebuild_menu()
                 self._apply_on_startup()
@@ -1364,6 +1426,8 @@ class GigaMateTrayApp:
             return
         if self._acpi_controller is None:
             return
+        if not profile_usable(self._model, self._config):
+            return
         try:
             self._acpi_controller.set_profile(FanProfile(profile_id))
             self._current_acpi_profile = profile_id
@@ -1378,12 +1442,12 @@ class GigaMateTrayApp:
         """Handle hardware hotkey (e.g. the Mode key): cycle profile and show OSD."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
-        if not has_verified_profiles(self._profile):
+        if not profile_usable(self._model, self._config):
             return
 
         # Get available profiles
-        pids = sorted(int(k) for k in self._profile.acpi.profiles.keys())
-        p_data = self._profile.acpi.profiles
+        pids = sorted(int(k) for k in self._model.profile.acpi.profiles.keys())
+        p_data = self._model.profile.acpi.profiles
 
         if not pids:
             return
@@ -1550,6 +1614,7 @@ class GigaMateTrayApp:
                 self._current_colour = self._config.get("colour", colours[0])
             # Re-init ACPI & Hotkeys (profile may have changed)
             self._init_acpi()
+            self._resolve_model()
             self._init_hotkeys()
             self._rebuild_menu()
             try:
@@ -1564,12 +1629,15 @@ class GigaMateTrayApp:
                 if ctrl.available:
                     self._acpi_controller = ctrl
                     self._acpi_caps = ctrl.capabilities
+            self._resolve_model()
             self._init_hotkeys()
+            self._rebuild_menu()
         else:
             self._profile = None
             self._unsupported = True
             self._acpi_controller = None
             self._acpi_caps = None
+            self._model = None
             self._init_hotkeys()
             self._rebuild_menu()
 

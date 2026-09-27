@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .config import DEFAULT_CONFIG, load as load_config, resolve_active_profile
+from .profiles import profile_usable, resolve_model
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +65,19 @@ def _apply_hardware_settings_locked(
     prof_val = cfg.get("acpi_profile")
     if prof_val is not None:
         from .acpi import AcpiController, FanProfile
-        from .profiles import has_verified_profiles
 
-        # Only re-apply the persisted profile when the matching model profile
-        # declares profile support as verified. Otherwise a re-apply is a dead
-        # control: the EC may accept the write and ignore it.
-        model = resolve_active_profile()
-        if not has_verified_profiles(model):
-            logger.info("Hardware sync: skipping ACPI profile (unverified model)")
+        # Only re-apply the persisted profile when the matching model profile is
+        # usable (declares profiles, and consented when experimental). Otherwise
+        # a re-apply is a dead control: the EC may accept the write and ignore it.
+        match = None
+        try:
+            match = resolve_model()
+        except Exception:
+            match = None
+        if not profile_usable(match, cfg):
+            logger.info("Hardware sync: skipping ACPI profile (no usable model profile)")
         else:
-            model_ids = set(int(k) for k in model.acpi.profiles.keys())
+            model_ids = set(int(k) for k in match.profile.acpi.profiles.keys())
             try:
                 prof_val_i = int(prof_val)
             except (TypeError, ValueError):

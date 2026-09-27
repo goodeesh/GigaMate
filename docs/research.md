@@ -249,9 +249,10 @@ builds/versions, but its UI is capability-gated and version-dependent; on this E
 firmware the curve plumbing appears unsupported, so a Windows-side table would
 need EC-firmware support this unit lacks (not verifiable without Windows).
 
-## NVIDIA dGPU V/F-offset undervolt & max-clock cap (implemented)
+## NVIDIA dGPU V/F-offset undervolt, clock cap & memory clock (implemented)
 
-Separate from the EC/fan work, the NVIDIA dGPU exposes two NVML controls:
+Separate from the EC/fan work, the NVIDIA dGPU exposes three NVML tuning
+controls:
 
 - **V/F-curve offset** — `nvmlDeviceSetGpcClkVfOffset(device, int mhz)` shifts the
   GPC clock V/F curve so a given clock runs at lower voltage.
@@ -263,28 +264,182 @@ Separate from the EC/fan work, the NVIDIA dGPU exposes two NVML controls:
   getter** for the locked value, so the applied cap is tracked by GigaMate.
   `nvmlDeviceResetGpuLockedClocks` unlocks; the ceiling comes from
   `nvmlDeviceGetMaxClockInfo(device, NVML_CLOCK_GRAPHICS)`.
+- **Memory clock** — `nvmlDeviceSetMemoryLockedClocks(device, N, N)` pins the
+  memory clock, `nvmlDeviceResetMemoryLockedClocks` releases it. As with the
+  core lock there is **no NVML getter** on this driver (neither
+  `nvmlDeviceGetMemoryLockedClocks` nor `nvmlDeviceGetGpuLockedClocks` is
+  exported), so the applied pin is tracked by GigaMate, not read back.
+  `nvmlDeviceGetSupportedMemoryClocks` enumerates the legal values — on the
+  AERO X16's RTX 5060 Laptop: `405, 810, 9001, 11001, 12001` MHz, with
+  `nvmlDeviceGetMaxClockInfo(device, NVML_CLOCK_MEM) == 12001`.
+  Two API quirks worth remembering: the "how many clocks?" call must be made
+  with a NULL buffer and returns `NVML_ERROR_INSUFFICIENT_SIZE` while still
+  filling in the count (so ignore its return value), and
+  `nvmlDeviceGetSupportedGraphicsClocks` returns `NVML_ERROR_INVALID_ARGUMENT`
+  with a count of 0 on this part.
+  **A memory clock can only be pinned to a value the GPU already supports, so
+  this is a guaranteed-max pin or a power-saving cap — not an overclock.**
+  Genuine over-12001 MHz operation would need `nvmlDeviceSetClockOffsets`, which
+  is present in this driver but is documented as unreliable and is rejected on
+  mobile parts, so it is deliberately not used.
 - Verified on the AERO X16's RTX 5060 Laptop (`0000:64:00.0`, driver 615.71.09):
-  apply/read-back/clear and locked clocks all work.
+  apply/read-back/clear, locked clocks and the memory-clock pin all work.
 - **Sleep-safety**: opening NVML holds a PM reference and wakes the dGPU, so the
   tuning must be applied only while `power/runtime_status == active` (detected
   via sysfs, which does not wake it), cleared on suspend, and re-applied after
   `D3cold` wipes driver state. Locked clocks keep the core at a higher floor and
-  raise idle power (see LACT #908), so GigaMate clears **both** controls when the
+  raise idle power (see LACT #908), so GigaMate clears **all** controls when the
   GPU is awake but idle (`util == 0` for a grace period) and re-applies them when
   load returns.
 - Implemented in GigaMate as a privileged one-shot helper
   (`data/gigamate-dgpu-nvml`, invoked via `pkexec` with an auto-grant polkit
   rule) plus an unprivileged watcher (`src/gigamate/dgpu_tune.py`). The watcher
-  tracks the last applied offset/cap (not just a boolean) so changing either
-  value re-applies immediately, and publishes its state to
+  tracks the last applied offset/cap/memory pin (not just a boolean) so changing
+  any value re-applies immediately, and publishes its state to
   `$XDG_RUNTIME_DIR/gigamate-dgpu.json` for cross-process status. Config keys:
-  `dgpu_undervolt_{enabled,offset_mhz,auto}` and
-  `dgpu_max_clock_{enabled,mhz}`; CLI
+  `dgpu_undervolt_{enabled,offset_mhz,auto}`,
+  `dgpu_max_clock_{enabled,mhz}`, `dgpu_mem_clock_{enabled,mhz}` and
+  `dgpu_telemetry`; CLI
   `gigamate gpu undervolt <0-255|off|status>`,
-  `gigamate gpu maxclock <0-4000|off|status>` and
-  `gigamate gpu auto <on|off|status>`; Center controls (undervolt slider
-  + max-clock slider), plus a Settings toggle for `dgpu_undervolt_auto`.
+  `gigamate gpu maxclock <0-4000|off|status>`,
+  `gigamate gpu memclock <MHz|off|status>`,
+  `gigamate gpu telemetry <on|off|auto|status>` and
+  `gigamate gpu auto <on|off|status>`; Center controls (three sliders — one
+  Apply commits all of them — each with its own Reset), plus a Settings toggle
+  for `dgpu_undervolt_auto`. The helper reports a `helper_version` so an
+  out-of-date installed copy is detected instead of silently ignoring the
+  memory-clock argument.
 - `dgpu_undervolt_auto` gates only **automatic** application on boot/wake/resume:
   when off, the watcher never (re)applies by itself (it still clears on suspend
   for safety), and an explicit Apply/CLI command applies immediately and persists
   until the next suspend.
+
+## Live dGPU telemetry: considered, measured, and deliberately not shipped
+
+Temperature, core/memory clock, power draw, VRAM and utilisation were all
+implemented end to end: a read-only NVML snapshot in the privileged helper, a
+load-gated poller in the watcher publishing to the runtime state file, and
+rendering in GigaMate Center, the dashboard tile, the tray tooltip and
+`gigamate gpu status`. It worked — 80 °C, 2775/11001 MHz and 74 W on a loaded
+RTX 5060 Laptop were all reported correctly.
+
+It was removed again, for two reasons found while measuring it:
+
+1. **It duplicates better tools.** MangoHud and nvtop already do live metrics,
+   better and in-game. GigaMate's job is tuning the dGPU and leaving it asleep,
+   not being a second performance overlay.
+2. **Every sample is a wake risk, and the cheap mitigation has limits.** A full
+   NVML open → read → close cycle costs ~13–19 ms, and the whole helper
+   invocation ~64 ms (the polkit rule auto-grants, so no auth prompt), so 1 Hz
+   while gaming is ~6% of a core plus a root process spawn per second. The
+   poller was built load-gated to avoid that at idle — sampling only while NVML
+   reported real utilisation, winding down 10 s after it hit zero, then dormant.
+   Two subtleties are worth remembering:
+
+   - "Someone holds `/dev/nvidia*`" is **not** a usable "the GPU is in use" test.
+     Steam keeps the device open continuously while rendering nothing, so gating
+     on it re-created the exact nvtop failure mode being avoided (measured on the
+     AERO X16: the poller sat at 1 Hz with `util == 0` and
+     `holders = [steam, steamwebhelper]`). Utilisation has to sustain the hot
+     rate; a *change* in the holder set can only be used to wake a dormant
+     poller, plus a slow backstop probe.
+   - The **UI** turned out to be a bigger offender than the poller. The GPU page
+     polled NVML three ways on a 12 s timer while visible; instrumenting the
+     real `_run_helper` showed **six NVML open/close cycles in 30 s on a
+     suspended dGPU** — one every ~6 s, indefinitely — so merely having the page
+     open stopped the dGPU sleeping ("the dGPU was asleep, I opened GigaMate
+     Center, and it woke up").
+
+### The lesson: the monitoring UI must never poll NVML
+
+Two rules came out of that, and both are enforced in code and tests:
+
+1. **Never call NVML while the dGPU is suspended.** `dgpu_tune.nvml_allowed()`
+   gates every UI path on `runtime_status == "active"` — a free sysfs read that
+   cannot itself wake anything. `probe_if_awake()` returns the cached or empty
+   probe instead of spawning a helper, and reading the helper's version for a
+   status label uses `cached_helper_version()` (which never probes) so a label
+   cannot wake the GPU either.
+2. **Never call NVML on a timer**, awake or not. What the page needs — the
+   applied offset, cap and memory pin — is already in the state file the watcher
+   publishes, so a refresh is a file read. Probing is limited to the cases where
+   it can change something: an explicit page load, a cold cache, or a wake
+   transition (the clock ceiling is higher once the GPU is loaded).
+
+The same reasoning applies to the watcher's own NVML touches: it no longer clears
+the clock locks when it sees a `D3cold` suspend, because the driver has already
+wiped that state and the clear would only resume a card the kernel had just
+powered down (`D3hot` keeps device state, so it is still cleared).
+
+The regression tests are deliberately blunt: with a suspended dGPU, 60 ticks of
+the GPU page must produce **zero** helper spawns. After the fix, holding the GPU
+page open for 90 s produced 0 (it had been 6 per 30 s), and with telemetry
+removed there is no poller at all — the only NVML the dGPU ever sees is a tuning
+write the user asked for, or a probe on a page load while it is already awake.
+
+### Telling a discrete Radeon from an APU iGPU
+
+`boot_vga` alone cannot answer this. On a hybrid laptop whose dGPU is the
+primary display, the APU iGPU reports `boot_vga=0` too, so treating "not the
+boot display" as "discrete" claims the *integrated* GPU and lights a permanent
+"discrete GPU" indicator on a machine that has none. (On the AERO X16 the
+Krackan 840M has no `boot_vga` file at all, so the old conservative path
+happened to ignore it — the bug is latent, not active, here.)
+
+`switcherooctl` gets it right, but only by shelling out to a compiled helper
+that carries amdgpu APU device-ID tables. Two amdgpu sysfs markers give the same
+answer with no dependencies:
+
+- `uma/` exists only on APUs (it holds the carve-out controls);
+- `mem_info_vram_total` is the APU's shared-memory aperture — 512 MiB on the
+  Krackan 840M — rather than the GBs of dedicated memory a Radeon board has.
+
+A discrete Radeon has neither, so the check leaves real dGPUs alone. Note
+`d3cold_allowed` is *not* usable here: it reads 1 for both the iGPU and the
+dGPU.
+
+## Cross-project validation (4.0, experimental models)
+
+External projects independently document the same EC/WMI interface GigaMate uses
+for the GIGABYTE GAMING family (A16/A18, GA6H generation):
+
+- **`JoseLopez36/gigabyte-laptop-wmi-A16`** (Linux kernel driver, fork of
+  `tangalbert919/gigabyte-laptop-wmi`): `GB_WMIACPI` here is the AMW0 device
+  (`\_SB.PCI0.AMW0`). For the Gaming family it maps `WMBD 0xED` to `perf_mode`
+  (0 = eco, 1 = balanced, 2 = boost) programming the NVIDIA platform controller
+  (NPCF) GPU TGP, plus `dynamic_boost 0xE7` and `fan_turbo 0x7D`. It gates this
+  on DMI `product_family == "GIGABYTE GAMING"` and notes fan RPM is stored
+  little-endian for that family (no `rol16`).
+- **`justin-mecham/FanControl.GigabyteWMI`** (Windows FanControl plugin):
+  confirmed on a GIGABYTE GAMING A16 **CVH** (BIOS FB05). Its 16-step fan duty
+  table, extracted from Gigabyte's own `ComData.dll`, is byte-identical to the
+  Linux driver's: `{57, 68, 80, 91, 103, 114, 125, 137, 148, 160, 171, 183,
+  194, 206, 217, 229}` = `{0x39, 0x44, 0x50, 0x5B, 0x67, 0x72, 0x7D, 0x89,
+  0x94, 0xA0, 0xAB, 0xB7, 0xC2, 0xCE, 0xD9, 0xE5}`.
+
+Two separate ecosystems (Windows and Linux) agreeing on the duty table and the
+WMI device confirms the interface is real and shared.
+
+### User data (issue #19, A16 CMH)
+
+A user on a GIGABYTE GAMING A16 **CMH** (i5-13420H + RTX 4050) reported: the
+`gigamate_acpi` module loads, temperature/fan RPM/duty sensors all read sanely
+(fan RPM little-endian, matching the family note), and under a game the GPU
+power limit moved 55 → 70 W (default 55, max 80) — consistent with the driver's
+boost ≈70 W + Dynamic Boost. The fan RPM was flat across `0xED` values, and the
+GPU-limit movement is confounded by Dynamic Boost, so `0xED` *profile semantics*
+remain **experimental** on this variant.
+
+### Our own DMI (AERO X16)
+
+The maintainer's AERO X16: `product_name` = `GIGABYTE AERO X16 1VH`,
+`product_family` = `GIGABYTE AERO`. The AERO X16 family profile is keyed on the
+`GIGABYTE AERO X16` product-name prefix.
+
+### 25 W CPU cap is family-wide firmware policy
+
+A separate report on an A16 **CVH** states Gigabyte support called the 25 W CPU
+power limit "normal" — matching the same cap seen on the A16 CMH. This is EC/
+BIOS firmware policy; profiles never touch CPU power limits.
+
+See `docs/EXPERIMENTAL_MODELS.md` for the shipped/candidate/blocked registry.
