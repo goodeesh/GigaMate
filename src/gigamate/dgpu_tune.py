@@ -1,15 +1,25 @@
-"""GigaMate — sleep-aware NVIDIA dGPU tuning (V/F offset + max-clock cap).
+"""GigaMate — sleep-aware NVIDIA dGPU tuning.
 
-Two independent controls, both applied only while the dGPU is awake:
+Three independent controls, all applied only while the dGPU is awake:
 
 * **Undervolt** — ``nvmlDeviceSetGpcClkVfOffset`` shifts the V/F curve so a
   given clock runs at lower voltage (a "pseudo-undervolt").
 * **Max clock** — ``nvmlDeviceSetGpuLockedClocks(0, N)`` caps the boost clock
   ("flatten above N MHz"), which improves stability when undervolting.
+* **Memory clock** — ``nvmlDeviceSetMemoryLockedClocks(N, N)`` pins the memory
+  clock. It can only *select* a clock the GPU already supports (never exceed
+  ``nvmlDeviceGetMaxClockInfo(MEM)``), so on a mobile part this is a pin at the
+  maximum or a cap below it — not a true overclock.
 
-Both NVML calls require root, so writes are performed by a small helper
+All three NVML calls require root, so writes are performed by a small helper
 installed at ``/usr/lib/gigamate/gigamate-dgpu-nvml`` and invoked on demand via
 ``pkexec`` (auto-granted for wheel/sudo by a polkit rule).
+
+There is deliberately **no live telemetry** (no temperature, clocks, power or
+VRAM). Tools such as MangoHud and nvtop own live metrics, and on a hybrid
+graphics laptop every NVML read risks resuming a dGPU the kernel has powered
+down — the well-documented cause of dGPUs that never sleep (see nvtop issue
+#230). GigaMate's job is tuning the dGPU and leaving it asleep.
 
 Key invariant: this module never links NVML itself and never holds a GPU handle
 open — doing so would keep the dGPU awake. It reads ``power/runtime_status``
@@ -24,6 +34,8 @@ Configuration keys (see ``config.py``):
     dgpu_undervolt_auto       bool   auto-apply on boot/wake (else manual)
     dgpu_max_clock_enabled    bool   max-clock cap on/off
     dgpu_max_clock_mhz        int    0 = off, else MHz cap
+    dgpu_mem_clock_enabled    bool   memory-clock pin on/off
+    dgpu_mem_clock_mhz        int    0 = off, else MHz pin
 """
 
 from __future__ import annotations
@@ -45,6 +57,11 @@ MAX_OFFSET_MHZ = 255
 MAX_CLOCK_MHZ = 4000  # validation ceiling; the real range comes from the GPU
 MAX_CLOCK_HEADROOM = 300  # added above the observed max so "stock" is uncapped
 MAX_CLOCK_SPAN = 800      # how far below the baseline the cap slider reaches
+MAX_MEM_CLOCK_MHZ = 32000  # validation ceiling; the real list comes from the GPU
+# Memory clocks below this are idle states, not useful pin targets.
+MEM_CLOCK_MIN_PIN_MHZ = 1000
+# The installed helper must understand the memory-clock argument.
+REQUIRED_HELPER_VERSION = 3
 
 PCI_SYSFS = Path("/sys/bus/pci/devices")
 NVIDIA_VENDOR = "0x10de"
@@ -186,6 +203,31 @@ def _run_helper(args: List[str]) -> Dict:
 _probe_cache: Optional[Dict] = None
 
 
+def gpu_in_use() -> bool:
+    """Whether any process currently holds the dGPU open.
+
+    A pure ``/proc`` scan: it costs no NVML handle, so it is safe to call on
+    every watcher tick and it cannot wake a sleeping GPU.
+    """
+    return bool(wake_holders())
+
+
+def nvml_allowed() -> bool:
+    """Whether NVML may be touched right now without risking a GPU wake.
+
+    Initialising NVML takes a power-management reference on the device, so a call
+    made while the dGPU is suspended *resumes the card* — that is the whole
+    reason the state can be read from sysfs instead. ``runtime_status`` is a free
+    kernel read that does not wake anything, so this gate is free to call.
+
+    The watcher deliberately does **not** use this: sampling and applying while
+    the dGPU is awake is its job. It exists for the UI, which must never be the
+    component that keeps a sleeping dGPU awake.
+    """
+    bdf = find_nvidia_bdf()
+    return bdf is not None and runtime_status(bdf) == "active"
+
+
 def probe(force: bool = False) -> Dict:
     """Return {"supported": bool, "device": str, "gpu_max_clock_mhz": int, ...}."""
     global _probe_cache
@@ -202,25 +244,96 @@ def probe(force: bool = False) -> Dict:
         "device": res.get("device", bdf),
         "offset_mhz": res.get("offset_mhz"),
         "gpu_max_clock_mhz": res.get("gpu_max_clock_mhz"),
+        "mem_max_clock_mhz": res.get("mem_max_clock_mhz"),
+        "mem_supported_clocks": res.get("mem_supported_clocks") or [],
+        "mem_lock_api": bool(res.get("mem_lock_api")),
+        "helper_version": res.get("helper_version"),
         "error": res.get("error"),
     }
     return _probe_cache
 
 
+def cached_helper_version() -> Optional[int]:
+    """The installed helper's version, from the probe cache only — never probes.
+
+    Safe for UI refreshes: an unknown version returns None rather than opening
+    NVML, so a status label can never be the thing that resumes a sleeping dGPU.
+    """
+    try:
+        version = (dict(_probe_cache) if _probe_cache else {}).get("helper_version")
+    except Exception:  # noqa: BLE001
+        return None
+    return version if isinstance(version, int) else None
+
+
+def helper_is_current() -> bool:
+    """Whether the installed helper understands the memory-clock argument.
+
+    An older helper silently ignores the third ``apply`` argument, which would
+    look like a successful memory pin while nothing changed. Callers use this to
+    tell the user to re-run the installer instead of showing a phantom success.
+
+    This probes if the cache is cold, so it belongs to explicit commands (the
+    CLI) — UI code should use :func:`cached_helper_version` instead.
+    """
+    version = cached_helper_version()
+    if version is None:
+        try:
+            version = probe().get("helper_version")
+        except Exception:  # noqa: BLE001
+            return False
+    return isinstance(version, int) and version >= REQUIRED_HELPER_VERSION
+
+
+def mem_clock_choices() -> List[int]:
+    """Selectable memory-clock pins (ascending MHz), best effort.
+
+    Falls back to the reported maximum so the control still works on drivers
+    that cannot enumerate their supported memory clocks.
+    """
+    try:
+        info = probe()
+    except Exception:  # noqa: BLE001
+        return []
+    clocks = [int(c) for c in (info.get("mem_supported_clocks") or [])
+              if int(c) >= MEM_CLOCK_MIN_PIN_MHZ]
+    if clocks:
+        return sorted(set(clocks))
+    top = info.get("mem_max_clock_mhz")
+    return [int(top)] if top else []
+
+
 def get_state() -> Dict:
-    """Read the current offset (+ utilization) via the helper."""
+    """Read the current offset and utilization via the helper.
+
+    Utilization is what the watcher uses to notice the dGPU going idle; the
+    offset is the applied V/F value. No telemetry is read — see the module
+    docstring for why.
+    """
     return _run_helper(["get"])
 
 
-def apply_tune(offset_mhz: int, max_clock_mhz: int = 0) -> Dict:
-    """Apply the V/F offset (0..255) and the max-clock cap (0 = off) together."""
+def probe_if_awake(force: bool = False) -> Dict:
+    """Probe, but never at the cost of waking a suspended dGPU.
+
+    Returns the cached probe when the GPU is asleep (or nothing is cached yet),
+    so a UI refresh can call this freely without resuming the card.
+    """
+    if not nvml_allowed():
+        return dict(_probe_cache) if _probe_cache else {}
+    return probe(force=force)
+
+
+def apply_tune(offset_mhz: int, max_clock_mhz: int = 0, mem_clock_mhz: int = 0) -> Dict:
+    """Apply the V/F offset, the max-clock cap and the memory-clock pin."""
     offset_mhz = max(0, min(MAX_OFFSET_MHZ, int(offset_mhz)))
     max_clock_mhz = max(0, min(MAX_CLOCK_MHZ, int(max_clock_mhz)))
-    return _run_helper(["apply", str(offset_mhz), str(max_clock_mhz)])
+    mem_clock_mhz = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock_mhz)))
+    return _run_helper(["apply", str(offset_mhz), str(max_clock_mhz), str(mem_clock_mhz)])
 
 
 def clear_tune() -> Dict:
-    """Return the dGPU to stock (offset 0, clocks unlocked)."""
+    """Return the dGPU to stock (offset 0, both clocks unlocked)."""
     return _run_helper(["clear"])
 
 
@@ -263,6 +376,10 @@ def _write_state_file(state: Dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Telemetry (published by the watcher, read by every UI surface)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Watcher
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -281,11 +398,14 @@ class DgpuWatcher:
         self._desired_offset = 0
         self._desired_max_enabled = False  # max-clock master switch
         self._desired_max = 0
+        self._desired_mem_enabled = False  # memory-clock master switch
+        self._desired_mem = 0
         self._auto = True
 
         # What we last successfully applied to the hardware (0 = stock).
         self._applied_offset = 0
         self._applied_max = 0
+        self._applied_mem = 0
         self._idle_cleared = False
         self._idle_since: Optional[float] = None
         self._last_poll = 0.0
@@ -300,31 +420,41 @@ class DgpuWatcher:
             "applied": False,
             "offset_mhz": None,
             "max_clock_mhz": None,
+            "mem_clock_mhz": None,
             "util": None,
             "enabled": False,
             "desired_offset": 0,
             "desired_max_clock": 0,
+            "desired_mem_clock": 0,
             "auto": True,
             "last_error": None,
         }
 
     # ── configuration ──
     def set_desired(self, enabled: bool, offset: int, auto: bool = True,
-                    max_enabled: bool = False, max_clock: int = 0) -> None:
+                    max_enabled: bool = False, max_clock: int = 0,
+                    mem_enabled: bool = False, mem_clock: int = 0) -> None:
         offset = max(0, min(MAX_OFFSET_MHZ, int(offset)))
         max_clock = max(0, min(MAX_CLOCK_MHZ, int(max_clock)))
+        mem_clock = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock)))
         eff_offset = offset if enabled else 0
         eff_max = max_clock if max_enabled else 0
+        eff_mem = mem_clock if mem_enabled else 0
         with self._lock:
-            changed = (eff_offset != self._desired_offset) or (eff_max != self._desired_max)
+            changed = ((eff_offset != self._desired_offset)
+                       or (eff_max != self._desired_max)
+                       or (eff_mem != self._desired_mem))
             self._desired_enabled = bool(enabled)
             self._desired_offset = eff_offset
             self._desired_max_enabled = bool(max_enabled)
             self._desired_max = eff_max
+            self._desired_mem_enabled = bool(mem_enabled)
+            self._desired_mem = eff_mem
             self._auto = bool(auto)
-            self._status["enabled"] = bool(enabled) or bool(max_enabled)
+            self._status["enabled"] = bool(enabled) or bool(max_enabled) or bool(mem_enabled)
             self._status["desired_offset"] = eff_offset
             self._status["desired_max_clock"] = eff_max
+            self._status["desired_mem_clock"] = eff_mem
             self._status["auto"] = bool(auto)
             # An explicit change should take effect immediately, even if we had
             # idle-cleared; the idle logic will clear again if still idle.
@@ -340,15 +470,17 @@ class DgpuWatcher:
             bool(cfg.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])),
             bool(cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"])),
             int(cfg.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"])),
+            bool(cfg.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"])),
+            int(cfg.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"])),
         )
 
     def status(self) -> Dict:
         with self._lock:
             return dict(self._status)
 
-    def _target(self) -> Tuple[int, int]:
+    def _target(self) -> Tuple[int, int, int]:
         with self._lock:
-            return self._desired_offset, self._desired_max
+            return self._desired_offset, self._desired_max, self._desired_mem
 
     # ── state machine ──
     def tick(self, now: Optional[float] = None, force_apply: bool = False) -> None:
@@ -373,9 +505,15 @@ class DgpuWatcher:
             })
 
         if asleep:
-            if self._applied_offset or self._applied_max:
-                clear_tune()
-                self._set_applied(0, 0)
+            if self._applied_offset or self._applied_max or self._applied_mem:
+                # D3cold wipes the driver's state, so the clock locks are already
+                # gone: calling NVML here would resume a card the kernel has just
+                # powered down in order to change nothing. Forget the applied
+                # values instead and let the wake path reconcile them against the
+                # desired ones. D3hot keeps device state, so it is still cleared.
+                if pstate != "D3cold":
+                    clear_tune()
+                self._set_applied(0, 0, 0)
             self._idle_cleared = False
             self._idle_since = None
             self._sync_status()
@@ -385,13 +523,13 @@ class DgpuWatcher:
             # Transitional/unknown: do nothing (avoid touching a sleeping GPU).
             return
 
-        eff_offset, eff_max = self._target()
-        enabled = eff_offset > 0 or eff_max > 0
+        eff_offset, eff_max, eff_mem = self._target()
+        enabled = eff_offset > 0 or eff_max > 0 or eff_mem > 0
 
         if not enabled:
-            if self._applied_offset or self._applied_max:
+            if self._applied_offset or self._applied_max or self._applied_mem:
                 clear_tune()
-                self._set_applied(0, 0)
+                self._set_applied(0, 0, 0)
             self._idle_cleared = False
             self._idle_since = None
             self._sync_status()
@@ -411,7 +549,8 @@ class DgpuWatcher:
             return
 
         # Desired changed since our last apply -> (re)apply now.
-        if self._applied_offset != eff_offset or self._applied_max != eff_max:
+        if (self._applied_offset != eff_offset or self._applied_max != eff_max
+                or self._applied_mem != eff_mem):
             self._do_apply(now)
             self._sync_status()
             return
@@ -421,27 +560,30 @@ class DgpuWatcher:
             self._poll_and_maybe_idle_clear(now)
         self._sync_status()
 
-    def _set_applied(self, offset: int, max_clock: int) -> None:
+    def _set_applied(self, offset: int, max_clock: int, mem_clock: int = 0) -> None:
         with self._lock:
             self._applied_offset = offset
             self._applied_max = max_clock
+            self._applied_mem = mem_clock
             self._status["offset_mhz"] = offset or None
             self._status["max_clock_mhz"] = max_clock or None
+            self._status["mem_clock_mhz"] = mem_clock or None
 
     def _do_apply(self, now: float) -> None:
         if now - self._last_apply_fail < RETRY_BACKOFF_SEC:
             return
-        eff_offset, eff_max = self._target()
-        res = apply_tune(eff_offset, eff_max)
+        eff_offset, eff_max, eff_mem = self._target()
+        res = apply_tune(eff_offset, eff_max, eff_mem)
         if res.get("ok"):
-            # If the clock cap failed, record the offset but keep max at 0 so we
-            # retry (and surface the error) instead of pretending it applied.
+            # If a clock lock failed, record the offset but keep that clock at 0
+            # so we retry (and surface the error) instead of pretending it applied.
             applied_max = 0 if res.get("max_clock_error") else eff_max
-            self._set_applied(eff_offset, applied_max)
+            applied_mem = 0 if res.get("mem_clock_error") else eff_mem
+            self._set_applied(eff_offset, applied_max, applied_mem)
             with self._lock:
                 self._idle_cleared = False
                 self._last_poll = now
-                self._status["last_error"] = res.get("max_clock_error")
+                self._status["last_error"] = res.get("mem_clock_error") or res.get("max_clock_error")
         else:
             with self._lock:
                 self._last_apply_fail = now
@@ -462,7 +604,7 @@ class DgpuWatcher:
                 self._idle_since = now
             elif now - self._idle_since >= IDLE_CLEAR_SEC:
                 clear_tune()
-                self._set_applied(0, 0)
+                self._set_applied(0, 0, 0)
                 self._idle_cleared = True
                 self._idle_since = None
         else:
@@ -483,7 +625,8 @@ class DgpuWatcher:
 
     def _sync_status(self) -> None:
         with self._lock:
-            self._status["applied"] = bool(self._applied_offset or self._applied_max)
+            self._status["applied"] = bool(
+                self._applied_offset or self._applied_max or self._applied_mem)
 
     def write_state(self) -> None:
         """Publish the current status to the runtime state file.
@@ -496,6 +639,7 @@ class DgpuWatcher:
             snapshot = dict(self._status)
             snapshot["applied_offset"] = self._applied_offset
             snapshot["applied_max"] = self._applied_max
+            snapshot["applied_mem"] = self._applied_mem
             snapshot["idle_cleared"] = self._idle_cleared
             snapshot["ts"] = time.time()
         blob = json.dumps(snapshot, sort_keys=True)
@@ -505,7 +649,7 @@ class DgpuWatcher:
 
     def mark_cleared(self) -> None:
         """Forget any applied state (used after an out-of-band clear)."""
-        self._set_applied(0, 0)
+        self._set_applied(0, 0, 0)
         with self._lock:
             self._idle_cleared = False
             self._idle_since = None
@@ -523,12 +667,15 @@ watcher = DgpuWatcher()
 def set_desired_config(enabled: Optional[bool] = None, offset: Optional[int] = None,
                        auto: Optional[bool] = None,
                        max_enabled: Optional[bool] = None,
-                       max_clock: Optional[int] = None) -> None:
+                       max_clock: Optional[int] = None,
+                       mem_enabled: Optional[bool] = None,
+                       mem_clock: Optional[int] = None) -> None:
     """Persist the desired dGPU tuning and act immediately.
 
-    Only the arguments that are not None are changed, so the undervolt and
-    max-clock controls stay independent. Disabling always forces the affected
-    value back to stock, even though applied state is process-local.
+    Only the arguments that are not None are changed, so the undervolt,
+    max-clock and memory-clock controls stay independent. Disabling always
+    forces the affected value back to stock, even though applied state is
+    process-local.
     """
     cfg0 = load_config()
     if enabled is None:
@@ -548,24 +695,34 @@ def set_desired_config(enabled: Optional[bool] = None, offset: Optional[int] = N
         if max_clock is not None:
             mc = max(0, min(MAX_CLOCK_MHZ, int(max_clock)))
             cfg["dgpu_max_clock_mhz"] = mc
-        # Keep the stored cap consistent with its switch.
+        if mem_enabled is not None:
+            cfg["dgpu_mem_clock_enabled"] = bool(mem_enabled)
+        if mem_clock is not None:
+            mc = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock)))
+            cfg["dgpu_mem_clock_mhz"] = mc
+        # Keep each stored cap consistent with its switch.
         if not cfg.get("dgpu_max_clock_enabled", False):
             cfg["dgpu_max_clock_mhz"] = 0
+        if not cfg.get("dgpu_mem_clock_enabled", False):
+            cfg["dgpu_mem_clock_mhz"] = 0
         return cfg
 
     cfg = update_config(_mutate)
 
     new_max_enabled = bool(cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"]))
     new_max = int(cfg.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"]))
+    new_mem_enabled = bool(cfg.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"]))
+    new_mem = int(cfg.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"]))
     watcher.set_desired(enabled, offset,
                         bool(cfg.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])),
-                        new_max_enabled, new_max)
+                        new_max_enabled, new_max, new_mem_enabled, new_mem)
 
     # Ensure the hardware reflects the change immediately (or is cleared). An
     # explicit user action always applies now, even when auto-apply is off.
     bdf = find_nvidia_bdf()
     active = bdf is not None and runtime_status(bdf) == "active"
-    if active and (enabled or (new_max_enabled and new_max > 0)):
+    wants = enabled or (new_max_enabled and new_max > 0) or (new_mem_enabled and new_mem > 0)
+    if active and wants:
         watcher.tick(force_apply=True)
     elif active:
         clear_tune()
@@ -616,6 +773,8 @@ def human_status() -> str:
         parts.append(f"+{st['desired_offset']} MHz")
     if st.get("desired_max_clock"):
         parts.append(f"cap {st['desired_max_clock']} MHz")
+    if st.get("desired_mem_clock"):
+        parts.append(f"mem {st['desired_mem_clock']} MHz")
     label = ", ".join(parts) or "off"
     if st.get("applied"):
         suffix = "" if st.get("auto", True) else " (manual)"

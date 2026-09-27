@@ -28,6 +28,7 @@ from ...config import load as load_config, update_config
 from ...profiles import profile_usable, resolve_model
 from ...system_power import sync_system_power
 from ...updates import build_terminal_repair_command, repair_command
+from ..flow_layout import FlowContainer
 
 
 class SettingsPage(QWidget):
@@ -53,6 +54,7 @@ class SettingsPage(QWidget):
         s_title.setProperty("class", "CardTitle")
         s_sub = QLabel("Configure which preferences are automatically restored on login and profile changes.")
         s_sub.setProperty("class", "CardSubtitle")
+        s_sub.setWordWrap(True)
         s_layout.addWidget(s_title)
         s_layout.addWidget(s_sub)
 
@@ -67,6 +69,7 @@ class SettingsPage(QWidget):
         subtext1 = QLabel("Re-applies your saved keyboard backlight when you log in. "
                           "The battery limit and power sync have their own toggles below.")
         subtext1.setStyleSheet("color: #8896ab; font-size: 12px; margin-left: 26px;")
+        subtext1.setWordWrap(True)
         chk_box1.addWidget(self.chk_startup_apply)
         chk_box1.addWidget(subtext1)
         s_layout.addLayout(chk_box1)
@@ -87,6 +90,7 @@ class SettingsPage(QWidget):
 
         subtext2 = QLabel("Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode.")
         subtext2.setStyleSheet("color: #8896ab; font-size: 12px; margin-left: 26px;")
+        subtext2.setWordWrap(True)
         chk_box2.addWidget(self.chk_sync_power)
         chk_box2.addWidget(subtext2)
         s_layout.addLayout(chk_box2)
@@ -122,16 +126,17 @@ class SettingsPage(QWidget):
         svc_title.setProperty("class", "CardTitle")
         svc_sub = QLabel("GigaMate runs a lightweight user daemon (gigamate.service) for hardware hotkeys and tray integration.")
         svc_sub.setProperty("class", "CardSubtitle")
+        svc_sub.setWordWrap(True)
         svc_layout.addWidget(svc_title)
         svc_layout.addWidget(svc_sub)
 
-        svc_row = QHBoxLayout()
-        svc_row.setSpacing(16)
+        # Flows, so the status label and the three buttons reflow onto separate
+        # lines rather than setting a ~750 px minimum width for the card.
+        svc_row = FlowContainer(spacing=12)
 
         self.service_status_label = QLabel("Daemon: Checking...")
         self.service_status_label.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
         svc_row.addWidget(self.service_status_label)
-        svc_row.addStretch()
 
         self.btn_restart_service = QPushButton("Restart Daemon")
         self.btn_restart_service.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -148,7 +153,7 @@ class SettingsPage(QWidget):
         self.btn_setup.clicked.connect(self._on_run_setup_clicked)
         svc_row.addWidget(self.btn_setup)
 
-        svc_layout.addLayout(svc_row)
+        svc_layout.addWidget(svc_row)
         layout.addWidget(service_card)
 
         # ── Card 3: Hardware Diagnostics & Environment ──
@@ -161,9 +166,9 @@ class SettingsPage(QWidget):
         d_title.setProperty("class", "CardTitle")
         d_layout.addWidget(d_title)
 
-        self._diag_grid = QHBoxLayout()
-        self._diag_grid.setSpacing(12)
-        d_layout.addLayout(self._diag_grid)
+        # Six chips in a rigid row is a ~680 px minimum; let them wrap instead.
+        self._diag_grid = FlowContainer(spacing=12)
+        d_layout.addWidget(self._diag_grid)
         self._populate_diag_chips()
 
         layout.addWidget(diag_card)
@@ -206,11 +211,7 @@ class SettingsPage(QWidget):
 
     def _populate_diag_chips(self) -> None:
         """(Re)build the hardware diagnostic chips from a fresh capability probe."""
-        while self._diag_grid.count():
-            item = self._diag_grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        self._diag_grid.clear()
 
         caps = detect_system_capabilities()
 

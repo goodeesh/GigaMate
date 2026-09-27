@@ -101,6 +101,7 @@ class RgbPage(QWidget):
             "GigaMate did not detect a supported Gigabyte ITE 829x USB keyboard controller on this system."
         )
         u_body.setStyleSheet("color: #8896ab; font-size: 12px;")
+        u_body.setWordWrap(True)
         u_lay.addWidget(u_title)
         u_lay.addWidget(u_body)
         c_layout.addWidget(self.kbd_unsupported_notice)
@@ -129,6 +130,7 @@ class RgbPage(QWidget):
         action_row.setSpacing(12)
         cmd_hint = QLabel("💡 Run 'gigamate calibrate rgb' in your terminal to create a profile.")
         cmd_hint.setStyleSheet("color: #ecc94b; font-size: 11px;")
+        cmd_hint.setWordWrap(True)
         action_row.addWidget(cmd_hint)
         action_row.addStretch()
 

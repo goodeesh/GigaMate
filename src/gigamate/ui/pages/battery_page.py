@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 
 from ...battery import BatteryManager, get_battery_manager
 from ...config import load as load_config, update_config
+from ..flow_layout import FlowContainer
 
 
 class BatteryPage(QWidget):
@@ -57,14 +58,15 @@ class BatteryPage(QWidget):
         self.progress_bar.setFixedHeight(22)
         s_layout.addWidget(self.progress_bar)
 
-        # 3 Status Chips
-        chips_layout = QHBoxLayout()
-        chips_layout.setSpacing(12)
+        # 3 Status Chips. A flow container so the row reflows onto a second line
+        # instead of forcing the page wider than a narrow window can show.
+        self.chips_container = FlowContainer(spacing=12)
+        chips_layout = self.chips_container
 
         chips_layout.addWidget(self._make_chip("Power Source", "ac_label", "⚡"))
         chips_layout.addWidget(self._make_chip("Battery Status", "status_label", "🔋"))
         chips_layout.addWidget(self._make_chip("Battery Health", "health_label", "❤️"))
-        s_layout.addLayout(chips_layout)
+        s_layout.addWidget(self.chips_container)
         layout.addWidget(status_card)
 
         # ── Battery Care & Charge Threshold Card ──
@@ -80,6 +82,9 @@ class BatteryPage(QWidget):
             "cells, prolonging battery lifespan."
         )
         self.care_sub.setProperty("class", "CardSubtitle")
+        # Prose must wrap, otherwise its single-line width becomes the page's
+        # minimum width and the card is clipped on a narrow window.
+        self.care_sub.setWordWrap(True)
         c_layout.addWidget(c_title)
         c_layout.addWidget(self.care_sub)
 

@@ -14,10 +14,12 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -300,16 +302,31 @@ class MainWindow(QMainWindow):
         self.page_gpu = GpuPage()
         self.page_settings = SettingsPage()
 
-        self.stack.addWidget(self.page_dashboard)
-        self.stack.addWidget(self.page_battery)
-        self.stack.addWidget(self.page_rgb)
-        self.stack.addWidget(self.page_gpu)
-        self.stack.addWidget(self.page_settings)
+        # Each page lives in its own scroll area. Without this, shrinking the
+        # window (or moving it to a smaller/scaled monitor) forces Qt to squeeze
+        # a page's layout below its minimum, which collapses grids and overlaps
+        # labels — the GPU page alone needs ~913 px. Scrollable pages keep their
+        # natural size and simply scroll instead.
+        for page in (self.page_dashboard, self.page_battery, self.page_rgb,
+                     self.page_gpu, self.page_settings):
+            self.stack.addWidget(self._wrap_scrollable(page))
 
         root_layout.addWidget(self.stack)
 
         # Default to dashboard
         self.btn_dashboard.setChecked(True)
+
+    @staticmethod
+    def _wrap_scrollable(page: QWidget) -> QScrollArea:
+        """Put ``page`` in a frameless scroll area that tracks the viewport width."""
+        area = QScrollArea()
+        area.setObjectName("PageScrollArea")
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return area
 
     def _add_nav_btn(self, text: str, page_idx: int, layout: QVBoxLayout) -> QPushButton:
         btn = QPushButton(text)

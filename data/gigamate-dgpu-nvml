@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GigaMate — privileged NVIDIA dGPU V/F-offset helper.
+"""GigaMate — privileged NVIDIA dGPU tuning helper.
 
 This script is installed root-owned (0755) at /usr/lib/gigamate/gigamate-dgpu-nvml
 and invoked via pkexec by the unprivileged GigaMate tray/CLI/Center. It performs
@@ -7,13 +7,22 @@ exactly one NVML operation and exits; it never lingers (an open NVML handle woul
 keep the dGPU awake).
 
 Commands (argv):
-    probe                  Report whether the VF-offset API is usable.
-    get                    Read the current offset + GPU utilization.
-    apply <mhz> [maxmhz]   Set the V/F offset (0..255) and optional clock cap.
-    clear                  Offset 0 + unlock clocks (stock).
+    probe                          Report which tuning APIs this GPU/driver supports.
+    get                            Read the V/F offset and GPU utilization.
+    apply <mhz> [maxmhz] [memmhz]   Set the V/F offset (0..255), optional boost-clock
+                                   cap and optional memory-clock pin.
+    clear                          Offset 0 + unlock both clocks (stock).
 
 The clock cap uses nvmlDeviceSetGpuLockedClocks(dev, 0, maxmhz), which upper-
-bounds the boost clock (0 or omitted = unlocked).
+bounds the boost clock (0 or omitted = unlocked). The memory clock is pinned with
+nvmlDeviceSetMemoryLockedClocks(dev, mhz, mhz); note this can only select a clock
+the GPU already supports (it cannot exceed nvmlDeviceGetMaxClockInfo(MEM)), so on
+most mobile parts it is a *pin* (guaranteed max) or a *cap*, not a true overclock.
+
+There is deliberately **no live telemetry** here (no temperature, clocks, power or
+VRAM): tools such as MangoHud and nvtop already own live metrics, and every NVML
+read risks resuming a dGPU the kernel has powered down. GigaMate's job is tuning
+the dGPU and leaving it asleep when it is not being used.
 
 Output: a single JSON object on stdout. Exit code 0 on success, 2 on usage error.
 """
@@ -25,9 +34,16 @@ import re
 import sys
 from ctypes import c_char_p, c_int, c_uint, c_void_p, POINTER, Structure
 
+# Bumped whenever the CLI/UI start sending arguments or reading fields that an
+# older installed helper would silently ignore. Callers compare this against
+# their own expectation so a stale helper is reported instead of half-working.
+HELPER_VERSION = 3
+
 MAX_OFFSET_MHZ = 255
 MAX_CLOCK_MHZ = 4000
+MAX_MEM_CLOCK_MHZ = 32000
 NVML_CLOCK_GRAPHICS = 0
+NVML_CLOCK_MEM = 2
 
 NVML_SUCCESS = 0
 NVML_ERROR_NOT_SUPPORTED = 3
@@ -77,6 +93,16 @@ class _NvmlUtilization(Structure):
     _fields_ = [("gpu", c_uint), ("memory", c_uint)]
 
 
+# Optional NVML entry points. Absent on older drivers and on GPUs that do not
+# implement the feature, so they are bound defensively and a missing symbol (or a
+# failing call) is reported as "unavailable" rather than crashing the helper.
+_OPTIONAL_SIGNATURES = (
+    ("nvmlDeviceGetSupportedMemoryClocks", [c_void_p, POINTER(c_uint), POINTER(c_uint)]),
+    ("nvmlDeviceSetMemoryLockedClocks", [c_void_p, c_uint, c_uint]),
+    ("nvmlDeviceResetMemoryLockedClocks", [c_void_p]),
+)
+
+
 class NvmlError(Exception):
     def __init__(self, message, code=None):
         super().__init__(message)
@@ -120,6 +146,11 @@ class _CtypesBackend:
         if hasattr(lib, "nvmlDeviceGetMaxClockInfo"):
             lib.nvmlDeviceGetMaxClockInfo.argtypes = [c_void_p, c_uint, POINTER(c_uint)]
             lib.nvmlDeviceGetMaxClockInfo.restype = c_int
+        for name, argtypes in _OPTIONAL_SIGNATURES:
+            fn = getattr(lib, name, None)
+            if fn is not None:
+                fn.argtypes = argtypes
+                fn.restype = c_int
         self._handle = None
 
     def _err(self, ret):
@@ -173,13 +204,46 @@ class _CtypesBackend:
             raise NvmlError("locked clocks unsupported", NVML_ERROR_NOT_SUPPORTED)
         self._check(fn(self._handle))
 
-    def get_max_clock(self):
+    def get_max_clock(self, clock_id=NVML_CLOCK_GRAPHICS):
         fn = getattr(self._lib, "nvmlDeviceGetMaxClockInfo", None)
         if fn is None:
             raise NvmlError("max clock info unsupported", NVML_ERROR_NOT_SUPPORTED)
         out = c_uint(0)
-        self._check(fn(self._handle, c_uint(NVML_CLOCK_GRAPHICS), ctypes.byref(out)))
+        self._check(fn(self._handle, c_uint(clock_id), ctypes.byref(out)))
         return int(out.value)
+
+    def get_mem_clocks(self):
+        """The memory clocks this GPU supports (ascending, MHz)."""
+        fn = getattr(self._lib, "nvmlDeviceGetSupportedMemoryClocks", None)
+        if fn is None:
+            raise NvmlError("supported memory clocks unsupported", NVML_ERROR_NOT_SUPPORTED)
+        # A NULL buffer is rejected with INSUFFICIENT_SIZE on some drivers but
+        # still reports the count, so the first return value is intentionally
+        # ignored here.
+        count = c_uint(0)
+        fn(self._handle, ctypes.byref(count), None)
+        if not 0 < count.value < 4096:
+            raise NvmlError("supported memory clocks unavailable", NVML_ERROR_NOT_SUPPORTED)
+        buf = (c_uint * count.value)()
+        self._check(fn(self._handle, ctypes.byref(count), buf))
+        return sorted({int(v) for v in buf if v})
+
+    def set_mem_clock(self, mhz):
+        """Pin the memory clock at `mhz` (min == max)."""
+        fn = getattr(self._lib, "nvmlDeviceSetMemoryLockedClocks", None)
+        if fn is None:
+            raise NvmlError("memory clock lock unsupported", NVML_ERROR_NOT_SUPPORTED)
+        self._check(fn(self._handle, c_uint(int(mhz)), c_uint(int(mhz))))
+
+    def reset_mem_clock(self):
+        fn = getattr(self._lib, "nvmlDeviceResetMemoryLockedClocks", None)
+        if fn is None:
+            raise NvmlError("memory clock lock unsupported", NVML_ERROR_NOT_SUPPORTED)
+        self._check(fn(self._handle))
+
+    def has_mem_lock(self):
+        """Whether this driver exposes the memory-clock lock API at all."""
+        return getattr(self._lib, "nvmlDeviceSetMemoryLockedClocks", None) is not None
 
 
 class _PynvmlBackend:
@@ -229,8 +293,28 @@ class _PynvmlBackend:
     def reset_max_clock(self):
         self._p.nvmlDeviceResetGpuLockedClocks(self._handle)
 
-    def get_max_clock(self):
-        return int(self._p.nvmlDeviceGetMaxClockInfo(self._handle, NVML_CLOCK_GRAPHICS))
+    def get_max_clock(self, clock_id=NVML_CLOCK_GRAPHICS):
+        return int(self._p.nvmlDeviceGetMaxClockInfo(self._handle, clock_id))
+
+    def get_mem_clocks(self):
+        count = c_uint(0)
+        # A NULL buffer is rejected with INSUFFICIENT_SIZE on some drivers but
+        # still reports the count, so the first return value is ignored.
+        self._p.nvmlDeviceGetSupportedMemoryClocks(self._handle, count, None)
+        if not 0 < count.value < 4096:
+            raise NvmlError("supported memory clocks unavailable", NVML_ERROR_NOT_SUPPORTED)
+        buf = (c_uint * count.value)()
+        self._p.nvmlDeviceGetSupportedMemoryClocks(self._handle, count, buf)
+        return sorted({int(v) for v in buf if v})
+
+    def set_mem_clock(self, mhz):
+        self._p.nvmlDeviceSetMemoryLockedClocks(self._handle, int(mhz), int(mhz))
+
+    def reset_mem_clock(self):
+        self._p.nvmlDeviceResetMemoryLockedClocks(self._handle)
+
+    def has_mem_lock(self):
+        return hasattr(self._p, "nvmlDeviceSetMemoryLockedClocks")
 
 
 def open_backend(bdf):
@@ -263,24 +347,39 @@ def _error(exc):
 def cmd_probe():
     bdf = find_nvidia_bdf()
     if bdf is None:
-        return _emit({"ok": False, "supported": False, "error": "no NVIDIA dGPU found"})
+        return _emit({"ok": False, "supported": False, "error": "no NVIDIA dGPU found",
+                      "helper_version": HELPER_VERSION})
     try:
         be = open_backend(bdf)
     except Exception as exc:  # noqa: BLE001
         return _emit({"ok": False, "supported": False, "device": bdf, "error": str(exc),
-                      "code": getattr(exc, "code", None)})
+                      "code": getattr(exc, "code", None), "helper_version": HELPER_VERSION})
     try:
         try:
             offset = be.get_offset()
         except Exception as exc:  # noqa: BLE001
             return _emit({"ok": False, "supported": False, "device": bdf, "error": str(exc),
-                          "code": getattr(exc, "code", None)})
+                          "code": getattr(exc, "code", None),
+                          "helper_version": HELPER_VERSION})
         try:
             ceiling = be.get_max_clock()
         except Exception:
             ceiling = None
+        mem_max = None
+        try:
+            mem_max = be.get_max_clock(NVML_CLOCK_MEM)
+        except Exception:
+            pass
+        mem_clocks = None
+        try:
+            mem_clocks = be.get_mem_clocks()
+        except Exception:
+            pass
         return _emit({"ok": True, "supported": True, "device": bdf, "offset_mhz": offset,
-                      "gpu_max_clock_mhz": ceiling})
+                      "gpu_max_clock_mhz": ceiling, "mem_max_clock_mhz": mem_max,
+                      "mem_supported_clocks": mem_clocks,
+                      "mem_lock_api": bool(be.has_mem_lock()),
+                      "helper_version": HELPER_VERSION})
     finally:
         be.close()
 
@@ -299,6 +398,9 @@ def cmd_get():
             util = be.get_util()
         except Exception:
             util = None
+        # Offset + utilisation only: utilisation is what the watcher uses to
+        # decide when the dGPU has gone idle, and the offset is the applied V/F
+        # value. No telemetry — see the module docstring.
         return _emit({"ok": True, "device": bdf, "offset_mhz": offset, "util": util})
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
@@ -306,14 +408,16 @@ def cmd_get():
         be.close()
 
 
-def cmd_apply(mhz, maxmhz=0):
+def cmd_apply(mhz, maxmhz=0, memmhz=0):
     try:
         mhz = int(mhz)
         maxmhz = int(maxmhz)
+        memmhz = int(memmhz)
     except (TypeError, ValueError):
         return _emit({"ok": False, "error": "invalid offset"}, code=2)
     mhz = max(0, min(MAX_OFFSET_MHZ, mhz))
     maxmhz = max(0, min(MAX_CLOCK_MHZ, maxmhz))
+    memmhz = max(0, min(MAX_MEM_CLOCK_MHZ, memmhz))
     bdf = find_nvidia_bdf()
     if bdf is None:
         return _emit({"ok": False, "error": "no NVIDIA dGPU found"})
@@ -324,7 +428,10 @@ def cmd_apply(mhz, maxmhz=0):
     try:
         be.set_offset(mhz)
         readback = be.get_offset()
-        result = {"ok": True, "device": bdf, "offset_mhz": readback, "max_clock_mhz": 0}
+        result = {"ok": True, "device": bdf, "offset_mhz": readback,
+                  "max_clock_mhz": 0, "mem_clock_mhz": 0}
+        # Each clock is independent: one unsupported lock must not undo the
+        # others, so failures are reported per-control.
         try:
             if maxmhz > 0:
                 be.set_max_clock(maxmhz)
@@ -333,6 +440,14 @@ def cmd_apply(mhz, maxmhz=0):
                 be.reset_max_clock()
         except Exception as exc:  # noqa: BLE001
             result["max_clock_error"] = str(exc)
+        try:
+            if memmhz > 0:
+                be.set_mem_clock(memmhz)
+                result["mem_clock_mhz"] = memmhz
+            else:
+                be.reset_mem_clock()
+        except Exception as exc:  # noqa: BLE001
+            result["mem_clock_error"] = str(exc)
         return _emit(result)
     except Exception as exc:  # noqa: BLE001
         return _error(exc)
@@ -341,8 +456,10 @@ def cmd_apply(mhz, maxmhz=0):
 
 
 def main(argv):
+    usage = ("usage: gigamate-dgpu-nvml "
+             "{probe|get|apply <mhz> [maxmhz] [memmhz]|clear}")
     if len(argv) < 2:
-        return _emit({"ok": False, "error": "usage: gigamate-dgpu-nvml {probe|get|apply <mhz> [maxmhz]|clear}"}, code=2)
+        return _emit({"ok": False, "error": usage}, code=2)
     cmd = argv[1]
     if cmd == "probe":
         return cmd_probe()
@@ -350,11 +467,12 @@ def main(argv):
         return cmd_get()
     if cmd == "apply":
         if len(argv) < 3:
-            return _emit({"ok": False, "error": "apply requires <mhz> [maxmhz]"}, code=2)
+            return _emit({"ok": False, "error": "apply requires <mhz> [maxmhz] [memmhz]"}, code=2)
         maxmhz = argv[3] if len(argv) > 3 else 0
-        return cmd_apply(argv[2], maxmhz)
+        memmhz = argv[4] if len(argv) > 4 else 0
+        return cmd_apply(argv[2], maxmhz, memmhz)
     if cmd == "clear":
-        return cmd_apply(0, 0)
+        return cmd_apply(0, 0, 0)
     return _emit({"ok": False, "error": f"unknown command: {cmd}"}, code=2)
 
 
