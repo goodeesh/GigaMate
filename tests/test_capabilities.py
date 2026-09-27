@@ -10,7 +10,7 @@ from gigamate.capabilities import (
 from gigamate.acpi import AcpiCapabilities
 from gigamate.battery import BatteryInfo
 from gigamate.gpu import GpuState
-from gigamate.profiles import DeviceProfile
+from gigamate.profiles import DeviceProfile, ModelMatch
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +62,8 @@ def test_detect_system_capabilities_full_gigabyte():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=(0x0414, 0x8105)), \
          patch("gigamate.capabilities.resolve_profile", return_value=mock_profile), \
+         patch("gigamate.capabilities.resolve_model",
+               return_value=ModelMatch(profile=mock_profile, source="builtin-usb", experimental=False)), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -88,6 +90,7 @@ def test_detect_system_capabilities_full_gigabyte():
         assert caps.keyboard_profile_loaded is True
         assert caps.keyboard_profile_name == "Gigabyte Aero 16"
         assert caps.profile_verified is True
+        assert caps.profile_experimental is False
         assert caps.has_dgpu is True
 
 
@@ -104,6 +107,7 @@ def test_detect_system_capabilities_uncalibrated_keyboard():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=(0x0414, 0x9999)), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -124,6 +128,7 @@ def test_detect_system_capabilities_uncalibrated_keyboard():
         assert caps.keyboard_profile_loaded is False
         assert caps.keyboard_vid_pid == (0x0414, 0x9999)
         assert caps.profile_verified is False
+        assert caps.profile_experimental is False
 
 
 def test_detect_system_capabilities_missing_acpi_driver():
@@ -139,6 +144,7 @@ def test_detect_system_capabilities_missing_acpi_driver():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -174,6 +180,7 @@ def test_detect_system_capabilities_generic_desktop():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -209,6 +216,7 @@ def test_detect_system_capabilities_rejects_lookalike_model_name():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -241,6 +249,7 @@ def test_detect_system_capabilities_uses_dmi_vendor():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -273,6 +282,7 @@ def test_detect_system_capabilities_is_cached_until_invalidated():
          patch("gigamate.capabilities.get_battery_manager") as mock_bat_mgr_getter, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
 
         mock_ctrl = MagicMock()
@@ -313,6 +323,7 @@ def _probe_with(monkeypatch, product, vendor, kbd):
          patch("gigamate.capabilities.get_battery_manager") as bat_get, \
          patch("gigamate.capabilities.detect_device", return_value=kbd), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=mock_gpu):
         ctrl_cls.return_value.available = False
         ctrl_cls.return_value.capabilities = mock_caps
@@ -359,6 +370,7 @@ def test_gigabyte_desktop_board_is_not_a_laptop(monkeypatch):
          patch("gigamate.capabilities.get_battery_manager") as b, \
          patch("gigamate.capabilities.detect_device", return_value=None), \
          patch("gigamate.capabilities.resolve_profile", return_value=None), \
+         patch("gigamate.capabilities.resolve_model", return_value=None), \
          patch("gigamate.capabilities.get_gpu_state", return_value=GpuState(present=False)):
         c.return_value.available = False
         c.return_value.capabilities = AcpiCapabilities(backend="none")

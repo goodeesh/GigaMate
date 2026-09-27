@@ -12,6 +12,7 @@ from gigamate.profiles import (
     save_user_profile,
     validate_profile,
     has_verified_profiles,
+    ModelMatch,
     BUILTIN_DATA_DIR,
     USER_PROFILES_DIR,
 )
@@ -357,21 +358,22 @@ class TestGetDmiProductName:
         assert "Model: GIGABYTE Gaming A16" in captured
         assert "Keyboard: Not detected (no USB RGB)" in captured
 
-    def test_cmd_contribute_acpi_only(self, monkeypatch, capsys):
+    def test_cmd_contribute_acpi_only(self, monkeypatch, capsys, tmp_path):
         import argparse
         from gigamate import cli
         from gigamate.acpi import AcpiController
 
         monkeypatch.setattr(cli, "detect_device", lambda: None)
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
         monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "GIGABYTE Gaming A16")
+        monkeypatch.setattr(cli, "CONFIG_DIR", tmp_path)
         monkeypatch.setattr(AcpiController, "available", property(lambda self: True))
 
         args = argparse.Namespace(vid=None, pid=None)
         cli.cmd_profile_contribute(args)
         captured = capsys.readouterr().out
+        # Dead-end fixed: guide the user to generate a profile first.
         assert "Model: GIGABYTE Gaming A16" in captured
-        assert "power-profile support is unverified" in captured
+        assert "No profile has been generated yet" in captured
         assert "gigamate calibrate acpi" in captured
         assert "fully supported out-of-the-box" not in captured
 
@@ -544,7 +546,7 @@ class TestProfileCliGating:
     def test_set_refuses_unverified(self, monkeypatch, capsys):
         from gigamate import cli
 
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "resolve_model", lambda vid=None, pid=None: None)
         with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
             mock_ctrl_cls.return_value.available = True
             with pytest.raises(SystemExit):
@@ -555,7 +557,7 @@ class TestProfileCliGating:
     def test_cycle_refuses_unverified(self, monkeypatch, capsys):
         from gigamate import cli
 
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "resolve_model", lambda vid=None, pid=None: None)
         with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
             mock_ctrl_cls.return_value.available = True
             with pytest.raises(SystemExit):
@@ -566,7 +568,7 @@ class TestProfileCliGating:
     def test_show_refuses_unverified(self, monkeypatch, capsys):
         from gigamate import cli
 
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: None)
+        monkeypatch.setattr(cli, "resolve_model", lambda vid=None, pid=None: None)
         with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
             mock_ctrl_cls.return_value.available = True
             with pytest.raises(SystemExit):
@@ -583,7 +585,8 @@ class TestProfileCliGating:
                 "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
             }),
         )
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: profile)
+        monkeypatch.setattr(cli, "resolve_model",
+                            lambda vid=None, pid=None: ModelMatch(profile, "user-usb", False))
         with patch("gigamate.cli.AcpiController") as mock_ctrl_cls:
             mock_ctrl_cls.return_value.available = True
             with pytest.raises(SystemExit):
@@ -600,7 +603,8 @@ class TestProfileCliGating:
                 "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
             }),
         )
-        monkeypatch.setattr(cli, "resolve_profile", lambda vid=None, pid=None: profile)
+        monkeypatch.setattr(cli, "resolve_model",
+                            lambda vid=None, pid=None: ModelMatch(profile, "user-usb", False))
         with patch("gigamate.cli.AcpiController") as mock_ctrl_cls, \
              patch("gigamate.cli._record_profile_and_sync") as mock_record:
             mock_ctrl = mock_ctrl_cls.return_value
@@ -627,6 +631,8 @@ class TestCalibrateAcpi:
         from gigamate import cli
 
         monkeypatch.setattr(cli, "detect_device", lambda: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: None)
+        monkeypatch.setattr(cli, "probe_acpi_capabilities", lambda: self._caps())
         cli.cmd_calibrate_acpi(self._args())
         captured = capsys.readouterr().out
         assert "nothing can be saved" in captured
@@ -647,7 +653,7 @@ class TestCalibrateAcpi:
 
         cli.cmd_calibrate_acpi(self._args())
         captured = capsys.readouterr().out
-        assert "stays disabled for this model until verified" in captured
+        assert "Profile switching stays disabled for this model." in captured
         saved = mock_save.call_args[0][0]
         assert saved.acpi.has_power_profiles is False
         assert saved.acpi.profiles == {}
@@ -670,7 +676,7 @@ class TestCalibrateAcpi:
 
         cli.cmd_calibrate_acpi(self._args())
         captured = capsys.readouterr().out
-        assert "now enabled for this model (experimental)" in captured
+        assert "Profile switching is now enabled for this model." in captured
         saved = mock_save.call_args[0][0]
         assert saved.acpi.has_power_profiles is True
         assert saved.acpi.profiles == {
@@ -678,6 +684,27 @@ class TestCalibrateAcpi:
             "1": {"name": "balanced", "desc": ""},
             "2": {"name": "boost", "desc": ""},
         }
+
+    def test_dmi_keyed_profile_without_keyboard(self, monkeypatch, capsys):
+        """No Gigabyte USB keyboard -> DMI-keyed profile is generated."""
+        from unittest.mock import MagicMock
+
+        from gigamate import cli
+
+        monkeypatch.setattr(cli, "detect_device", lambda: None)
+        monkeypatch.setattr(cli, "get_dmi_product_name", lambda: "GIGABYTE GAMING A16 CMH")
+        monkeypatch.setattr(cli, "probe_acpi_capabilities", lambda: self._caps())
+        monkeypatch.setattr(cli, "get_dmi_product_family", lambda: "GIGABYTE GAMING")
+        monkeypatch.setattr(cli, "match_dmi_profile", lambda *a, **k: None)
+        mock_save = MagicMock(return_value=object())
+        monkeypatch.setattr(cli, "save_user_profile", mock_save)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "n")  # decline profiles
+
+        cli.cmd_calibrate_acpi(self._args())
+        saved = mock_save.call_args[0][0]
+        assert saved.has_dmi is True
+        assert saved.dmi.product_names == ["GIGABYTE GAMING A16 CMH"]
+        assert saved.vid == 0 and saved.pid == 0
 
     @staticmethod
     def _args():

@@ -8,6 +8,7 @@ Usage:
     gigamate rgb calibrate                     Interactive RGB calibration
     gigamate status                            Show hardware status
     gigamate gpu status                        Show discrete GPU power state
+    gigamate gpu memclock 12001                Pin the dGPU memory clock (MHz)
     gigamate profile [name]                    Show/set power profile
     gigamate profile contribute                Pull Request instructions
     gigamate detect [--acpi]                   Detect hardware
@@ -39,12 +40,19 @@ from .protocol import (
 from .profiles import (
     detect_device,
     resolve_profile,
+    resolve_model,
+    profile_usable,
+    match_dmi_profile,
+    load_user_dmi_profiles,
+    ModelMatch,
     calibrate as run_calibrate,
     save_user_profile,
     DeviceProfile,
+    DmiConfig,
     get_dmi_product_name,
     get_dmi_product_family,
-    has_verified_profiles,
+    get_dmi_vendor,
+    get_dmi_chassis_type,
 )
 from .config import load as load_config, save as save_config, update_config
 from .acpi import (
@@ -383,13 +391,17 @@ def _dgpu_status_with_applied(dgpu_tune, st):
         return st
     off = sf.get("applied_offset")
     mx = sf.get("applied_max")
+    mem = sf.get("applied_mem")
     if off is not None:
         st["offset_mhz"] = off
     if mx is not None:
         st["max_clock_mhz"] = mx
+    if mem is not None:
+        st["mem_clock_mhz"] = mem
     st["applied_offset"] = off
     st["applied_max"] = mx
-    st["applied"] = bool(off or mx)
+    st["applied_mem"] = mem
+    st["applied"] = bool(off or mx or mem)
     return st
 
 
@@ -423,10 +435,13 @@ def cmd_gpu_undervolt(args) -> None:
         print(f"  undervolt:   {uv}")
         cap = int(st.get("desired_max_clock") or 0)
         print(f"  max clock:   {('cap ' + str(cap) + ' MHz') if cap else 'off (unlocked)'}")
+        mem = int(st.get("desired_mem_clock") or 0)
+        print(f"  memory clock:{(' ' + str(mem) + ' MHz') if mem else ' off (driver default)'}")
         print(f"  auto-apply:  {'on' if st.get('auto', True) else 'off (manual)'}")
         print(f"  applied:     {st.get('applied')}"
               + (f" (offset +{st.get('offset_mhz')} MHz)" if st.get('offset_mhz') is not None else "")
-              + (f" (cap {st.get('max_clock_mhz')} MHz)" if st.get('max_clock_mhz') else ""))
+              + (f" (cap {st.get('max_clock_mhz')} MHz)" if st.get('max_clock_mhz') else "")
+              + (f" (mem {st.get('mem_clock_mhz')} MHz)" if st.get('mem_clock_mhz') else ""))
         if st.get("last_error"):
             print(f"  last error:  {st['last_error']}")
         holders = dgpu_tune.wake_holders()
@@ -504,6 +519,69 @@ def cmd_gpu_maxclock(args) -> None:
     print(f"dGPU max clock: cap {mhz} MHz" if mhz else "dGPU max clock: off (unlocked)")
 
 
+def cmd_gpu_memclock(args) -> None:
+    """Sleep-aware NVIDIA dGPU memory-clock pin."""
+    from . import dgpu_tune
+
+    if getattr(args, "probe", False):
+        res = dgpu_tune.probe(force=True)
+        print("GigaMate — dGPU memory clock probe")
+        print(f"  supported:   {bool(res.get('supported'))}")
+        print(f"  device:      {res.get('device') or '—'}")
+        print(f"  max clock:   {res.get('mem_max_clock_mhz') or '—'} MHz")
+        clocks = res.get("mem_supported_clocks") or []
+        print(f"  selectable:  {', '.join(str(c) for c in clocks) + ' MHz' if clocks else '—'}")
+        print(f"  lock API:    {'present' if res.get('mem_lock_api') else 'missing'}")
+        if not dgpu_tune.helper_is_current():
+            print("  warning:     installed helper is out of date — re-run ./install.sh")
+        if res.get("error"):
+            print(f"  error:       {res['error']}")
+        return
+
+    value = getattr(args, "value", "status")
+
+    if value in (None, "status"):
+        dgpu_tune.watcher.load_desired_from_config()
+        dgpu_tune.watcher.tick()
+        st = _dgpu_status_with_applied(dgpu_tune, dgpu_tune.watcher.status())
+        mem = int(st.get("desired_mem_clock") or 0)
+        print("GigaMate — dGPU memory clock")
+        print()
+        print(f"  device:      {st.get('device') or '—'}")
+        print(f"  dGPU state:  {st.get('runtime') or '—'} ({st.get('power_state') or '—'})")
+        print(f"  selectable:  {', '.join(str(c) for c in dgpu_tune.mem_clock_choices()) or '—'}")
+        print(f"  configured:  {('pin ' + str(mem) + ' MHz') if mem else 'off (driver default)'}")
+        print(f"  applied:     {st.get('applied')}"
+              + (f" (mem {st.get('mem_clock_mhz')} MHz)" if st.get('mem_clock_mhz') else ""))
+        if st.get("last_error"):
+            print(f"  last error:  {st['last_error']}")
+        if not dgpu_tune.helper_is_current():
+            print("  warning:     installed helper is out of date — re-run ./install.sh")
+        return
+
+    if str(value).lower() in ("off", "unlock", "reset", "stock", "auto"):
+        dgpu_tune.set_desired_config(mem_enabled=False, mem_clock=0)
+        print("dGPU memory clock: off (driver default)")
+        return
+
+    try:
+        mhz = int(str(value))
+    except (TypeError, ValueError):
+        choices = ", ".join(str(c) for c in dgpu_tune.mem_clock_choices())
+        print(f"Invalid value: use a MHz value{f' ({choices})' if choices else ''}, 'off', or 'status'")
+        sys.exit(2)
+
+    choices = dgpu_tune.mem_clock_choices()
+    if choices and mhz not in choices:
+        print(f"Unsupported memory clock {mhz} MHz. This GPU reports: "
+              f"{', '.join(str(c) for c in choices)} MHz")
+        sys.exit(2)
+
+    mhz = max(0, min(dgpu_tune.MAX_MEM_CLOCK_MHZ, mhz))
+    dgpu_tune.set_desired_config(mem_enabled=mhz > 0, mem_clock=mhz)
+    print(f"dGPU memory clock: pin {mhz} MHz" if mhz else "dGPU memory clock: off (driver default)")
+
+
 def cmd_gpu_auto(args) -> None:
     """Enable/disable automatic application of dGPU tuning on boot/wake."""
     from . import dgpu_tune
@@ -549,21 +627,56 @@ def _profile_name(profile: FanProfile, device_profile: Optional[DeviceProfile] =
 
 _PROFILE_UNVERIFIED_HINT = (
     "Power profiles are not enabled for this model. GigaMate only exposes profile\n"
-    "switching when a matching model profile declares it as verified (built-in or\n"
+    "switching when a matching model profile declares a profile set (built-in or\n"
     "created via 'gigamate calibrate acpi')."
 )
 
+_EXPERIMENTAL_NOTICE = (
+    "Note: profile switching is EXPERIMENTAL on this model "
+    "(community-evidenced, unconfirmed) — it may do nothing."
+)
 
-def _verified_profile(args) -> Optional[DeviceProfile]:
-    """Resolve a model profile that authoritatively declares power profiles."""
-    profile = resolve_profile(args.vid, args.pid)
-    if has_verified_profiles(profile):
-        return profile
-    return None
+
+def _model_match(args) -> Optional[ModelMatch]:
+    """Resolve the model profile that gates profile switching."""
+    try:
+        return resolve_model(getattr(args, "vid", None), getattr(args, "pid", None))
+    except Exception:
+        return None
+
+
+def _open_profiles(args):
+    """Shared gate for profile commands.
+
+    Returns ``(ctrl, match, cfg)`` when profile switching may proceed; otherwise
+    prints why and exits. Experimental models require the one-time opt-in.
+    """
+    ctrl = AcpiController()
+    if not ctrl.available:
+        print("ACPI not available. No power profile control.")
+        sys.exit(1)
+    match = _model_match(args)
+    if match is None:
+        print("Power profiles: not enabled for this model.")
+        print()
+        print(_PROFILE_UNVERIFIED_HINT)
+        sys.exit(1)
+    cfg = load_config()
+    if not profile_usable(match, cfg):
+        print("Power profiles: EXPERIMENTAL and not enabled for this model.")
+        print()
+        print("These profiles are community-evidenced but unconfirmed on this unit.")
+        print("Enable them with:")
+        print("  gigamate profile experimental on")
+        sys.exit(1)
+    if match.experimental:
+        print(_EXPERIMENTAL_NOTICE)
+        print()
+    return ctrl, match, cfg
 
 
 def _profile_set_for(profile: Optional[DeviceProfile]):
-    """Return ``(pids, profiles_map)`` for a verified profile, else ``(None, None)``."""
+    """Return ``(pids, profiles_map)`` for a profile that declares profiles."""
     if profile is not None and profile.has_acpi and profile.acpi:
         pids = sorted(int(k) for k in profile.acpi.profiles.keys())
         return pids, profile.acpi.profiles
@@ -572,21 +685,12 @@ def _profile_set_for(profile: Optional[DeviceProfile]):
 
 def cmd_profile_show(args) -> None:
     """Show current power profile."""
-    ctrl = AcpiController()
-    if not ctrl.available:
-        print("ACPI not available. No power profile control.")
-        sys.exit(1)
-    profile = _verified_profile(args)
-    if profile is None:
-        print("Power profiles: not enabled for this model (unverified).")
-        print()
-        print(_PROFILE_UNVERIFIED_HINT)
-        sys.exit(1)
+    ctrl, match, _cfg = _open_profiles(args)
     profile_val = ctrl.get_profile()
     if profile_val is None:
         print("Current power profile: Unknown")
         return
-    pname = _profile_name(profile_val, profile)
+    pname = _profile_name(profile_val, match.profile)
     print(f"Power Profile: {pname}  ({profile_val.value})")
 
 
@@ -605,18 +709,9 @@ def _record_profile_and_sync(val: int) -> None:
 
 def cmd_profile_set(args, name: str) -> None:
     """Set power profile by name or number."""
-    ctrl = AcpiController()
-    if not ctrl.available:
-        print("ACPI not available. No power profile control.")
-        sys.exit(1)
-
-    profile = _verified_profile(args)
+    ctrl, match, _cfg = _open_profiles(args)
+    profile = match.profile
     pids, _p_data = _profile_set_for(profile)
-    if not pids:
-        print("Power profiles: not enabled for this model (unverified).")
-        print()
-        print(_PROFILE_UNVERIFIED_HINT)
-        sys.exit(1)
 
     # Try parsing as number first
     try:
@@ -661,18 +756,8 @@ def cmd_profile_set(args, name: str) -> None:
 
 def cmd_profile_cycle(args) -> None:
     """Cycle to the next power profile and show OSD."""
-    ctrl = AcpiController()
-    if not ctrl.available:
-        print("ACPI not available. No power profile control.")
-        sys.exit(1)
-
-    profile = _verified_profile(args)
-    pids, p_data = _profile_set_for(profile)
-    if not pids:
-        print("Power profiles: not enabled for this model (unverified).")
-        print()
-        print(_PROFILE_UNVERIFIED_HINT)
-        sys.exit(1)
+    ctrl, match, _cfg = _open_profiles(args)
+    pids, p_data = _profile_set_for(match.profile)
 
     current_fp = ctrl.get_profile()
     current_val = current_fp.value if current_fp is not None else pids[0]
@@ -698,45 +783,140 @@ def cmd_profile_cycle(args) -> None:
         sys.exit(1)
 
 
+def cmd_profile_experimental(args) -> None:
+    """Show or change consent for experimental (unconfirmed) model profiles."""
+    value = (getattr(args, "value", "status") or "status").lower()
+
+    if value == "status":
+        cfg = load_config()
+        match = _model_match(args)
+        enabled = bool(cfg.get("experimental_profiles_enabled", False))
+        print("GigaMate — experimental profiles")
+        print()
+        print(f"  enabled:  {'on' if enabled else 'off'}")
+        if match is None:
+            print("  model:    no matching model profile")
+        else:
+            kind = "experimental (unconfirmed)" if match.experimental else "verified"
+            print(f"  model:    {match.clean_name}  [{match.source}] — {kind}")
+        return
+
+    if value in ("on", "true", "yes", "enable", "enabled"):
+        update_config(lambda c: {**c, "experimental_profiles_enabled": True})
+        print("Experimental profiles: ON — unconfirmed profile controls are now enabled.")
+        return
+
+    if value in ("off", "false", "no", "disable", "disabled"):
+        update_config(lambda c: {**c, "experimental_profiles_enabled": False})
+        print("Experimental profiles: OFF — experimental controls are hidden again.")
+        return
+
+    print("Invalid value: use 'on', 'off', or 'status'")
+    sys.exit(2)
+
+
+def cmd_profile_report(args) -> None:
+    """Print a paste-able summary to help confirm an experimental model."""
+    from . import __version__
+    from .battery import get_battery_manager  # noqa: F401 (kept side-effect free)
+
+    cfg = load_config()
+    match = _model_match(args)
+    ctrl = AcpiController()
+    caps = ctrl.capabilities if ctrl.available else None
+
+    print("GigaMate — model report")
+    print()
+    print(f"  GigaMate version:   {__version__}")
+    print(f"  DMI vendor:         {get_dmi_vendor() or '-'}")
+    print(f"  DMI product_name:   {get_dmi_product_name() or '-'}")
+    print(f"  DMI product_family: {get_dmi_product_family() or '-'}")
+    chassis = get_dmi_chassis_type()
+    print(f"  DMI chassis:        {chassis if chassis is not None else '-'}")
+    if caps is not None:
+        print(f"  ACPI backend:       {caps.backend}")
+        print(f"  Sensors:            temp={caps.has_temperature} fan_rpm={caps.has_fan_rpm} "
+              f"fan_duty={caps.has_fan_duty} fans={caps.fan_count}")
+        print(f"  Interface answers profile writes: {caps.has_power_profiles}")
+    else:
+        print("  ACPI backend:       none")
+    if match is None:
+        print("  Model profile:      none")
+    else:
+        profiles = match.profile.acpi.profiles if match.profile.acpi else {}
+        names = ", ".join(
+            f"{k}={v.get('name', '?')}" for k, v in sorted(profiles.items(), key=lambda kv: int(kv[0]))
+        )
+        print(f"  Model profile:      {match.clean_name}")
+        print(f"  Profile source:     {match.source}")
+        print(f"  Confidence:         {'experimental (unconfirmed)' if match.experimental else 'verified'}")
+        print(f"  Profiles:           {names or '-'}")
+    print(f"  Experimental opt-in: {bool(cfg.get('experimental_profiles_enabled', False))}")
+    print(f"  Selected profile:    {cfg.get('acpi_profile')}")
+    if caps is not None and ctrl.available:
+        try:
+            state = ctrl.read_state()
+            if state is not None:
+                print(f"  Live:               temp_cpu={state.temp_cpu} fan1={state.fan1_rpm} "
+                      f"fan2={state.fan2_rpm} duty={state.duty_cpu}")
+        except Exception:
+            pass
+    print()
+    print("  Paste this in a comment at:")
+    print("    https://github.com/goodeesh/GigaMate/issues")
+
+
 def cmd_profile_contribute(args) -> None:
     """Show Pull Request instructions for contributing a profile."""
-    profile = resolve_profile(args.vid, args.pid)
     detected = detect_device()
-
-    ctrl = AcpiController()
     dmi_model = get_dmi_product_name()
+    ctrl = AcpiController()
 
-    if profile is not None:
-        vid = profile.vid
-        pid = profile.pid
-        name = profile.name
-    elif detected is not None:
-        vid, pid = detected
-        name = f"{vid:04X}:{pid:04X}"
-    elif ctrl.available:
-        model = dmi_model or "Gigabyte Laptop"
+    profile_dir = CONFIG_DIR / "profiles"
+    candidates = []
+    if detected is not None:
+        candidates.append(profile_dir / f"{detected[0]:04X}_{detected[1]:04X}.json")
+    if profile_dir.is_dir():
+        candidates.extend(sorted(profile_dir.glob("dmi_*.json")))
+
+    existing = next((p for p in candidates if p.exists()), None)
+
+    if existing is None:
+        # Nothing generated yet — guide the user instead of dead-ending on the
+        # fork/cp steps for a file that does not exist.
         print()
-        print(f"  Model: {model}")
-        print("  ACPI interface: detected (sensors), but power-profile support is unverified.")
+        if dmi_model:
+            print(f"  Model: {dmi_model}")
+        if detected is None and not ctrl.available:
+            print("No Gigabyte hardware detected on this system.")
+            print("Run this on the laptop you want to add support for.")
+            sys.exit(1)
         print()
-        print("  GigaMate only exposes profile switching on models with a confirmed profile.")
-        print("  Run 'gigamate calibrate acpi' to generate a candidate profile for this model,")
-        print("  then contribute it so it ships as verified support.")
+        print("  No profile has been generated yet — create one first:")
+        print()
+        step = 1
+        if detected is not None:
+            print(f"    {step}. gigamate calibrate rgb      # map the keyboard colours (if RGB)")
+            step += 1
+        print(f"    {step}. gigamate calibrate acpi     # generate the model profile")
+        print(f"    {step + 1}. gigamate profile contribute # then follow the PR steps")
         print()
         return
-    else:
-        print("No Gigabyte hardware detected on this system.")
-        print("This command should be run on the laptop you want to add support for.")
-        sys.exit(1)
 
-    profile_path = CONFIG_DIR / "profiles" / f"{vid:04X}_{pid:04X}.json"
-    profile_path_str = str(profile_path)
+    profile_path_str = str(existing)
+    # Header metadata: USB key when known, otherwise the DMI model name.
+    if detected is not None:
+        name = f"{detected[0]:04X}:{detected[1]:04X}"
+        key_line = f"  VID:PID: {detected[0]:04X}:{detected[1]:04X}"
+    else:
+        name = dmi_model or "Gigabyte Laptop"
+        key_line = f"  DMI:     {dmi_model or '-'}"
 
     print()
     print("🌟  Share your model profile with the community!")
     print()
     print(f"  Model:   {name}")
-    print(f"  VID:PID: {vid:04X}:{pid:04X}")
+    print(key_line)
     print(f"  Profile: {profile_path_str}")
     print()
     print("  To contribute this profile as a Pull Request:")
@@ -758,6 +938,9 @@ def cmd_profile_contribute(args) -> None:
     print("  Or with GitHub CLI:")
     print(f"     gh pr create --repo goodeesh/GigaMate "
           f"--title \"Add support for {name}\"")
+    print()
+    print("  If your unit is unconfirmed, mark the profile's acpi.confidence as")
+    print("  \"experimental\" so it ships as Experimental until a user verifies it.")
     print()
 
 
@@ -1022,23 +1205,12 @@ def _family_acpi_template() -> Optional[dict]:
 
 
 def cmd_calibrate_acpi(args) -> None:
-    """Probe ACPI capabilities and generate/update a model profile."""
+    """Probe ACPI capabilities and generate/update a model profile.
+
+    USB-keyed when a Gigabyte keyboard is present; DMI-keyed otherwise (ACPI-only
+    laptops, e.g. GAMING A16) so those models can be supported and contributed.
+    """
     print("GigaMate — ACPI Calibration")
-    print()
-
-    detected = detect_device()
-    if detected is None:
-        print("No Gigabyte USB device detected. A sensor probe is still possible, but a")
-        print("model profile is keyed on the keyboard's USB VID:PID, so nothing can be saved")
-        print("without a detected Gigabyte keyboard.")
-        print()
-        caps = probe_acpi_capabilities()
-        _print_acpi_caps(caps)
-        return
-
-    vid, pid = detected
-    print(f"Detected keyboard: {vid:04X}:{pid:04X}")
-
     print()
     print("Probing ACPI capabilities...")
     caps = probe_acpi_capabilities()
@@ -1048,15 +1220,36 @@ def cmd_calibrate_acpi(args) -> None:
         print("No ACPI interface found. Nothing to save.")
         return
 
-    profile = resolve_profile(vid, pid)
-    if profile is None:
-        model = get_dmi_product_name() or f"{vid:04X}:{pid:04X}"
-        profile = DeviceProfile(
-            vid=vid, pid=pid, name=model, interfaces=[], control_interface=0
-        )
-        print(f"Creating a new ACPI-only profile for: {profile.name}")
+    detected = detect_device()
+    dmi_model = get_dmi_product_name()
+
+    if detected is not None:
+        vid, pid = detected
+        print(f"Detected keyboard: {vid:04X}:{pid:04X}")
+        profile = resolve_profile(vid, pid)
+        if profile is None:
+            profile = DeviceProfile(
+                vid=vid, pid=pid, name=dmi_model or f"{vid:04X}:{pid:04X}",
+                interfaces=[], control_interface=0,
+            )
+            print(f"Creating a new ACPI-only profile for: {profile.name}")
+        else:
+            print(f"Updating existing profile: {profile.name}")
+    elif dmi_model:
+        # No Gigabyte USB keyboard: key the profile on DMI (ACPI-only laptops).
+        print(f"No USB keyboard detected — keying the profile on DMI: {dmi_model}")
+        profile = match_dmi_profile(load_user_dmi_profiles())
+        if profile is None:
+            profile = DeviceProfile(
+                vid=0, pid=0, name=dmi_model, interfaces=[], control_interface=0,
+                dmi=DmiConfig(product_names=[dmi_model]),
+            )
+            print(f"Creating a new DMI-keyed profile for: {profile.name}")
+        else:
+            print(f"Updating existing profile: {profile.name}")
     else:
-        print(f"Updating existing profile: {profile.name}")
+        print("No Gigabyte USB device and no DMI model name detected — nothing can be saved on this system.")
+        return
 
     # Build the ACPI section from what the probe actually detected. Sensors are
     # reliably detectable; power-profile semantics are not, so profile support
@@ -1085,14 +1278,13 @@ def cmd_calibrate_acpi(args) -> None:
         print("⚠️  These controls are NOT verified on your specific unit. On some EC")
         print("    firmwares, profile writes are accepted but do nothing. Enabling this")
         print("    shows profile controls that may have no effect.")
-        ans = input("Enable experimental power profiles for this model? [y/N] ").strip().lower()
+        ans = input("Enable power profiles for this model? [y/N] ").strip().lower()
         if ans in ("y", "yes"):
             profiles_map = {str(k): {"name": v, "desc": ""} for k, v in template.items()}
     elif caps.has_power_profiles:
         print()
         print("The AMW0 interface answers sensor reads, but no documented profile layout is")
         print("known for this model family, so power-profile switching stays DISABLED.")
-        print("Profiles remain hidden until a verified model profile is shipped.")
         print()
 
     profile.acpi = AcpiConfig(
@@ -1110,9 +1302,9 @@ def cmd_calibrate_acpi(args) -> None:
     print(f"\n✅ Profile saved: {path}")
     print()
     if profiles_map:
-        print("Profile switching is now enabled for this model (experimental).")
+        print("Profile switching is now enabled for this model.")
     else:
-        print("Profile switching stays disabled for this model until verified.")
+        print("Profile switching stays disabled for this model.")
     print()
     print("To share with the community:")
     print("  gigamate profile contribute")
@@ -1521,9 +1713,10 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     #   gigamate profile contribute   → contribute
     profile_parser = sub.add_parser("profile", help="Power profile control")
     profile_parser.add_argument("action", nargs="?", default=None,
-                                help="'show', 'contribute', or a profile name/number to set")
+                                help="'show', 'cycle', 'contribute', 'report', "
+                                     "'experimental [on|off|status]', or a profile name/number to set")
     profile_parser.add_argument("name", nargs="?", default=None,
-                                help="Profile name or number (for 'set' action)")
+                                help="Profile name/number (for 'set') or on/off/status (for 'experimental')")
     profile_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     profile_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
 
@@ -1584,6 +1777,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
                                help="MHz cap 0-4000, 'off', or 'status' (default)")
     gpu_mc_parser.add_argument("--probe", action="store_true",
                                help="Report the GPU clock ceiling")
+    gpu_mem_parser = gpu_sub.add_parser("memclock",
+                                        help="Sleep-aware NVIDIA dGPU memory clock pin")
+    gpu_mem_parser.add_argument("value", nargs="?", default="status",
+                                help="MHz pin, 'off', or 'status' (default)")
+    gpu_mem_parser.add_argument("--probe", action="store_true",
+                                help="Report the selectable memory clocks")
     gpu_auto_parser = gpu_sub.add_parser("auto", help="Auto-apply dGPU tuning on boot/wake")
     gpu_auto_parser.add_argument("value", nargs="?", default="status",
                                  help="'on', 'off', or 'status' (default)")
@@ -1658,11 +1857,13 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             cmd_gpu_undervolt(args)
         elif args.gpu_action == "maxclock":
             cmd_gpu_maxclock(args)
+        elif args.gpu_action == "memclock":
+            cmd_gpu_memclock(args)
         elif args.gpu_action == "auto":
             cmd_gpu_auto(args)
         else:
-            print("GPU actions: status, undervolt, maxclock, auto")
-            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu auto off")
+            print("GPU actions: status, undervolt, maxclock, memclock, auto")
+            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu memclock 12001")
             sys.exit(1)
     elif args.command == "hotkeys":
         _dispatch_hotkeys(args)
@@ -1713,6 +1914,11 @@ def _dispatch_profile(args) -> None:
         cmd_profile_cycle(args)
     elif action == "contribute":
         cmd_profile_contribute(args)
+    elif action == "report":
+        cmd_profile_report(args)
+    elif action == "experimental":
+        args.value = args.name or "status"
+        cmd_profile_experimental(args)
     elif action == "show" or action == "":
         cmd_profile_show(args)
     elif action == "set":

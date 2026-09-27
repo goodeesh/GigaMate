@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -18,7 +19,7 @@ from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
 from ...gpu import get_gpu_state, gpu_status_text
-from ...profiles import has_verified_profiles, resolve_profile
+from ...profiles import profile_usable, resolve_model
 from ...system_power import sync_system_power
 
 
@@ -51,10 +52,16 @@ class DashboardPage(QWidget):
         """Resolve the matching model profile (cached; refreshed on reload)."""
         if self._cached_profile is None:
             try:
-                self._cached_profile = resolve_profile()
+                self._cached_profile = resolve_model()
             except Exception:
                 self._cached_profile = None
         return self._cached_profile
+
+    def _config(self) -> dict:
+        try:
+            return load_config()
+        except Exception:
+            return {}
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -99,24 +106,17 @@ class DashboardPage(QWidget):
 
         self.prof_group = QButtonGroup(self)
         self.prof_group.setExclusive(True)
+        self.prof_layout = btn_layout
+        self._btn_ids: list = []
 
-        profiles = [
-            (FanProfile.QUIET, "Quiet"),
-            (FanProfile.BALANCED, "Balanced"),
-            (FanProfile.PERFORMANCE, "Performance"),
-            (FanProfile.GAMING, "Gaming"),
-        ]
-
-        for prof, name in profiles:
-            btn = QPushButton(name)
-            btn.setProperty("class", "ProfileButton")
-            btn.setCheckable(True)
-            btn.setMinimumHeight(48)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _, p=prof: self._select_profile(p))
-            self._profile_buttons[prof] = btn
-            self.prof_group.addButton(btn, prof.value)
-            btn_layout.addWidget(btn)
+        # Shown only for experimental (unconfirmed) models before opt-in.
+        self.btn_enable_experimental = QPushButton("Enable Experimental Profiles")
+        self.btn_enable_experimental.setProperty("class", "ProfileButton")
+        self.btn_enable_experimental.setMinimumHeight(40)
+        self.btn_enable_experimental.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_enable_experimental.clicked.connect(self._on_enable_experimental)
+        self.btn_enable_experimental.setVisible(False)
+        prof_layout.addWidget(self.btn_enable_experimental)
 
         prof_layout.addLayout(btn_layout)
         layout.addWidget(prof_card)
@@ -198,27 +198,79 @@ class DashboardPage(QWidget):
         self._acpi_retry_at = now
         self.acpi_ctrl = AcpiController()
 
-    def _select_profile(self, profile: FanProfile) -> None:
+    def _select_profile(self, profile_id: int) -> None:
         """Switch ACPI profile and sync system/GPU power per user preference."""
         self._ensure_acpi_controller()
+        if not profile_usable(self._model_profile(), self._config()):
+            return
 
         def _mutate(cfg):
-            cfg["acpi_profile"] = profile.value
+            cfg["acpi_profile"] = profile_id
             return cfg
 
         cfg = update_config(_mutate)
 
         if self.acpi_ctrl.available:
-            self.acpi_ctrl.set_profile(profile)
+            self.acpi_ctrl.set_profile(FanProfile(profile_id))
 
         # sync_system_power() also synchronizes GPU power (Dynamic Boost /
         # SmartShift); honour the user's preference like the tray and Settings.
         if cfg.get("sync_system_power", False):
-            sync_system_power(profile.value)
+            sync_system_power(profile_id)
 
-        if profile in self._profile_buttons:
-            self._profile_buttons[profile].setChecked(True)
+        btn = self._profile_buttons.get(profile_id)
+        if btn is not None:
+            btn.setChecked(True)
 
+        self._refresh_telemetry()
+
+    def _rebuild_profile_buttons(self, match, usable: bool) -> None:
+        """(Re)build the profile buttons from the model's declared profile set."""
+        names = match.profile.acpi.profiles if (match is not None and match.profile.acpi) else {}
+        ids = sorted(int(k) for k in names.keys())
+
+        if ids != self._btn_ids:
+            for btn in self._profile_buttons.values():
+                self.prof_group.removeButton(btn)
+                self.prof_layout.removeWidget(btn)
+                btn.deleteLater()
+            self._profile_buttons = {}
+            self._btn_ids = []
+            for pid in ids:
+                label = (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                btn = QPushButton(label)
+                btn.setProperty("class", "ProfileButton")
+                btn.setCheckable(True)
+                btn.setMinimumHeight(48)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda _, p=pid: self._select_profile(p))
+                self.prof_group.addButton(btn, pid)
+                self.prof_layout.addWidget(btn)
+                self._profile_buttons[pid] = btn
+                self._btn_ids.append(pid)
+
+        for btn in self._profile_buttons.values():
+            btn.setEnabled(usable)
+        self.btn_enable_experimental.setVisible(
+            bool(match is not None and match.experimental and not usable))
+
+    def _on_enable_experimental(self) -> None:
+        """One-time consent prompt for experimental (unconfirmed) profiles."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Enable experimental profiles?")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("Profile switching for this model is community-evidenced but "
+                    "unconfirmed — it may do nothing.")
+        box.setInformativeText("Enable it anyway? You can report results with "
+                               "'gigamate profile report'.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            update_config(lambda c: {**c, "experimental_profiles_enabled": True})
+        except Exception:
+            pass
+        self._cached_profile = None
         self._refresh_telemetry()
 
     def _refresh_telemetry(self) -> None:
@@ -233,29 +285,19 @@ class DashboardPage(QWidget):
 
             # Fan count awareness
             caps = self.acpi_ctrl.capabilities
-            # Profile switching is a per-model contract: only enable buttons
-            # when a matching model profile declares it as verified, and only
-            # for the profile ids that model actually defines.
-            model = self._model_profile()
-            verified = has_verified_profiles(model)
-            model_set = (
-                set(int(k) for k in model.acpi.profiles.keys())
-                if verified and model is not None and model.acpi
-                else set()
-            )
-            for prof, btn in self._profile_buttons.items():
-                btn.setEnabled(verified and prof.value in model_set)
-
-            if verified:
+            # Profile switching is a per-model contract: build the buttons from
+            # the model's declared set and gate them on consent.
+            match = self._model_profile()
+            usable = profile_usable(match, self._config())
+            self._rebuild_profile_buttons(match, usable)
+            if match is not None:
                 self.acpi_warning_box.setVisible(False)
             else:
                 self.acpi_warning_box.setVisible(True)
-                self.wb_title.setText("ℹ️ Power profiles not verified for this model")
+                self.wb_title.setText("ℹ️ No profile support for this model")
                 self.wb_desc.setText(
-                    "Profile switching is only enabled on models with a confirmed profile. "
-                    "On this unit the controls may do nothing, so they stay disabled. "
-                    "Run 'gigamate calibrate acpi' to generate a candidate profile."
-                )
+                    "Profile switching is only exposed on models with a matching "
+                    "profile. Run 'gigamate calibrate acpi' to generate one.")
             fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
             fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
             if not caps.has_fan_rpm:
@@ -350,6 +392,7 @@ class DashboardPage(QWidget):
 
             for btn in self._profile_buttons.values():
                 btn.setEnabled(False)
+            self.btn_enable_experimental.setVisible(False)
 
             for sub_name in ("stat_cpu_sub", "stat_fan1_sub", "stat_fan2_sub", "stat_duty_sub"):
                 lbl = self.findChild(QLabel, sub_name)
@@ -370,12 +413,12 @@ class DashboardPage(QWidget):
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
                 gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
-                    gpu_sub.setText("0W")
+                    gpu_sub.setText("Power gate off")
             else:
                 gpu_lbl.setText(f"Active ({gpu.power_state or 'D0'})")
                 gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
-                    gpu_sub.setText("High Performance")
+                    gpu_sub.setText("In use")
 
         # When ACPI telemetry is unavailable the card only carries the GPU
         # tile; hide it entirely if there is no discrete GPU either.
@@ -387,5 +430,5 @@ class DashboardPage(QWidget):
             cfg = load_config()
             current_prof_id = cfg.get("acpi_profile")
 
-        for prof, btn in self._profile_buttons.items():
-            btn.setChecked(current_prof_id == prof.value)
+        for pid, btn in self._profile_buttons.items():
+            btn.setChecked(current_prof_id == pid)

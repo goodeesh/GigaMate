@@ -130,6 +130,7 @@ def _no_real_hardware(monkeypatch, tmp_path):
         acpi_driver_missing=False,
         has_power_profiles=False,
         profile_verified=False,
+        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -154,10 +155,10 @@ def _no_real_hardware(monkeypatch, tmp_path):
     # Model-profile resolution drives the verified-profile gating in the UI;
     # keep it hermetic (no real USB scan) and unverified by default.
     monkeypatch.setattr(
-        "gigamate.ui.pages.dashboard_page.resolve_profile", lambda *a, **k: None, raising=False
+        "gigamate.ui.pages.dashboard_page.resolve_model", lambda *a, **k: None, raising=False
     )
     monkeypatch.setattr(
-        "gigamate.ui.pages.settings_page.resolve_profile", lambda *a, **k: None, raising=False
+        "gigamate.ui.pages.settings_page.resolve_model", lambda *a, **k: None, raising=False
     )
 
     monkeypatch.setattr(

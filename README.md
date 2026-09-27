@@ -24,6 +24,8 @@ Known risks:
   (`0666`). Any local user on the machine can therefore change these settings.
 
 Tested on specific Gigabyte models only. Other models may behave differently.
+Experimental profile support is unconfirmed on your exact unit — it may do
+nothing. Sensor monitoring is unaffected.
 
 ---
 
@@ -46,9 +48,10 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
-- **🧊 Discrete GPU Undervolt & Clock Cap (NVIDIA)** — A V/F-curve offset ("undervolt") and an optional boost-clock cap for the dGPU. Both are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
+- **🧊 Discrete GPU Undervolt & Clock Control (NVIDIA)** — A V/F-curve offset ("undervolt"), an optional boost-clock cap, and an optional memory-clock pin for the dGPU. All three are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center (one **Apply** commits all three) or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
 - **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
+- **🧪 Experimental Model Support** — Community-evidenced Gigabyte models (GIGABYTE GAMING A16/A18 family, AERO X16 family) get profile controls as *Experimental*: shown but disabled until you explicitly enable them once, since they're unconfirmed on your exact unit. One report from a real device promotes a model to Confirmed. See [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
 - **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
 
 ---
@@ -83,18 +86,24 @@ gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
 gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
 gigamate status                  # Full hardware status
-gigamate gpu status              # Show discrete GPU power state
+gigamate gpu status              # Show discrete GPU power state (awake/asleep)
 gigamate gpu undervolt 100       # Undervolt the NVIDIA dGPU (V/F offset, MHz; 0-255)
 gigamate gpu undervolt off       # Reset the dGPU to stock
 gigamate gpu undervolt status    # Show dGPU undervolt state
 gigamate gpu maxclock 2100       # Cap the dGPU boost clock (MHz; 0-4000)
 gigamate gpu maxclock off        # Unlock the dGPU clock
 gigamate gpu maxclock status     # Show dGPU max-clock state
+gigamate gpu memclock --probe    # List the memory clocks this GPU supports
+gigamate gpu memclock 12001      # Pin the dGPU memory clock (MHz)
+gigamate gpu memclock 11001      # Cap the memory clock lower (saves power/heat)
+gigamate gpu memclock off        # Hand the memory clock back to the driver
 gigamate gpu auto off            # Don't auto-apply dGPU tuning on boot/wake
 gigamate gpu auto status         # Show dGPU auto-apply state
 gigamate profile                 # Show current power profile
 gigamate profile gaming          # Switch to Gaming mode
 gigamate profile cycle           # Cycle to next mode + trigger OSD
+gigamate profile experimental on # Enable experimental (unconfirmed) profiles for this model
+gigamate profile report          # Print a paste-able model report (helps confirm models)
 gigamate detect                  # Show keyboard + ACPI info
 gigamate detect --acpi           # Probe ACPI capabilities
 gigamate repair                  # Rebuild + reload the ACPI driver for the running kernel
@@ -119,12 +128,12 @@ gigamate profile contribute         # Print PR instructions to share
 
 No coding required. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-> **Power profiles are only shown on verified models.** GigaMate never exposes
-> profile controls on hardware whose profile switching hasn't been confirmed
-> (an EC can accept a write without acting on it). `gigamate calibrate acpi`
-> generates a candidate profile for your model — sensors are auto-detected, but
-> profile switching stays off until you explicitly confirm it as experimental,
-> and it only unlocks for everyone once the profile is shipped as a built-in.
+> **Profiles are keyed on your model.** GigaMate exposes profile controls only
+> for models with a matching profile. Laptops *without* a Gigabyte USB keyboard
+> (e.g. GIGABYTE GAMING A16) key their profile on DMI via `gigamate calibrate
+> acpi` — no RGB calibration needed. Unconfirmed models ship as **Experimental**
+> (opt-in, may do nothing) rather than being hidden; see
+> [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
 
 ---
 
@@ -172,6 +181,18 @@ updater (`curl … install.sh | bash`), which is not checksum-verified; subseque
 updates use the pinned, checksum-verified updater. GigaMate Center requires
 PyQt6 (installed automatically; on older distros it may come from pip).
 
+### Upgrading from 3.x
+
+Your settings and verified-model behaviour are unchanged. New in 4.0:
+
+- Community-evidenced models (GIGABYTE GAMING A16/A18 family, AERO X16 family)
+  now get profile controls as **Experimental** — disabled until you enable them
+  once (they're unconfirmed on your exact unit).
+- Laptops without a Gigabyte USB keyboard (e.g. GAMING A16) are now supported
+  via DMI-keyed profiles; `gigamate calibrate acpi` works without RGB calibration.
+- `gigamate profile report` prints a paste-able summary to help confirm
+  experimental models.
+
 ---
 
 ## First-run setup
@@ -211,6 +232,25 @@ The **dGPU monitor** reads the NVIDIA GPU's power state from
 plain kernel power-management reads — GigaMate never calls `nvidia-smi`, so
 checking the state does **not** wake the GPU.
 
+GigaMate deliberately does **not** show live GPU metrics (temperature, clocks,
+power, VRAM). Tools such as MangoHud and nvtop already do that well, and on a
+hybrid-graphics laptop every NVML read risks resuming a dGPU the kernel has
+powered down — the documented cause of dGPUs that never sleep. GigaMate shows
+what it is *configured and applied* to do, and otherwise leaves the dGPU alone.
+
+The tuning itself does need NVML, so writes and the few reads it requires go
+through a small privileged helper (`/usr/lib/gigamate/gigamate-dgpu-nvml`,
+invoked via `pkexec`) that performs exactly one operation and exits — an open
+NVML handle would keep the dGPU awake. The watcher service publishes the applied
+state to a runtime state file, which the tray, Center, dashboard and CLI all
+read, so no UI process ever blocks on a privileged call, and every UI path is
+gated on the dGPU being awake (`dgpu_tune.nvml_allowed()`).
+
+The memory clock can only be *pinned* to a clock the GPU already reports
+(`nvmlDeviceGetMaxClockInfo`), never pushed beyond it — on a mobile part that
+makes it a guaranteed-max pin or a power-saving cap, not a true overclock. The
+selector only offers the values the driver enumerates.
+
 Each laptop model is described by a JSON profile defining its RGB colour map
 and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
 
@@ -221,11 +261,45 @@ For details on the USB RGB protocol and ACPI reverse engineering, see
 
 ## Built-in Profiles
 
-| VID:PID | Model |
-|---------|-------|
-| `0414:8105` | Gigabyte Aero X16 (EG61VH) |
+**Verified** (confirmed on real hardware):
 
-User profiles in `~/.config/gigamate/profiles/` override built-ins for the same VID:PID.
+| Key | Match | Model |
+|-----|-------|-------|
+| USB `0414:8105` | Keyboard VID:PID | Gigabyte Aero X16 (EG61VH) |
+
+**Experimental** (community-evidenced, unconfirmed — opt-in per machine, see
+[docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md)):
+
+| Key | Match | Model | Profiles |
+|-----|-------|-------|----------|
+| DMI `product_family: GIGABYTE GAMING` | DMI | Gigabyte GAMING A16 / A18 family | Eco / Balanced / Boost |
+| DMI `product_name prefix: GIGABYTE AERO X16` | DMI | Gigabyte AERO X16 family (all variants) | Quiet / Balanced / Performance / Gaming |
+
+Experimental profiles appear **disabled** until you enable them once (tray menu,
+GigaMate Center, or `gigamate profile experimental on`). Sensors (temps, fan RPM,
+duty) work everywhere the ACPI module loads — the experimental tier only gates
+profile switching.
+
+User profiles in `~/.config/gigamate/profiles/` override built-ins (USB-keyed
+files `{VID}_{PID}.json`; DMI-keyed files `dmi_<slug>.json`).
+
+---
+
+## Experimental Models & Reporting
+
+GigaMate only shows profile controls it can stand behind. For models with strong
+community evidence but no in-house confirmation, controls ship as
+**Experimental**: visible, but disabled until you opt in.
+
+- **Enable:** tray menu → "Enable experimental profiles…", GigaMate Center →
+  Enable button, or `gigamate profile experimental on`
+- **Report what they do on your unit:** `gigamate profile report`, then paste the
+  output in a comment on <https://github.com/goodeesh/GigaMate/issues>. One
+  confirmed report promotes the model to Verified for everyone.
+
+Models with a *different* EC command set (AORUS 2025+, older Aero/AORUS) are
+documented as blocked in [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md)
+until their command sets are implemented.
 
 ---
 

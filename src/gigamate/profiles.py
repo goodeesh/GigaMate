@@ -18,6 +18,18 @@ GIGABYTE_VIDS = {0x0414, 0x1044, 0x04D9}
 OFF_CMD = bytes([0x08, 0x00, 0x01, 0x06, 0x00, 0x01, 0x01, 0xF2])
 
 
+def _parse_hex_id(value) -> int:
+    """Parse a VID/PID from int or hex string; 0 when absent/invalid."""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value), 16)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class AcpiConfig:
     """ACPI capabilities for a specific laptop model.
@@ -33,23 +45,59 @@ class AcpiConfig:
     sensor_labels: Dict[str, str] = field(default_factory=dict)
     profiles: Dict[str, Dict[str, str]] = field(default_factory=dict)
     backend: str = "module"
+    # "verified" (confirmed on real hardware) or "experimental" (community
+    # evidence, unconfirmed — shown only after the user opts in).
+    confidence: str = "verified"
+
+    @property
+    def is_experimental(self) -> bool:
+        return self.confidence == "experimental"
+
+    @property
+    def declares_profiles(self) -> bool:
+        """Whether this model declares a working profile set."""
+        return bool(self.has_power_profiles and self.profiles)
+
+
+@dataclass
+class DmiConfig:
+    """DMI-based model key for laptops without a Gigabyte USB keyboard.
+
+    Matching is exact on ``product_names``/``product_families`` and
+    prefix-based on ``product_name_prefixes`` (e.g. all ``GIGABYTE AERO X16``
+    variants). All matching is additionally gated on the DMI vendor being
+    Gigabyte and the chassis being a laptop.
+    """
+    product_names: List[str] = field(default_factory=list)
+    product_name_prefixes: List[str] = field(default_factory=list)
+    product_families: List[str] = field(default_factory=list)
+
+    @property
+    def empty(self) -> bool:
+        return not (self.product_names or self.product_name_prefixes
+                    or self.product_families)
 
 
 @dataclass
 class DeviceProfile:
-    vid: int
-    pid: int
-    name: str
+    vid: int = 0
+    pid: int = 0
+    name: str = ""
     interfaces: List[int] = field(default_factory=lambda: [1, 3])
     control_interface: int = 3
     colour_map: Dict[str, Dict[int, Tuple[int, int]]] = field(default_factory=dict)
     acpi: Optional[AcpiConfig] = None
     hotkeys: Dict[str, dict] = field(default_factory=dict)
+    dmi: Optional[DmiConfig] = None
     version: int = 1
 
     @property
     def id(self) -> Tuple[int, int]:
         return (self.vid, self.pid)
+
+    @property
+    def has_dmi(self) -> bool:
+        return self.dmi is not None and not self.dmi.empty
 
     @property
     def colour_names(self) -> List[str]:
@@ -83,12 +131,19 @@ class DeviceProfile:
         result = {
             "version": self.version,
             "name": self.name,
-            "vid": f"0x{self.vid:04X}",
-            "pid": f"0x{self.pid:04X}",
-            "interfaces": list(self.interfaces),
-            "control_interface": self.control_interface,
-            "colour_map": cmap,
         }
+        if self.vid or self.pid:
+            result["vid"] = f"0x{self.vid:04X}"
+            result["pid"] = f"0x{self.pid:04X}"
+        if self.has_dmi:
+            result["dmi"] = {
+                "product_names": list(self.dmi.product_names),
+                "product_name_prefixes": list(self.dmi.product_name_prefixes),
+                "product_families": list(self.dmi.product_families),
+            }
+        result["interfaces"] = list(self.interfaces)
+        result["control_interface"] = self.control_interface
+        result["colour_map"] = cmap
         if self.acpi is not None:
             result["acpi"] = {
                 "has_fan_control": self.acpi.has_fan_control,
@@ -99,6 +154,7 @@ class DeviceProfile:
                 "sensor_labels": dict(self.acpi.sensor_labels),
                 "profiles": dict(self.acpi.profiles),
                 "backend": self.acpi.backend,
+                "confidence": self.acpi.confidence,
             }
         if self.hotkeys:
             result["hotkeys"] = dict(self.hotkeys)
@@ -106,8 +162,8 @@ class DeviceProfile:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DeviceProfile":
-        vid = d["vid"] if isinstance(d["vid"], int) else int(d["vid"], 16)
-        pid = d["pid"] if isinstance(d["pid"], int) else int(d["pid"], 16)
+        vid = _parse_hex_id(d.get("vid"))
+        pid = _parse_hex_id(d.get("pid"))
         cmap = {}
         for colour, levels in d.get("colour_map", {}).items():
             cmap[colour] = {int(k): tuple(v) for k, v in levels.items()}
@@ -124,6 +180,16 @@ class DeviceProfile:
                 sensor_labels=dict(a.get("sensor_labels", {})),
                 profiles=dict(a.get("profiles", {})),
                 backend=str(a.get("backend", "module")),
+                confidence=str(a.get("confidence", "verified")),
+            )
+
+        dmi = None
+        if "dmi" in d and isinstance(d["dmi"], dict):
+            dm = d["dmi"]
+            dmi = DmiConfig(
+                product_names=list(dm.get("product_names", [])),
+                product_name_prefixes=list(dm.get("product_name_prefixes", [])),
+                product_families=list(dm.get("product_families", [])),
             )
 
         return cls(
@@ -136,35 +202,54 @@ class DeviceProfile:
             colour_map=cmap,
             acpi=acpi,
             hotkeys=dict(d.get("hotkeys", {})),
+            dmi=dmi,
         )
 
 
-def load_builtin_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
-    profiles = {}
-    if not BUILTIN_DATA_DIR.is_dir():
-        return profiles
-    for path in sorted(BUILTIN_DATA_DIR.glob("*.json")):
+def _load_profiles_from(directory: Path, kind: str,
+                        dmi: bool) -> List[DeviceProfile]:
+    """Load profiles from a directory. When ``dmi`` is False, USB profiles only
+    (``dmi_*.json`` files are skipped); when True, DMI profiles only."""
+    found: List[DeviceProfile] = []
+    if not directory.is_dir():
+        return found
+    for path in sorted(directory.glob("*.json")):
+        is_dmi_file = path.name.startswith("dmi_")
+        if is_dmi_file != dmi:
+            continue
         try:
             data = json.loads(path.read_text())
             profile = DeviceProfile.from_dict(data)
-            profiles[profile.id] = profile
         except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
-            print(f"Warning: skipping built-in profile {path.name}: {exc}", file=sys.stderr)
-    return profiles
+            print(f"Warning: skipping {kind} profile {path.name}: {exc}", file=sys.stderr)
+            continue
+        found.append(profile)
+    return found
+
+
+def _usb_dict(profiles: List[DeviceProfile]) -> Dict[Tuple[int, int], DeviceProfile]:
+    """Key USB profiles by (vid, pid), skipping keyless/DMI-only entries."""
+    out: Dict[Tuple[int, int], DeviceProfile] = {}
+    for profile in profiles:
+        if profile.vid or profile.pid:
+            out[profile.id] = profile
+    return out
+
+
+def load_builtin_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
+    return _usb_dict(_load_profiles_from(BUILTIN_DATA_DIR, "built-in", dmi=False))
 
 
 def load_user_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
-    profiles = {}
-    if not USER_PROFILES_DIR.is_dir():
-        return profiles
-    for path in sorted(USER_PROFILES_DIR.glob("*.json")):
-        try:
-            data = json.loads(path.read_text())
-            profile = DeviceProfile.from_dict(data)
-            profiles[profile.id] = profile
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError) as exc:
-            print(f"Warning: skipping user profile {path.name}: {exc}", file=sys.stderr)
-    return profiles
+    return _usb_dict(_load_profiles_from(USER_PROFILES_DIR, "user", dmi=False))
+
+
+def load_builtin_dmi_profiles() -> List[DeviceProfile]:
+    return _load_profiles_from(BUILTIN_DATA_DIR, "built-in", dmi=True)
+
+
+def load_user_dmi_profiles() -> List[DeviceProfile]:
+    return _load_profiles_from(USER_PROFILES_DIR, "user", dmi=True)
 
 
 def all_profiles() -> Dict[Tuple[int, int], DeviceProfile]:
@@ -299,13 +384,155 @@ def has_verified_profiles(profile: Optional[DeviceProfile]) -> bool:
     )
 
 
+# Gigabyte DMI vendor tokens and desktop chassis types (mirrors capabilities.py,
+# which imports from this module — keep in sync).
+_GIGABYTE_VENDOR_TOKENS = ("GIGABYTE", "GIGA-BYTE", "AORUS")
+_DESKTOP_CHASSIS = {3, 4, 5, 6, 7, 17, 23, 24}
+
+
+def is_gigabyte_laptop_dmi() -> bool:
+    """Whether DMI identifies a Gigabyte *laptop* (not a desktop board)."""
+    vendor = (get_dmi_vendor() or "").upper()
+    if not any(token in vendor for token in _GIGABYTE_VENDOR_TOKENS):
+        return False
+    return get_dmi_chassis_type() not in _DESKTOP_CHASSIS
+
+
+def _dmi_name_match(profile: DeviceProfile, product_name: str) -> bool:
+    dmi = profile.dmi
+    if dmi is None:
+        return False
+    if product_name and product_name in dmi.product_names:
+        return True
+    return bool(product_name) and any(
+        product_name.startswith(prefix) for prefix in dmi.product_name_prefixes)
+
+
+def _dmi_family_match(profile: DeviceProfile, product_family: str) -> bool:
+    dmi = profile.dmi
+    if dmi is None or not product_family:
+        return False
+    return product_family in dmi.product_families
+
+
+def match_dmi_profile(profiles: Optional[List[DeviceProfile]] = None,
+                      product_name: Optional[str] = None,
+                      product_family: Optional[str] = None) -> Optional[DeviceProfile]:
+    """Return the best DMI-keyed profile match, or None.
+
+    Specificity first: an exact ``product_name`` / prefix match beats a
+    ``product_family`` match. ``product_name``/``product_family`` default to the
+    sysfs values.
+    """
+    profiles = profiles or []
+    if product_name is None:
+        product_name = get_dmi_product_name() or ""
+    if product_family is None:
+        product_family = get_dmi_product_family() or ""
+    for profile in profiles:
+        if _dmi_name_match(profile, product_name):
+            return profile
+    for profile in profiles:
+        if _dmi_family_match(profile, product_family):
+            return profile
+    return None
+
+
+def _best_dmi_profile(profiles: List[DeviceProfile]) -> Optional[DeviceProfile]:
+    """Most specific DMI match within a candidate group (see match_dmi_profile)."""
+    return match_dmi_profile(profiles)
+
+
+@dataclass
+class ModelMatch:
+    """Resolved model profile that declares a working profile set."""
+    profile: DeviceProfile
+    source: str        # "user-usb" | "builtin-usb" | "user-dmi" | "builtin-dmi"
+    experimental: bool
+
+    @property
+    def name(self) -> str:
+        return self.profile.name
+
+    @property
+    def clean_name(self) -> str:
+        """Profile name without a trailing "— experimental" suffix."""
+        return self.profile.name.split("—")[0].strip()
+
+
+def resolve_model(vid: Optional[int] = None,
+                  pid: Optional[int] = None) -> Optional[ModelMatch]:
+    """Resolve the model profile that gates power-profile switching.
+
+    Precedence: user USB → built-in USB → user DMI → built-in DMI. The first
+    entry that *declares* a profile set wins for ACPI; a USB-keyed profile with
+    no declared ACPI never suppresses a later DMI profile's profiles. RGB
+    resolution is separate (``resolve_profile``). Returns None when no matching
+    profile declares profiles.
+    """
+    if vid is None or pid is None:
+        detected = detect_device()
+        if detected is not None:
+            vid, pid = detected
+
+    candidates: List[Tuple[str, DeviceProfile]] = []
+    if vid and pid:
+        user_usb = load_user_profiles().get((vid, pid))
+        if user_usb is not None:
+            candidates.append(("user-usb", user_usb))
+        builtin_usb = load_builtin_profiles().get((vid, pid))
+        if builtin_usb is not None:
+            candidates.append(("builtin-usb", builtin_usb))
+    if is_gigabyte_laptop_dmi():
+        user_dmi = _best_dmi_profile(load_user_dmi_profiles())
+        if user_dmi is not None:
+            candidates.append(("user-dmi", user_dmi))
+        builtin_dmi = _best_dmi_profile(load_builtin_dmi_profiles())
+        if builtin_dmi is not None:
+            candidates.append(("builtin-dmi", builtin_dmi))
+
+    for source, profile in candidates:
+        if has_verified_profiles(profile):
+            return ModelMatch(profile=profile, source=source,
+                              experimental=bool(profile.acpi and profile.acpi.is_experimental))
+    return None
+
+
+def experimental_profiles_enabled(cfg: Optional[dict]) -> bool:
+    """Whether the user has opted into experimental (unconfirmed) profiles."""
+    try:
+        return bool((cfg or {}).get("experimental_profiles_enabled", False))
+    except Exception:
+        return False
+
+
+def profile_usable(match: Optional[ModelMatch], cfg: Optional[dict]) -> bool:
+    """Whether profile switching may be offered for this match under ``cfg``."""
+    if match is None:
+        return False
+    if not match.experimental:
+        return True
+    return experimental_profiles_enabled(cfg)
+
+
+def _profile_filename(profile: DeviceProfile) -> str:
+    """Filename for a user profile: DMI-keyed files use the dmi_ prefix."""
+    if profile.has_dmi and not (profile.vid or profile.pid):
+        slug = "".join(
+            c if c.isalnum() else "_"
+            for c in (profile.name or "model").lower()
+        ).strip("_")
+        return f"dmi_{slug or 'model'}.json"
+    return f"{profile.vid:04X}_{profile.pid:04X}.json"
+
+
 def save_user_profile(profile: DeviceProfile) -> Path:
     """Persist a user profile atomically after validation."""
     errors = validate_profile(profile)
     if errors:
         raise ValueError("Invalid profile: " + "; ".join(errors))
     USER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-    path = USER_PROFILES_DIR / f"{profile.vid:04X}_{profile.pid:04X}.json"
+    path = USER_PROFILES_DIR / _profile_filename(profile)
     tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
     try:
         tmp.write_text(json.dumps(profile.to_dict(), indent=2) + "\n", encoding="utf-8")
@@ -329,11 +556,18 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
     if not profile.name:
         errors.append("Profile name is empty")
 
+    has_usb_key = bool(profile.vid or profile.pid)
+    if not has_usb_key and not profile.has_dmi:
+        errors.append("Profile needs a USB (vid/pid) or a DMI key")
+
     if not (0x0000 <= profile.vid <= 0xFFFF):
         errors.append(f"Invalid VID: {profile.vid:04X}")
 
     if not (0x0000 <= profile.pid <= 0xFFFF):
         errors.append(f"Invalid PID: {profile.pid:04X}")
+
+    if profile.has_rgb and not has_usb_key:
+        errors.append("RGB profiles require a USB vid/pid")
 
     if profile.has_rgb and not profile.interfaces:
         errors.append("No USB interfaces specified")
@@ -373,6 +607,10 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
                     errors.append(f"ACPI profile ID '{pid_str}' is not a valid integer")
                 if "name" not in acpi.profiles[pid_str]:
                     errors.append(f"ACPI profile {pid_str} missing 'name' field")
+        if acpi.confidence not in ("verified", "experimental"):
+            errors.append(f"Unknown ACPI confidence: {acpi.confidence}")
+        if acpi.is_experimental and not acpi.declares_profiles:
+            errors.append("Experimental profiles require has_power_profiles and a profiles set")
         if acpi.backend not in ("module", "acpi_call"):
             errors.append(f"Unknown ACPI backend: {acpi.backend}")
 

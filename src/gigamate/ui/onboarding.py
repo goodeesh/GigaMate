@@ -240,9 +240,10 @@ class _PowerPage(QWizardPage):
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        # System power-profile sync only makes sense when a verified model
-        # profile exists to map from; without one there is nothing to sync.
-        supported = bool(w.caps.profile_verified)
+        # System power-profile sync only makes sense when a usable model
+        # profile exists to map from; experimental (unconfirmed) models are not
+        # offered here (they require explicit opt-in).
+        supported = bool(w.caps.profile_verified and not w.caps.profile_experimental)
         self.sync_chk.setChecked(bool(cfg.get("sync_system_power", False)))
         self.sync_chk.setEnabled(supported)
         if supported:
@@ -311,7 +312,7 @@ class OnboardingWizard(QWizard):
             if caps.charge_limit_supported:
                 cfg["charge_limit_enabled"] = self.p_battery.enable_chk.isChecked()
                 cfg["charge_limit"] = int(self.p_battery.limit_slider.value())
-            if caps.profile_verified:
+            if caps.profile_verified and not caps.profile_experimental:
                 cfg["sync_system_power"] = self.p_power.sync_chk.isChecked()
                 if cfg["sync_system_power"] and cfg.get("acpi_profile") is None:
                     # Sync needs a fan profile to map from; Balanced by default.

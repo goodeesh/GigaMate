@@ -63,7 +63,15 @@ DEFAULT_CONFIG = {
     # Max (boost) clock cap in MHz: 0 = unlocked. Applied only while awake.
     "dgpu_max_clock_enabled": False,
     "dgpu_max_clock_mhz": 0,
+    # Memory-clock pin in MHz: 0 = driver default. Like the core cap this can
+    # only select a clock the GPU supports, so it pins or caps rather than
+    # overclocking. Applied only while the dGPU is awake.
+    "dgpu_mem_clock_enabled": False,
+    "dgpu_mem_clock_mhz": 0,
     "sync_system_power": False,
+    # Opt-in consent for experimental (community-evidenced, unconfirmed) model
+    # profiles. Unconsented experimental profiles are shown but disabled.
+    "experimental_profiles_enabled": False,
     "last_brightness": 2,
     # Set once the first-run setup has been shown (so it never nags again).
     "onboarding_complete": False,
@@ -203,6 +211,8 @@ def load():
             data["idle_off_enabled"] = bool(data["idle_off_enabled"])
         if "sync_system_power" in data:
             data["sync_system_power"] = bool(data["sync_system_power"])
+        if "experimental_profiles_enabled" in data:
+            data["experimental_profiles_enabled"] = bool(data["experimental_profiles_enabled"])
         if "startup_apply" in data:
             data["startup_apply"] = bool(data["startup_apply"])
         if "charge_limit" in data:
@@ -231,6 +241,10 @@ def load():
                 data["dgpu_max_clock_mhz"] = mc if 0 <= mc <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
             except (ValueError, TypeError):
                 data["dgpu_max_clock_mhz"] = DEFAULT_CONFIG["dgpu_max_clock_mhz"]
+        if "dgpu_mem_clock_enabled" in data:
+            data["dgpu_mem_clock_enabled"] = bool(data["dgpu_mem_clock_enabled"])
+        if "dgpu_mem_clock_mhz" in data:
+            data["dgpu_mem_clock_mhz"] = _coerce_dgpu_mem_clock(data["dgpu_mem_clock_mhz"])
         if "acpi_profile" in data:
             try:
                 prof = int(data["acpi_profile"])
@@ -301,6 +315,15 @@ def _coerce_dgpu_max_clock(value) -> int:
     except (ValueError, TypeError):
         return DEFAULT_CONFIG["dgpu_max_clock_mhz"]
     return v if 0 <= v <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
+
+
+def _coerce_dgpu_mem_clock(value) -> int:
+    """Return a valid 0..32000 dGPU memory-clock pin (MHz), else the default."""
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["dgpu_mem_clock_mhz"]
+    return v if 0 <= v <= 32000 else DEFAULT_CONFIG["dgpu_mem_clock_mhz"]
 
 
 def _open_config_lock():
@@ -399,7 +422,12 @@ def _write_config(config):
         "dgpu_max_clock_enabled": bool(config.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"])),
         "dgpu_max_clock_mhz": _coerce_dgpu_max_clock(
             config.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"])),
+        "dgpu_mem_clock_enabled": bool(config.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"])),
+        "dgpu_mem_clock_mhz": _coerce_dgpu_mem_clock(
+            config.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
+        "experimental_profiles_enabled": bool(config.get(
+            "experimental_profiles_enabled", DEFAULT_CONFIG["experimental_profiles_enabled"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
         "hotkey_overrides": _sanitize_hotkey_overrides(config.get("hotkey_overrides")),
@@ -415,7 +443,9 @@ def _write_config(config):
 
     # Preserve keys written by a newer version so a downgrade-then-save does
     # not silently discard them, while dropping known obsolete keys.
-    _LEGACY_KEYS_TO_DROP = {"vid", "pid"}
+    # "dgpu_telemetry" belonged to the removed live-telemetry feature; dropping
+    # it here cleans the key out of existing config files on the next save.
+    _LEGACY_KEYS_TO_DROP = {"vid", "pid", "dgpu_telemetry"}
     existing = _read_json(CONFIG_FILE)
     if isinstance(existing, dict):
         for key, value in existing.items():
