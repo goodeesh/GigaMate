@@ -63,11 +63,10 @@ DEFAULT_CONFIG = {
     # Max (boost) clock cap in MHz: 0 = unlocked. Applied only while awake.
     "dgpu_max_clock_enabled": False,
     "dgpu_max_clock_mhz": 0,
-    # Memory-clock pin in MHz: 0 = driver default. Like the core cap this can
-    # only select a clock the GPU supports, so it pins or caps rather than
-    # overclocking. Applied only while the dGPU is awake.
-    "dgpu_mem_clock_enabled": False,
-    "dgpu_mem_clock_mhz": 0,
+    # Memory-clock V/F offset in MHz: signed, 0 = stock. Positive overclocks the
+    # memory clock, negative underclocks it. Applied only while the dGPU is awake.
+    "dgpu_mem_offset_enabled": False,
+    "dgpu_mem_offset_mhz": 0,
     "sync_system_power": False,
     # Opt-in consent for experimental (community-evidenced, unconfirmed) model
     # profiles. Unconsented experimental profiles are shown but disabled.
@@ -241,10 +240,10 @@ def load():
                 data["dgpu_max_clock_mhz"] = mc if 0 <= mc <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
             except (ValueError, TypeError):
                 data["dgpu_max_clock_mhz"] = DEFAULT_CONFIG["dgpu_max_clock_mhz"]
-        if "dgpu_mem_clock_enabled" in data:
-            data["dgpu_mem_clock_enabled"] = bool(data["dgpu_mem_clock_enabled"])
-        if "dgpu_mem_clock_mhz" in data:
-            data["dgpu_mem_clock_mhz"] = _coerce_dgpu_mem_clock(data["dgpu_mem_clock_mhz"])
+        if "dgpu_mem_offset_enabled" in data:
+            data["dgpu_mem_offset_enabled"] = bool(data["dgpu_mem_offset_enabled"])
+        if "dgpu_mem_offset_mhz" in data:
+            data["dgpu_mem_offset_mhz"] = _coerce_dgpu_mem_offset(data["dgpu_mem_offset_mhz"])
         if "acpi_profile" in data:
             try:
                 prof = int(data["acpi_profile"])
@@ -317,13 +316,13 @@ def _coerce_dgpu_max_clock(value) -> int:
     return v if 0 <= v <= 4000 else DEFAULT_CONFIG["dgpu_max_clock_mhz"]
 
 
-def _coerce_dgpu_mem_clock(value) -> int:
-    """Return a valid 0..32000 dGPU memory-clock pin (MHz), else the default."""
+def _coerce_dgpu_mem_offset(value) -> int:
+    """Return a valid -1000..2000 dGPU memory-clock offset (MHz), else the default."""
     try:
         v = int(value)
     except (ValueError, TypeError):
-        return DEFAULT_CONFIG["dgpu_mem_clock_mhz"]
-    return v if 0 <= v <= 32000 else DEFAULT_CONFIG["dgpu_mem_clock_mhz"]
+        return DEFAULT_CONFIG["dgpu_mem_offset_mhz"]
+    return v if -1000 <= v <= 2000 else DEFAULT_CONFIG["dgpu_mem_offset_mhz"]
 
 
 def _open_config_lock():
@@ -422,9 +421,9 @@ def _write_config(config):
         "dgpu_max_clock_enabled": bool(config.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"])),
         "dgpu_max_clock_mhz": _coerce_dgpu_max_clock(
             config.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"])),
-        "dgpu_mem_clock_enabled": bool(config.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"])),
-        "dgpu_mem_clock_mhz": _coerce_dgpu_mem_clock(
-            config.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"])),
+        "dgpu_mem_offset_enabled": bool(config.get("dgpu_mem_offset_enabled", DEFAULT_CONFIG["dgpu_mem_offset_enabled"])),
+        "dgpu_mem_offset_mhz": _coerce_dgpu_mem_offset(
+            config.get("dgpu_mem_offset_mhz", DEFAULT_CONFIG["dgpu_mem_offset_mhz"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "experimental_profiles_enabled": bool(config.get(
             "experimental_profiles_enabled", DEFAULT_CONFIG["experimental_profiles_enabled"])),
@@ -445,7 +444,8 @@ def _write_config(config):
     # not silently discard them, while dropping known obsolete keys.
     # "dgpu_telemetry" belonged to the removed live-telemetry feature; dropping
     # it here cleans the key out of existing config files on the next save.
-    _LEGACY_KEYS_TO_DROP = {"vid", "pid", "dgpu_telemetry"}
+    _LEGACY_KEYS_TO_DROP = {"vid", "pid", "dgpu_telemetry",
+                             "dgpu_mem_clock_enabled", "dgpu_mem_clock_mhz"}
     existing = _read_json(CONFIG_FILE)
     if isinstance(existing, dict):
         for key, value in existing.items():

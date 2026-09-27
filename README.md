@@ -48,7 +48,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
-- **🧊 Discrete GPU Undervolt & Clock Control (NVIDIA)** — A V/F-curve offset ("undervolt"), an optional boost-clock cap, and an optional memory-clock pin for the dGPU. All three are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center (one **Apply** commits all three) or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
+- **🧊 Discrete GPU Undervolt & Clock Control (NVIDIA)** — A V/F-curve offset ("undervolt"), an optional boost-clock cap, and an optional signed **memory-clock offset** (overclock/underclock) for the dGPU. All three are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center (one **Apply** commits all three) or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
 - **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
 - **🧪 Experimental Model Support** — Community-evidenced Gigabyte models (GIGABYTE GAMING A16/A18 family, AERO X16 family) get profile controls as *Experimental*: shown but disabled until you explicitly enable them once, since they're unconfirmed on your exact unit. One report from a real device promotes a model to Confirmed. See [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
@@ -93,10 +93,10 @@ gigamate gpu undervolt status    # Show dGPU undervolt state
 gigamate gpu maxclock 2100       # Cap the dGPU boost clock (MHz; 0-4000)
 gigamate gpu maxclock off        # Unlock the dGPU clock
 gigamate gpu maxclock status     # Show dGPU max-clock state
-gigamate gpu memclock --probe    # List the memory clocks this GPU supports
-gigamate gpu memclock 12001      # Pin the dGPU memory clock (MHz)
-gigamate gpu memclock 11001      # Cap the memory clock lower (saves power/heat)
-gigamate gpu memclock off        # Hand the memory clock back to the driver
+gigamate gpu memoffset --probe   # Report whether the memory-clock offset API is available
+gigamate gpu memoffset 300       # Overclock the memory clock by +300 MHz
+gigamate gpu memoffset -200      # Underclock the memory clock by -200 MHz (saves power/heat)
+gigamate gpu memoffset off       # Return the memory clock to stock
 gigamate gpu auto off            # Don't auto-apply dGPU tuning on boot/wake
 gigamate gpu auto status         # Show dGPU auto-apply state
 gigamate profile                 # Show current power profile

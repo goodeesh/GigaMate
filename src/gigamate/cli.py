@@ -8,7 +8,7 @@ Usage:
     gigamate rgb calibrate                     Interactive RGB calibration
     gigamate status                            Show hardware status
     gigamate gpu status                        Show discrete GPU power state
-    gigamate gpu memclock 12001                Pin the dGPU memory clock (MHz)
+    gigamate gpu memoffset 300               Memory-clock V/F offset (MHz; + = overclock)
     gigamate profile [name]                    Show/set power profile
     gigamate profile contribute                Pull Request instructions
     gigamate detect [--acpi]                   Detect hardware
@@ -397,7 +397,7 @@ def _dgpu_status_with_applied(dgpu_tune, st):
     if mx is not None:
         st["max_clock_mhz"] = mx
     if mem is not None:
-        st["mem_clock_mhz"] = mem
+        st["mem_offset_mhz"] = mem
     st["applied_offset"] = off
     st["applied_max"] = mx
     st["applied_mem"] = mem
@@ -435,13 +435,13 @@ def cmd_gpu_undervolt(args) -> None:
         print(f"  undervolt:   {uv}")
         cap = int(st.get("desired_max_clock") or 0)
         print(f"  max clock:   {('cap ' + str(cap) + ' MHz') if cap else 'off (unlocked)'}")
-        mem = int(st.get("desired_mem_clock") or 0)
-        print(f"  memory clock:{(' ' + str(mem) + ' MHz') if mem else ' off (driver default)'}")
+        mem = int(st.get("desired_mem_offset") or 0)
+        print(f"  memory offset:{(' ' + f'{mem:+d} MHz') if mem else ' off (stock)'}")
         print(f"  auto-apply:  {'on' if st.get('auto', True) else 'off (manual)'}")
         print(f"  applied:     {st.get('applied')}"
               + (f" (offset +{st.get('offset_mhz')} MHz)" if st.get('offset_mhz') is not None else "")
               + (f" (cap {st.get('max_clock_mhz')} MHz)" if st.get('max_clock_mhz') else "")
-              + (f" (mem {st.get('mem_clock_mhz')} MHz)" if st.get('mem_clock_mhz') else ""))
+              + (f" (mem offset {st.get('mem_offset_mhz'):+d} MHz)" if st.get('mem_offset_mhz') else ""))
         if st.get("last_error"):
             print(f"  last error:  {st['last_error']}")
         holders = dgpu_tune.wake_holders()
@@ -519,19 +519,17 @@ def cmd_gpu_maxclock(args) -> None:
     print(f"dGPU max clock: cap {mhz} MHz" if mhz else "dGPU max clock: off (unlocked)")
 
 
-def cmd_gpu_memclock(args) -> None:
-    """Sleep-aware NVIDIA dGPU memory-clock pin."""
+def cmd_gpu_memoffset(args) -> None:
+    """Sleep-aware NVIDIA dGPU memory-clock V/F offset (overclock/underclock)."""
     from . import dgpu_tune
 
     if getattr(args, "probe", False):
         res = dgpu_tune.probe(force=True)
-        print("GigaMate — dGPU memory clock probe")
+        print("GigaMate — dGPU memory-clock offset probe")
         print(f"  supported:   {bool(res.get('supported'))}")
         print(f"  device:      {res.get('device') or '—'}")
         print(f"  max clock:   {res.get('mem_max_clock_mhz') or '—'} MHz")
-        clocks = res.get("mem_supported_clocks") or []
-        print(f"  selectable:  {', '.join(str(c) for c in clocks) + ' MHz' if clocks else '—'}")
-        print(f"  lock API:    {'present' if res.get('mem_lock_api') else 'missing'}")
+        print(f"  offset API:  {'present' if res.get('mem_offset_api') else 'missing'}")
         if not dgpu_tune.helper_is_current():
             print("  warning:     installed helper is out of date — re-run ./install.sh")
         if res.get("error"):
@@ -544,15 +542,16 @@ def cmd_gpu_memclock(args) -> None:
         dgpu_tune.watcher.load_desired_from_config()
         dgpu_tune.watcher.tick()
         st = _dgpu_status_with_applied(dgpu_tune, dgpu_tune.watcher.status())
-        mem = int(st.get("desired_mem_clock") or 0)
-        print("GigaMate — dGPU memory clock")
+        mem = int(st.get("desired_mem_offset") or 0)
+        print("GigaMate — dGPU memory-clock offset")
         print()
         print(f"  device:      {st.get('device') or '—'}")
         print(f"  dGPU state:  {st.get('runtime') or '—'} ({st.get('power_state') or '—'})")
-        print(f"  selectable:  {', '.join(str(c) for c in dgpu_tune.mem_clock_choices()) or '—'}")
-        print(f"  configured:  {('pin ' + str(mem) + ' MHz') if mem else 'off (driver default)'}")
+        print(f"  offset API:  {'present' if dgpu_tune.probe().get('mem_offset_api') else 'missing'}")
+        print(f"  range:       {dgpu_tune.MEM_OFFSET_MIN_MHZ:+d}..{dgpu_tune.MEM_OFFSET_MAX_MHZ:+d} MHz")
+        print(f"  configured:  {f'{mem:+d} MHz' if mem else 'off (stock)'}")
         print(f"  applied:     {st.get('applied')}"
-              + (f" (mem {st.get('mem_clock_mhz')} MHz)" if st.get('mem_clock_mhz') else ""))
+              + (f" (mem offset {st.get('mem_offset_mhz'):+d} MHz)" if st.get('mem_offset_mhz') else ""))
         if st.get("last_error"):
             print(f"  last error:  {st['last_error']}")
         if not dgpu_tune.helper_is_current():
@@ -560,26 +559,24 @@ def cmd_gpu_memclock(args) -> None:
         return
 
     if str(value).lower() in ("off", "unlock", "reset", "stock", "auto"):
-        dgpu_tune.set_desired_config(mem_enabled=False, mem_clock=0)
-        print("dGPU memory clock: off (driver default)")
+        dgpu_tune.set_desired_config(mem_enabled=False, mem_offset=0)
+        print("dGPU memory offset: off (stock)")
         return
 
     try:
         mhz = int(str(value))
     except (TypeError, ValueError):
-        choices = ", ".join(str(c) for c in dgpu_tune.mem_clock_choices())
-        print(f"Invalid value: use a MHz value{f' ({choices})' if choices else ''}, 'off', or 'status'")
+        print(f"Invalid value: use a signed MHz offset "
+              f"({dgpu_tune.MEM_OFFSET_MIN_MHZ}..{dgpu_tune.MEM_OFFSET_MAX_MHZ}), 'off', or 'status'")
         sys.exit(2)
 
-    choices = dgpu_tune.mem_clock_choices()
-    if choices and mhz not in choices:
-        print(f"Unsupported memory clock {mhz} MHz. This GPU reports: "
-              f"{', '.join(str(c) for c in choices)} MHz")
+    if not (dgpu_tune.MEM_OFFSET_MIN_MHZ <= mhz <= dgpu_tune.MEM_OFFSET_MAX_MHZ):
+        print(f"Offset {mhz} MHz is out of range "
+              f"({dgpu_tune.MEM_OFFSET_MIN_MHZ}..{dgpu_tune.MEM_OFFSET_MAX_MHZ}).")
         sys.exit(2)
 
-    mhz = max(0, min(dgpu_tune.MAX_MEM_CLOCK_MHZ, mhz))
-    dgpu_tune.set_desired_config(mem_enabled=mhz > 0, mem_clock=mhz)
-    print(f"dGPU memory clock: pin {mhz} MHz" if mhz else "dGPU memory clock: off (driver default)")
+    dgpu_tune.set_desired_config(mem_enabled=mhz != 0, mem_offset=mhz)
+    print(f"dGPU memory offset: {mhz:+d} MHz" if mhz else "dGPU memory offset: off (stock)")
 
 
 def cmd_gpu_auto(args) -> None:
@@ -1777,12 +1774,12 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
                                help="MHz cap 0-4000, 'off', or 'status' (default)")
     gpu_mc_parser.add_argument("--probe", action="store_true",
                                help="Report the GPU clock ceiling")
-    gpu_mem_parser = gpu_sub.add_parser("memclock",
-                                        help="Sleep-aware NVIDIA dGPU memory clock pin")
+    gpu_mem_parser = gpu_sub.add_parser("memoffset",
+                                        help="Sleep-aware NVIDIA dGPU memory-clock V/F offset (overclock)")
     gpu_mem_parser.add_argument("value", nargs="?", default="status",
-                                help="MHz pin, 'off', or 'status' (default)")
+                                help="signed MHz offset (-1000..2000), 'off', or 'status' (default)")
     gpu_mem_parser.add_argument("--probe", action="store_true",
-                                help="Report the selectable memory clocks")
+                                help="Report whether the memory-clock offset API is available")
     gpu_auto_parser = gpu_sub.add_parser("auto", help="Auto-apply dGPU tuning on boot/wake")
     gpu_auto_parser.add_argument("value", nargs="?", default="status",
                                  help="'on', 'off', or 'status' (default)")
@@ -1857,13 +1854,13 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             cmd_gpu_undervolt(args)
         elif args.gpu_action == "maxclock":
             cmd_gpu_maxclock(args)
-        elif args.gpu_action == "memclock":
-            cmd_gpu_memclock(args)
+        elif args.gpu_action == "memoffset":
+            cmd_gpu_memoffset(args)
         elif args.gpu_action == "auto":
             cmd_gpu_auto(args)
         else:
-            print("GPU actions: status, undervolt, maxclock, memclock, auto")
-            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu memclock 12001")
+            print("GPU actions: status, undervolt, maxclock, memoffset, auto")
+            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu memoffset 300")
             sys.exit(1)
     elif args.command == "hotkeys":
         _dispatch_hotkeys(args)

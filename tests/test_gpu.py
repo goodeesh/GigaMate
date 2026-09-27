@@ -151,6 +151,59 @@ class TestAmdDiscreteGpu:
         mon = NvidiaGpuMonitor(pci_sysfs=root)
         assert mon.is_available is False
 
+    def test_amd_apu_igpu_ignored_despite_boot_vga_zero(self, tmp_path):
+        """Regression: an APU iGPU also reports boot_vga=0 on hybrid laptops.
+
+        When the dGPU is the primary display, the iGPU is flagged non-boot too,
+        so boot_vga alone would claim it as "the discrete GPU" — lighting a
+        permanent indicator on a machine that has no discrete AMD GPU. amdgpu's
+        own ``uma/`` marker is authoritative.
+        """
+        root = _amd_tree(tmp_path, boot_vga="0", cls="0x038000\n", extra={
+            "mem_info_vram_total": "536870912\n",  # 512 MiB APU carve-out
+        })
+        (root / "0000:65:00.0" / "uma").mkdir()  # amdgpu APU marker
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is False
+        assert mon.read_state().present is False
+
+    def test_amd_small_vram_aperture_treated_as_integrated(self, tmp_path):
+        """A carve-out sized VRAM aperture also means integrated, without uma/."""
+        root = _amd_tree(tmp_path, boot_vga="0", extra={
+            "mem_info_vram_total": "536870912\n",
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is False
+
+    def test_amd_dgpu_with_dedicated_vram_still_detected(self, tmp_path):
+        """The hardening must not reject a real discrete Radeon board."""
+        root = _amd_tree(tmp_path, boot_vga="0", extra={
+            "mem_info_vram_total": str(8 * 1024 * 1024 * 1024),  # 8 GiB
+        })
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        assert mon.is_available is True
+        assert mon.read_state().vendor == "amd"
+
+    def test_amd_igpu_and_dgpu_together_picks_dgpu(self, tmp_path):
+        """APU iGPU plus a real dGPU: the dGPU is the one that gets claimed."""
+        root = _build_pci_tree(tmp_path, {
+            "0000:08:00.0": {"vendor": "0x1002\n", "class": "0x038000\n",
+                             "boot_vga": "1\n",
+                             "mem_info_vram_total": "536870912\n",
+                             "power/runtime_status": "active\n"},
+            "0000:66:00.0": {"vendor": "0x1002\n", "class": "0x030000\n",
+                             "boot_vga": "0\n",
+                             "mem_info_vram_total": str(8 * 1024 * 1024 * 1024),
+                             "power/runtime_status": "suspended\n",
+                             "power_state": "D3cold\n"},
+        })
+        (root / "0000:08:00.0" / "uma").mkdir()
+        mon = NvidiaGpuMonitor(pci_sysfs=root)
+        state = mon.read_state()
+        assert state.present is True
+        assert mon._device is not None
+        assert mon._device.name == "0000:66:00.0"
+
     def test_mixed_igpu_picks_dgpu(self, tmp_path):
         root = _build_pci_tree(tmp_path, {
             "0000:65:00.0": {"vendor": "0x1002\n", "class": "0x030000\n",

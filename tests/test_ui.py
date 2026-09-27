@@ -1,4 +1,5 @@
 import os
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,7 +89,8 @@ def test_gpu_page_max_clock_controls(qapp):
                       return_value={"supported": True, "device": "RTX 5060",
                                     "gpu_max_clock_mhz": 3090}), \
          patch.object(gp.dgpu_tune, "read_state_file",
-                      return_value={"applied_offset": 100, "applied_max": 2500}), \
+                      return_value={"ts": 1.0, "offset_mhz": 100,
+                                    "applied_offset": 100, "applied_max": 2500}), \
          patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
          patch.object(gp, "get_gpu_state",
                       return_value=GpuState(present=True, vendor="nvidia",
@@ -115,14 +117,18 @@ def test_gpu_page_max_clock_controls(qapp):
     page._update_max_readout(2500)
     assert "Cap 2500 MHz" in page.max_val.text()
 
-    # Apply behaviour: top = unlock, below = cap. Reset = unlock.
+    # Apply behaviour: top = unlock, below = cap.
     with patch.object(gp.dgpu_tune, "set_desired_config") as sdc, \
-         patch.object(page, "_read_hw"), patch.object(page, "_refresh"):
-        page._apply_max(page._normal_max)
-        sdc.assert_called_once_with(max_enabled=False, max_clock=0)
+         patch.object(page, "_read_published"):
+        page.max_slider.setValue(page._normal_max)
+        page._apply_all()
+        assert sdc.call_args.kwargs["max_enabled"] is False
+        assert sdc.call_args.kwargs["max_clock"] == 0
         sdc.reset_mock()
-        page._apply_max(2500)
-        assert sdc.call_args.kwargs == {"max_enabled": True, "max_clock": 2500}
+        page.max_slider.setValue(2500)
+        page._apply_all()
+        assert sdc.call_args.kwargs["max_enabled"] is True
+        assert sdc.call_args.kwargs["max_clock"] == 2500
 
     # A cap set below the default travel (e.g. via CLI) widens the low end.
     cfg["dgpu_max_clock_mhz"] = 1800
@@ -192,6 +198,405 @@ def test_gpu_page_sliders_not_reset_while_dragging(qapp):
     page.deleteLater()
 
 
+def _gpu_page_patches(gp, *, probe=None, state_file=None,
+                      gpu_state=None, holders=()):
+    """Common patch set for GpuPage: no real helper, sysfs or hardware."""
+    probe = probe if probe is not None else {
+        "supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+        "mem_max_clock_mhz": 12001, "mem_offset_api": True,
+        "helper_version": 4,
+    }
+    state_file = state_file if state_file is not None else {}
+    return [
+        patch.object(gp.dgpu_tune, "get_state", return_value={"offset_mhz": 0}),
+        # The page probes through the NVML gate, so patch both entry points.
+        patch.object(gp.dgpu_tune, "probe", return_value=probe),
+        patch.object(gp.dgpu_tune, "probe_if_awake", return_value=probe),
+        patch.object(gp.dgpu_tune, "read_state_file", return_value=state_file),
+        patch.object(gp.dgpu_tune, "wake_holders", return_value=list(holders)),
+        patch.object(gp.dgpu_tune, "cached_helper_version", return_value=4),
+        patch.object(gp, "get_gpu_state", return_value=gpu_state),
+    ]
+
+
+class _StartPatch:
+    """Context manager applying a list of patches."""
+
+    def __init__(self, patches):
+        self._patches = patches
+        self._started = []
+
+    def __enter__(self):
+        for p in self._patches:
+            p.start()
+            self._started.append(p)
+        return self
+
+    def __exit__(self, *exc):
+        for p in reversed(self._started):
+            p.stop()
+        return False
+
+
+def test_gpu_page_mem_offset_slider(qapp):
+    """The memory slider is a signed offset, read back from the card."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({"dgpu_mem_offset_enabled": True, "dgpu_mem_offset_mhz": 300})
+    config_mod.save(cfg)
+
+    page = gp.GpuPage()
+    gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    state_file = {"applied_mem": 300}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, state_file=state_file)):
+        page.reload_from_config()
+
+    assert page.mem_slider.minimum() == gp.dgpu_tune.MEM_OFFSET_MIN_MHZ
+    assert page.mem_slider.maximum() == gp.dgpu_tune.MEM_OFFSET_MAX_MHZ
+    assert page._mem_offset() == 300
+    assert page.mem_val.text() == "+300 MHz"
+    assert "Applied: +300 MHz" in page.mem_status_lbl.text()
+
+    # Dragging only stages: it must not touch the hardware by itself.
+    with patch.object(gp.dgpu_tune, "set_desired_config") as sdc:
+        page.mem_slider.setValue(-150)
+        assert sdc.call_count == 0
+        assert page.mem_val.text() == "-150 MHz"
+        assert "memory offset" in page.apply_hint_lbl.text()
+    page.deleteLater()
+
+
+def test_gpu_page_single_apply_commits_all_controls(qapp):
+    """One Apply sends all three controls in a single call."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    config_mod.save(dict(config_mod.load()))
+    page = gp.GpuPage()
+    gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu)):
+        page.reload_from_config()
+        page.uv_slider.setValue(120)
+        page.max_slider.setValue(2500)
+        page.mem_slider.setValue(300)
+
+        with patch.object(gp.dgpu_tune, "set_desired_config") as sdc, \
+             patch.object(page, "_read_published"):
+            page._apply_all()
+            sdc.assert_called_once_with(
+                enabled=True, offset=120,
+                max_enabled=True, max_clock=2500,
+                mem_enabled=True, mem_offset=300,
+            )
+    page.deleteLater()
+
+
+def test_gpu_page_reset_buttons_apply_immediately(qapp):
+    """Reset is unambiguous, so each one acts on its own control immediately."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({
+        "dgpu_undervolt_enabled": True, "dgpu_undervolt_offset_mhz": 100,
+        "dgpu_max_clock_enabled": True, "dgpu_max_clock_mhz": 2500,
+        "dgpu_mem_offset_enabled": True, "dgpu_mem_offset_mhz": 300,
+    })
+    config_mod.save(cfg)
+
+    page = gp.GpuPage()
+    gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu)):
+        page.reload_from_config()
+        with patch.object(gp.dgpu_tune, "set_desired_config") as sdc, \
+             patch.object(page, "_read_published"), patch.object(page, "_refresh"):
+            page._reset_uv()
+            assert sdc.call_args.kwargs == {"enabled": False, "offset": 0}
+            sdc.reset_mock()
+            page._reset_max()
+            assert sdc.call_args.kwargs == {"max_enabled": False, "max_clock": 0}
+            sdc.reset_mock()
+            page._reset_mem()
+            assert sdc.call_args.kwargs == {"mem_enabled": False, "mem_offset": 0}
+    page.deleteLater()
+
+
+def test_gpu_page_mem_offset_hidden_when_unsupported(qapp):
+    """No memory-offset API (or a stale helper) must disable the control."""
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+             "mem_max_clock_mhz": None, "mem_offset_api": False, "helper_version": 4}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, probe=probe)):
+        page.reload_from_config()
+    assert not page.mem_slider.isEnabled()
+    assert "does not support the memory-clock offset" in page.mem_support_lbl.text()
+
+    # A helper too old to understand the offset argument must say so.
+    page2 = gp.GpuPage()
+    probe2 = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+              "mem_max_clock_mhz": 12001, "mem_offset_api": True, "helper_version": 3}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, probe=probe2)), \
+         patch.object(gp.dgpu_tune, "cached_helper_version", return_value=3):
+        page2.reload_from_config()
+    assert "too old" in page2.mem_support_lbl.text()
+    assert not page2.mem_slider.isEnabled()
+    page.deleteLater()
+    page2.deleteLater()
+
+
+def test_gpu_page_never_wakes_a_sleeping_dgpu(qapp):
+    """Regression: the page must not poll NVML while the dGPU is suspended.
+
+    Opening NVML takes a PM reference on the device, so a page that polled it on
+    a timer kept a laptop's dGPU awake for as long as it was visible — reported
+    as "I opened GigaMate Center and the dGPU woke up".
+    """
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    spawns = []
+
+    def counting_run(args):
+        spawns.append(args[0])
+        return {"ok": True, "device": "x", "offset_mhz": 200, "util": 0,
+                "gpu_max_clock_mhz": 3090, "mem_max_clock_mhz": 12001,
+                "mem_offset_api": True, "helper_version": 4}
+
+    asleep = GpuState(present=True, vendor="nvidia", status="suspended", power_state="D3cold")
+    page = gp.GpuPage()
+    page.show()
+    try:
+        with mock.patch.object(gp.dgpu_tune, "_run_helper", counting_run), \
+             mock.patch.object(gp, "get_gpu_state", return_value=asleep), \
+             mock.patch.object(gp.dgpu_tune, "read_state_file", return_value={}), \
+             mock.patch.object(gp.dgpu_tune, "wake_holders", return_value=[]), \
+             mock.patch.object(gp.dgpu_tune, "find_nvidia_bdf",
+                               return_value="0000:64:00.0"), \
+             mock.patch.object(gp.dgpu_tune, "runtime_status", return_value="suspended"):
+            page.reload_from_config()
+            for i in range(60):        # 60 ticks * 1.5 s = 90 s of being visible
+                page._tick_count = i
+                page._on_tick()
+            assert spawns == [], f"page woke the dGPU: {spawns}"
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_gpu_page_does_not_poll_nvml_while_awake_either(qapp):
+    """With the watcher publishing, the page must read the file, not the GPU."""
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    spawns = []
+
+    def counting_run(args):
+        spawns.append(args[0])
+        return {"ok": True, "device": "x", "gpu_max_clock_mhz": 3090,
+                "mem_max_clock_mhz": 12001,
+                "mem_offset_api": True, "helper_version": 4}
+
+    awake = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    state_file = {"ts": 1.0, "offset_mhz": 200,
+                  "applied_offset": 200, "applied_max": 3000, "applied_mem": 11001}
+    page = gp.GpuPage()
+    page.show()
+    try:
+        with mock.patch.object(gp.dgpu_tune, "_run_helper", counting_run), \
+             mock.patch.object(gp, "get_gpu_state", return_value=awake), \
+             mock.patch.object(gp.dgpu_tune, "read_state_file", return_value=state_file), \
+             mock.patch.object(gp.dgpu_tune, "wake_holders", return_value=["game"]), \
+             mock.patch.object(gp.dgpu_tune, "find_nvidia_bdf",
+                               return_value="0000:64:00.0"), \
+             mock.patch.object(gp.dgpu_tune, "runtime_status", return_value="active"):
+            page.reload_from_config()          # one probe for the initial load
+            initial = len(spawns)
+            for i in range(1, 60):             # then nothing on the timer
+                page._tick_count = i
+                page._on_tick()
+            assert len(spawns) == initial, f"timer polled NVML: {spawns[initial:]}"
+    finally:
+        page.close()
+        page.deleteLater()
+def test_gpu_page_shows_configured_value_while_asleep(qapp):
+    """The dGPU reads 0 while asleep, so don't claim the tuning is off."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({"dgpu_undervolt_enabled": True, "dgpu_undervolt_offset_mhz": 100})
+    config_mod.save(cfg)
+
+    asleep = GpuState(present=True, vendor="nvidia", status="suspended", power_state="D3cold")
+    page = gp.GpuPage()
+    state_file = {"ts": 1.0, "offset_mhz": 0, "applied_offset": 0, "applied_max": 0}
+    probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+             "mem_max_clock_mhz": 12001,
+             "mem_offset_api": True, "helper_version": 4}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=asleep, probe=probe,
+                                       state_file=state_file)):
+        page.reload_from_config()
+    assert "applies when the dGPU wakes" in page.uv_status_lbl.text()
+    assert "Off (stock)" not in page.uv_status_lbl.text()
+    page.deleteLater()
+
+
+def test_gpu_page_reports_paused_while_awake_idle(qapp):
+    """Awake but idle-cleared must not claim 'asleep or pending'."""
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    cfg = dict(config_mod.load())
+    cfg.update({"dgpu_undervolt_enabled": True, "dgpu_undervolt_offset_mhz": 100})
+    config_mod.save(cfg)
+
+    awake = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    page = gp.GpuPage()
+    state_file = {"ts": 1.0, "offset_mhz": 0, "applied_offset": 0, "applied_max": 0,
+                  "applied_mem": 0, "idle_cleared": True, "runtime": "active", "auto": True}
+    probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
+             "mem_max_clock_mhz": 12001,
+             "mem_offset_api": True, "helper_version": 4}
+    with _StartPatch(_gpu_page_patches(gp, gpu_state=awake, probe=probe,
+                                       state_file=state_file)):
+        page.reload_from_config()
+    text = page.uv_status_lbl.text()
+    assert "paused while the dGPU is idle" in text
+    assert "asleep or pending" not in text
+    page.deleteLater()
+
+
+def test_every_page_fits_the_narrowest_window(qapp):
+    """No page may need more width than the window can give it.
+
+    The pages sit in scroll areas with the horizontal scrollbar switched off, so
+    a page whose minimum width exceeds the viewport is simply *clipped* — that is
+    what made the battery (775 px) and settings (823 px) pages look broken on a
+    narrow window while the GPU page (351 px) reflowed correctly. Prose must wrap
+    and chip/button rows must flow.
+    """
+    from PyQt6.QtWidgets import QScrollArea
+
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.show()
+    try:
+        # The worst case: the window at its own minimum width.
+        win.resize(win.minimumSize())
+        qapp.processEvents()
+        available = win.stack.width()
+        assert available > 0
+
+        for idx, name in enumerate(("dashboard", "battery", "rgb", "gpu", "settings")):
+            win.stack.setCurrentIndex(idx)
+            qapp.processEvents()
+            area = win.stack.currentWidget()
+            assert isinstance(area, QScrollArea)
+            page = area.widget()
+            need = page.minimumSizeHint().width()
+            assert need <= available, (
+                f"{name} page needs {need}px but only {available}px is available — "
+                f"its prose must wrap and its rows must flow"
+            )
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_flow_container_wraps_and_reports_height(qapp):
+    """A flow row must get taller as it gets narrower, not wider."""
+    from PyQt6.QtWidgets import QLabel
+
+    from gigamate.ui.flow_layout import FlowContainer
+
+    container = FlowContainer(spacing=8)
+    for i in range(4):
+        container.addWidget(QLabel(f"chip number {i}"))
+    container.resize(600, 40)
+    container.show()
+    qapp.processEvents()
+
+    wide = container.heightForWidth(600)
+    narrow = container.heightForWidth(150)
+    assert narrow > wide, f"flow row did not wrap (wide={wide}, narrow={narrow})"
+    assert container.minimumSize().width() < 150, \
+        "a wrapping row must not carry the sum of its children as a minimum"
+    container.deleteLater()
+
+
+def test_pages_scroll_instead_of_being_squeezed(qapp):
+    """Regression: a small window must not collapse a page's layout.
+
+    The GPU page needs ~900 px, but the window's minimum is 640 px tall. Without
+    a scroll area Qt squeezed the page below its minimum, which crushed its
+    layouts into overlapping widgets (seen when moving the window to the laptop's
+    own panel).
+    """
+    from PyQt6.QtWidgets import QScrollArea
+
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.show()
+    try:
+        for idx, name in ((0, "dashboard"), (3, "gpu"), (4, "settings")):
+            area = win.stack.currentWidget() if idx == win.stack.currentIndex() else None
+            if area is None:
+                win.stack.setCurrentIndex(idx)
+                area = win.stack.currentWidget()
+            assert isinstance(area, QScrollArea), f"{name} page is not scrollable"
+
+        # The worst case: the window at its own minimum height.
+        win.resize(win.minimumSize())
+        win.stack.setCurrentIndex(3)
+        qapp.processEvents()
+
+        page = win.page_gpu
+        assert page.height() >= page.minimumSizeHint().height(), \
+            "GPU page was squeezed below its minimum instead of scrolling"
+
+        # The sliders must keep their natural height rather than being crushed.
+        for name, slider in (("undervolt", page.uv_slider), ("max clock", page.max_slider),
+                             ("memory", page.mem_slider)):
+            assert slider.height() >= slider.sizeHint().height(), \
+                f"{name} slider collapsed: {slider.height()} < {slider.sizeHint().height()}"
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_gpu_sliders_do_not_eat_the_scroll_wheel(qapp):
+    """Scrolling the page must not retune the GPU clocks."""
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    page.uv_slider.setValue(120)
+    for slider in (page.uv_slider, page.max_slider, page.mem_slider):
+        before = slider.value()
+        event = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate, False,
+        )
+        slider.wheelEvent(event)
+        assert slider.value() == before, "wheel over a slider changed its value"
+        assert not event.isAccepted(), "wheel event should be passed to the scroll area"
+    page.deleteLater()
 def test_dashboard_profile_selection(qapp):
     from unittest.mock import patch
     from gigamate.ui.main_window import MainWindow

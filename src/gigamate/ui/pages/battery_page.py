@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 
 from ...battery import BatteryManager, get_battery_manager
 from ...config import load as load_config, update_config
+from ..flow_layout import FlowContainer
 
 
 class BatteryPage(QWidget):
@@ -57,14 +58,15 @@ class BatteryPage(QWidget):
         self.progress_bar.setFixedHeight(22)
         s_layout.addWidget(self.progress_bar)
 
-        # 3 Status Chips
-        chips_layout = QHBoxLayout()
-        chips_layout.setSpacing(12)
+        # 3 Status Chips. A flow container so the row reflows onto a second line
+        # instead of forcing the page wider than a narrow window can show.
+        self.chips_container = FlowContainer(spacing=12)
+        chips_layout = self.chips_container
 
         chips_layout.addWidget(self._make_chip("Power Source", "ac_label", "⚡"))
         chips_layout.addWidget(self._make_chip("Battery Status", "status_label", "🔋"))
         chips_layout.addWidget(self._make_chip("Battery Health", "health_label", "❤️"))
-        s_layout.addLayout(chips_layout)
+        s_layout.addWidget(self.chips_container)
         layout.addWidget(status_card)
 
         # ── Battery Care & Charge Threshold Card ──
@@ -80,6 +82,9 @@ class BatteryPage(QWidget):
             "cells, prolonging battery lifespan."
         )
         self.care_sub.setProperty("class", "CardSubtitle")
+        # Prose must wrap, otherwise its single-line width becomes the page's
+        # minimum width and the card is clipped on a narrow window.
+        self.care_sub.setWordWrap(True)
         c_layout.addWidget(c_title)
         c_layout.addWidget(self.care_sub)
 
@@ -87,12 +92,30 @@ class BatteryPage(QWidget):
         self.slider_container = QWidget()
         sc_layout = QVBoxLayout(self.slider_container)
         sc_layout.setContentsMargins(0, 0, 0, 0)
-        sc_layout.setSpacing(10)
+        sc_layout.setSpacing(12)
+
+        # Quick preset buttons
+        presets_row = QHBoxLayout()
+        presets_row.setSpacing(8)
+        p_label = QLabel("Quick Presets:")
+        p_label.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        presets_row.addWidget(p_label)
+
+        for p_val, p_text in [(60, "60% Storage"), (80, "80% Daily Care"), (100, "100% Full")]:
+            btn = QPushButton(p_text)
+            btn.setProperty("class", "PresetButton")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, v=p_val: self._set_slider_value(v))
+            presets_row.addWidget(btn)
+        presets_row.addStretch()
+        sc_layout.addLayout(presets_row)
 
         slider_layout = QHBoxLayout()
-        slider_layout.setSpacing(14)
+        slider_layout.setSpacing(12)
         self.slider_label = QLabel("Limit: 80%")
-        self.slider_label.setStyleSheet("color: #ffffff; font-weight: 600; font-size: 14px; min-width: 90px;")
+        self.slider_label.setProperty("class", "ValueReadoutPill")
+        self.slider_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.slider_label.setMinimumWidth(100)
 
         self.limit_slider = QSlider(Qt.Orientation.Horizontal)
         self.limit_slider.setRange(40, 100)
@@ -102,6 +125,7 @@ class BatteryPage(QWidget):
 
         self.apply_limit_btn = QPushButton("Apply Limit")
         self.apply_limit_btn.setProperty("class", "PrimaryButton")
+        self.apply_limit_btn.setMinimumHeight(34)
         self.apply_limit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.apply_limit_btn.clicked.connect(self._apply_charge_limit)
 
@@ -111,7 +135,7 @@ class BatteryPage(QWidget):
         sc_layout.addLayout(slider_layout)
 
         self.limit_status_label = QLabel("")
-        self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px;")
+        self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px; font-weight: 500;")
         sc_layout.addWidget(self.limit_status_label)
         c_layout.addWidget(self.slider_container)
 

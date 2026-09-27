@@ -28,8 +28,13 @@ PCI_SYSFS = Path("/sys/bus/pci/devices")
 NVIDIA_VENDOR = "0x10de"
 
 # AMD vendor id. Only *discrete* AMD GPUs count: the integrated GPU shares
-# this vendor id but is always awake, so it must be excluded via boot_vga.
+# this vendor id but is always awake, so it must be excluded — see
+# ``NvidiaGpuMonitor._is_integrated_amd`` for how the two are told apart.
 AMD_VENDOR = "0x1002"
+
+# An AMD APU's "dedicated" VRAM is really a carve-out of system memory; 1 GiB is
+# comfortably above any plausible carve-out and far below any discrete board.
+_UMA_APERTURE_MAX_BYTES = 1 << 30
 
 
 @dataclass
@@ -120,10 +125,12 @@ class NvidiaGpuMonitor:
         """Scan the PCI sysfs root for a discrete GPU.
 
         Returns (device_path_or_None, vendor_or_None). NVIDIA matches take
-        priority. AMD matches must not be the boot display (boot_vga=1),
-        which excludes integrated graphics. A missing boot_vga file is
-        treated conservatively as "not a dGPU" to avoid a permanently
-        lit indicator on iGPU-only machines.
+        priority. AMD matches must not be integrated graphics — that is decided
+        by amdgpu's own sysfs markers first (see ``_is_integrated_amd``) and only
+        then by ``boot_vga``, which on its own is not enough: an APU iGPU also
+        reports ``boot_vga=0`` whenever the dGPU is the primary display, and
+        claiming it would light a permanent "discrete GPU" indicator on a
+        machine that has none.
         """
         nvidia: Optional[Path] = None
         amd: Optional[Path] = None
@@ -144,6 +151,8 @@ class NvidiaGpuMonitor:
                 if vendor == NVIDIA_VENDOR and nvidia is None:
                     nvidia = entry
                 elif vendor == AMD_VENDOR and amd is None:
+                    if self._is_integrated_amd(entry):
+                        continue
                     # Accept AMD devices explicitly flagged as non-boot (boot_vga=0)
                     # or 3D controllers (PCI class 0x0302xx) which do not have a boot_vga attribute.
                     boot_vga = self._read_text(entry / "boot_vga")
@@ -156,6 +165,31 @@ class NvidiaGpuMonitor:
         if amd is not None:
             return amd, "amd"
         return None, None
+
+    def _is_integrated_amd(self, device: Path) -> bool:
+        """Whether an AMD display device is an APU/iGPU rather than a dGPU.
+
+        ``boot_vga`` cannot answer this: a hybrid laptop whose dGPU is the
+        primary display reports ``boot_vga=0`` for *both* GPUs. amdgpu exposes
+        two unambiguous markers instead, so use them first:
+
+        * ``uma/`` only exists on APUs (it holds the carve-out controls).
+        * ``mem_info_vram_total`` is the APU's shared-memory aperture, which is
+          carve-out sized (512 MiB on a Krackan 840M) rather than the GBs of
+          dedicated memory a Radeon board has.
+
+        A discrete Radeon has neither, so it is unaffected.
+        """
+        if (device / "uma").is_dir():
+            return True
+        total = self._read_text(device / "mem_info_vram_total")
+        if total:
+            try:
+                if int(total) < _UMA_APERTURE_MAX_BYTES:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
 
     def _read_text(self, path: Path) -> Optional[str]:
         """Read a sysfs text file, returning None on any failure."""

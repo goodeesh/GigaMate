@@ -14,10 +14,12 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -228,7 +230,8 @@ class MainWindow(QMainWindow):
 
         title_lbl = QLabel("GigaMate")
         title_lbl.setObjectName("AppTitle")
-        sub_lbl = QLabel("Command Center 3.0")
+        from .. import __version__
+        sub_lbl = QLabel(f"Command Center v{__version__}")
         sub_lbl.setObjectName("AppSubtitle")
 
         title_box.addWidget(title_lbl)
@@ -242,11 +245,11 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
 
-        self.btn_dashboard = self._add_nav_btn("⚡  Dashboard", 0, sb_layout)
-        self.btn_battery = self._add_nav_btn("🔋  Battery Care", 1, sb_layout)
-        self.btn_rgb = self._add_nav_btn("🎨  RGB Lighting", 2, sb_layout)
-        self.btn_gpu = self._add_nav_btn("⚡  GPU", 3, sb_layout)
-        self.btn_settings = self._add_nav_btn("⚙️  Settings", 4, sb_layout)
+        self.btn_dashboard = self._add_nav_btn("  Dashboard", 0, sb_layout)
+        self.btn_battery = self._add_nav_btn("  Battery Care", 1, sb_layout)
+        self.btn_rgb = self._add_nav_btn("  RGB Lighting", 2, sb_layout)
+        self.btn_gpu = self._add_nav_btn("  GPU Tuning", 3, sb_layout)
+        self.btn_settings = self._add_nav_btn("  Settings", 4, sb_layout)
 
         sb_layout.addStretch()
 
@@ -300,16 +303,31 @@ class MainWindow(QMainWindow):
         self.page_gpu = GpuPage()
         self.page_settings = SettingsPage()
 
-        self.stack.addWidget(self.page_dashboard)
-        self.stack.addWidget(self.page_battery)
-        self.stack.addWidget(self.page_rgb)
-        self.stack.addWidget(self.page_gpu)
-        self.stack.addWidget(self.page_settings)
+        # Each page lives in its own scroll area. Without this, shrinking the
+        # window (or moving it to a smaller/scaled monitor) forces Qt to squeeze
+        # a page's layout below its minimum, which collapses grids and overlaps
+        # labels — the GPU page alone needs ~913 px. Scrollable pages keep their
+        # natural size and simply scroll instead.
+        for page in (self.page_dashboard, self.page_battery, self.page_rgb,
+                     self.page_gpu, self.page_settings):
+            self.stack.addWidget(self._wrap_scrollable(page))
 
         root_layout.addWidget(self.stack)
 
         # Default to dashboard
         self.btn_dashboard.setChecked(True)
+
+    @staticmethod
+    def _wrap_scrollable(page: QWidget) -> QScrollArea:
+        """Put ``page`` in a frameless scroll area that tracks the viewport width."""
+        area = QScrollArea()
+        area.setObjectName("PageScrollArea")
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        return area
 
     def _add_nav_btn(self, text: str, page_idx: int, layout: QVBoxLayout) -> QPushButton:
         btn = QPushButton(text)
@@ -493,6 +511,10 @@ def run_gui() -> None:
     is_external_app = app is not None
     if app is None:
         app = QApplication(sys.argv)
+
+    app.setApplicationName("gigamate-center")
+    app.setApplicationDisplayName("GigaMate Center")
+    app.setDesktopFileName("gigamate-center.desktop")
 
     app.setStyleSheet(DARK_THEME)
     window = MainWindow()
