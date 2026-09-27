@@ -72,13 +72,12 @@ class GpuPage(QWidget):
         self._observed_ceiling = 0
         self._normal_max = dgpu_tune.MAX_CLOCK_MHZ
         self._normal_min = max(300, dgpu_tune.MAX_CLOCK_MHZ - dgpu_tune.MAX_CLOCK_SPAN)
-        self._mem_choices: list = []
         # Config values currently mirrored into the widgets. Sliders are only
         # repositioned when this changes (and never mid-drag), so a background
         # refresh never yanks a handle out from under the user.
         self._uv_cfg_key = None
         self._max_cfg_key = None
-        self._mem_cfg_key = None
+        self._mem_offset_cfg_key = None
         # NVML probe cache + wake-transition tracking. Probing is an NVML open,
         # so it is limited to reloads and wake transitions (see _recompute_normal_max).
         self._probed: dict = {}
@@ -95,7 +94,7 @@ class GpuPage(QWidget):
         # Force a fresh mirror of the config into the sliders.
         self._uv_cfg_key = None
         self._max_cfg_key = None
-        self._mem_cfg_key = None
+        self._mem_offset_cfg_key = None
         # Refresh first so the awake flag (a free sysfs read) is current before
         # the probe decision is made; otherwise the initial load would look like a
         # wake transition and probe a tick later instead.
@@ -165,36 +164,10 @@ class GpuPage(QWidget):
             # widened) range instead of being skipped as "already up to date".
             self.max_slider.setRange(self._normal_min, self._normal_max)
             self._max_cfg_key = None
-        self._recompute_mem_choices(probed)
 
-    def _recompute_mem_choices(self, probed: dict) -> None:
-        """Re-range the memory slider over the clocks the GPU actually reports."""
-        choices = [int(c) for c in (probed.get("mem_supported_clocks") or [])
-                   if int(c) >= dgpu_tune.MEM_CLOCK_MIN_PIN_MHZ]
-        if not choices:
-            top = probed.get("mem_max_clock_mhz")
-            choices = [int(top)] if top else []
-        choices = sorted(set(choices))
-        if choices == self._mem_choices:
-            return
-        self._mem_choices = choices
-        # Index-based steps: the slider can only land on a supported clock.
-        self.mem_slider.setRange(0, max(0, len(choices) - 1))
-        self.mem_slider.setSingleStep(1)
-        self.mem_slider.setPageStep(1)
-        if choices:
-            self.mem_slider.blockSignals(True)
-            self.mem_slider.setValue(len(choices) - 1)
-            self.mem_slider.blockSignals(False)
-        self._update_mem_readout()
-        self._mem_cfg_key = None
-
-    def _mem_clock(self) -> int:
-        """The memory clock the slider currently points at (0 = no choice)."""
-        if not self._mem_choices:
-            return 0
-        idx = max(0, min(self.mem_slider.value(), len(self._mem_choices) - 1))
-        return self._mem_choices[idx]
+    def _mem_offset(self) -> int:
+        """The memory-clock V/F offset (signed MHz) the slider points at."""
+        return int(self.mem_slider.value())
 
     def _on_tick(self) -> None:
         if not self.isVisible():
@@ -326,14 +299,14 @@ class GpuPage(QWidget):
         box = QVBoxLayout(card)
         box.setSpacing(10)
 
-        title = QLabel("Memory clock")
+        title = QLabel("Memory clock offset (overclock)")
         title.setProperty("class", "CardTitle")
         box.addWidget(title)
         note = QLabel(
-            "Pin the memory clock to one of the values this GPU supports. The top of "
-            "the slider is the highest one (a guaranteed-max pin); lower values cap "
-            "it to save power and heat. It cannot go beyond the GPU's own maximum, "
-            "and it needs the dGPU to be awake."
+            "Shift the memory clock by a signed offset. Positive values overclock "
+            "it (more bandwidth, more heat), negative values underclock it, 0 is "
+            "stock. The GPU/driver may reject offsets it cannot run — the applied "
+            "value is read back from the card. Needs the dGPU to be awake."
         )
         note.setStyleSheet("color: #8896ab; font-size: 11px;")
         note.setWordWrap(True)
@@ -347,13 +320,15 @@ class GpuPage(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.mem_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
-        self.mem_slider.setRange(0, 0)
+        self.mem_slider.setRange(dgpu_tune.MEM_OFFSET_MIN_MHZ, dgpu_tune.MEM_OFFSET_MAX_MHZ)
+        self.mem_slider.setSingleStep(25)
+        self.mem_slider.setPageStep(100)
         self.mem_slider.setValue(0)
         self.mem_slider.valueChanged.connect(self._on_mem_slider)
-        self.mem_val = QLabel("—")
-        self.mem_val.setStyleSheet("color: #ffffff; font-weight: 700; min-width: 130px;")
+        self.mem_val = QLabel("+0 MHz")
+        self.mem_val.setStyleSheet("color: #ffffff; font-weight: 700; min-width: 110px;")
         self.mem_reset_btn = QPushButton("Reset")
-        self.mem_reset_btn.setToolTip("Return the memory clock to the driver default now")
+        self.mem_reset_btn.setToolTip("Return the memory clock offset to stock now")
         self.mem_reset_btn.clicked.connect(lambda: self._reset_mem())
         row.addWidget(self.mem_slider, 1)
         row.addWidget(self.mem_val)
@@ -400,13 +375,11 @@ class GpuPage(QWidget):
             self.max_val.setText(f"Cap {value} MHz (−{self._observed_ceiling - value})")
 
     def _update_mem_readout(self) -> None:
-        mhz = self._mem_clock()
-        if not mhz:
-            self.mem_val.setText("—")
-        elif self._mem_choices and mhz == self._mem_choices[-1]:
-            self.mem_val.setText(f"{mhz} MHz (max)")
+        offset = self._mem_offset()
+        if offset:
+            self.mem_val.setText(f"{offset:+d} MHz")
         else:
-            self.mem_val.setText(f"{mhz} MHz")
+            self.mem_val.setText("+0 MHz (stock)")
 
     def _update_apply_hint(self) -> None:
         """Tell the user when the sliders no longer match what is configured."""
@@ -415,8 +388,8 @@ class GpuPage(QWidget):
             staged.append("undervolt")
         if self._max_cfg_key is not None and self.max_slider.value() != self._max_cfg_key[1]:
             staged.append("max clock")
-        if self._mem_cfg_key is not None and self._mem_clock() != self._mem_cfg_key:
-            staged.append("memory clock")
+        if self._mem_offset_cfg_key is not None and self._mem_offset() != self._mem_offset_cfg_key:
+            staged.append("memory offset")
         if staged:
             self.apply_hint_lbl.setText(
                 "Unapplied: " + ", ".join(staged) + " — press Apply to send them to the GPU.")
@@ -431,7 +404,7 @@ class GpuPage(QWidget):
         offset = max(0, min(dgpu_tune.MAX_OFFSET_MHZ, int(self.uv_slider.value())))
         cap = max(self.max_slider.minimum(),
                   min(self.max_slider.maximum(), int(self.max_slider.value())))
-        mem = self._mem_clock()
+        mem = self._mem_offset()
         # A control that is "off" must be sent as 0, not as the handle's resting
         # position, so the request reads the same way the config will store it.
         cap_enabled = cap < self._observed_ceiling
@@ -439,14 +412,14 @@ class GpuPage(QWidget):
             dgpu_tune.set_desired_config(
                 enabled=offset > 0, offset=offset,
                 max_enabled=cap_enabled, max_clock=cap if cap_enabled else 0,
-                mem_enabled=mem > 0, mem_clock=mem,
+                mem_enabled=mem != 0, mem_offset=mem,
             )
         except Exception:
             pass
         # The config now matches the sliders, so re-mirror from it.
         self._uv_cfg_key = None
         self._max_cfg_key = None
-        self._mem_cfg_key = None
+        self._mem_offset_cfg_key = None
         self._read_published()
         self._refresh()
 
@@ -479,10 +452,14 @@ class GpuPage(QWidget):
 
     def _reset_mem(self) -> None:
         try:
-            dgpu_tune.set_desired_config(mem_enabled=False, mem_clock=0)
+            dgpu_tune.set_desired_config(mem_enabled=False, mem_offset=0)
         except Exception:
             pass
-        self._mem_cfg_key = None
+        self.mem_slider.blockSignals(True)
+        self.mem_slider.setValue(0)
+        self.mem_slider.blockSignals(False)
+        self.mem_val.setText("+0 MHz (stock)")
+        self._mem_offset_cfg_key = None
         self._read_published()
         self._refresh()
 
@@ -628,8 +605,8 @@ class GpuPage(QWidget):
 
     def _sync_mem_controls(self) -> None:
         cfg = load_config()
-        enabled = bool(cfg.get("dgpu_mem_clock_enabled", False))
-        wanted = int(cfg.get("dgpu_mem_clock_mhz", 0) or 0)
+        enabled = bool(cfg.get("dgpu_mem_offset_enabled", False))
+        wanted = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0)
         st = self._hw or {}
         applied = st.get("applied_mem") or 0
         idle_cleared = bool(st.get("idle_cleared"))
@@ -644,53 +621,50 @@ class GpuPage(QWidget):
         stale_helper = (version is not None
                         and version < dgpu_tune.REQUIRED_HELPER_VERSION)
 
-        mem_supported = bool(self._mem_choices) and not stale_helper
-        if not self._mem_choices:
+        offset_api = bool(self._probed.get("mem_offset_api"))
+        mem_supported = offset_api and not stale_helper
+        if stale_helper:
             self.mem_support_lbl.setText(
-                "This GPU/driver did not report any selectable memory clock.")
-        elif stale_helper:
-            self.mem_support_lbl.setText(
-                "The installed helper is too old for memory-clock control — "
+                "The installed helper is too old for the memory-clock offset — "
                 "re-run ./install.sh to update it.")
+        elif not offset_api:
+            self.mem_support_lbl.setText(
+                "This GPU/driver does not support the memory-clock offset API.")
         else:
             self.mem_support_lbl.setText(
-                "This GPU supports: " + ", ".join(f"{c}" for c in self._mem_choices) + " MHz.")
+                f"Signed offset {dgpu_tune.MEM_OFFSET_MIN_MHZ:+d}.."
+                f"{dgpu_tune.MEM_OFFSET_MAX_MHZ:+d} MHz "
+                "(+ overclocks, − underclocks, 0 = stock).")
 
         self.mem_slider.setEnabled(mem_supported)
         self.mem_reset_btn.setEnabled(mem_supported)
 
-        # Mirror the configured pin into the slider (top of travel when off, so
-        # the handle always rests on a real clock).
-        target = wanted if (enabled and wanted in self._mem_choices) else 0
-        if target != self._mem_cfg_key:
+        # Mirror the configured offset into the slider.
+        target = wanted if enabled else 0
+        if target != self._mem_offset_cfg_key:
             if not self.mem_slider.isSliderDown():
-                pos = self._mem_choices.index(target) if target else max(
-                    0, len(self._mem_choices) - 1)
                 self.mem_slider.blockSignals(True)
-                self.mem_slider.setValue(pos)
+                self.mem_slider.setValue(target)
                 self.mem_slider.blockSignals(False)
                 self._update_mem_readout()
-            self._mem_cfg_key = target
+            self._mem_offset_cfg_key = target
 
         if not mem_supported:
             self.mem_status_lbl.setText("")
             return
-        selected = self._mem_clock()
-        if enabled and wanted > 0 and applied == wanted:
-            state = f"Applied: pinned at {wanted} MHz"
-        elif enabled and wanted > 0 and not self._gpu_awake:
-            state = f"Configured: pin {wanted} MHz — applies when the dGPU wakes"
-        elif enabled and wanted > 0 and idle_cleared:
-            state = (f"Configured: pin {wanted} MHz — paused while the dGPU is idle "
+        if enabled and wanted != 0 and applied == wanted:
+            state = f"Applied: {wanted:+d} MHz"
+        elif enabled and wanted != 0 and not self._gpu_awake:
+            state = f"Configured: {wanted:+d} MHz — applies when the dGPU wakes"
+        elif enabled and wanted != 0 and idle_cleared:
+            state = (f"Configured: {wanted:+d} MHz — paused while the dGPU is idle "
                      "(re-applies under load)")
-        elif enabled and wanted > 0 and not auto:
-            state = f"Configured: pin {wanted} MHz — pending (auto-apply off)"
-        elif enabled and wanted > 0:
-            state = f"Configured: pin {wanted} MHz — pending apply"
+        elif enabled and wanted != 0 and not auto:
+            state = f"Configured: {wanted:+d} MHz — pending (auto-apply off)"
+        elif enabled and wanted != 0:
+            state = f"Configured: {wanted:+d} MHz — pending apply"
         elif applied:
-            state = f"Off requested; hardware still pinned at {applied} MHz"
-        elif not enabled and selected != self._mem_cfg_key:
-            state = f"Staged: pin {selected} MHz — press Apply"
+            state = f"Off requested; hardware still at {applied:+d} MHz"
         else:
-            state = "Off (driver default)"
+            state = "Off (stock)"
         self.mem_status_lbl.setText(state)

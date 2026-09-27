@@ -429,9 +429,9 @@ def test_set_auto_config_roundtrip():
 # Memory clock
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_mem_clock_applies_independently():
+def test_mem_offset_applies_independently():
     w = dgpu_tune.DgpuWatcher()
-    w.set_desired(False, 0, True, mem_enabled=True, mem_clock=12001)
+    w.set_desired(False, 0, True, mem_enabled=True, mem_offset=300)
     ps = _patches()
     for p in ps:
         p.start()
@@ -439,18 +439,35 @@ def test_mem_clock_applies_independently():
         with mock.patch.object(dgpu_tune, "apply_tune",
                                return_value={"ok": True, "offset_mhz": 0}) as ap:
             w.tick(now=1000.0)
-            assert ap.call_args[0] == (0, 0, 12001)
+            assert ap.call_args[0] == (0, 0, 300)
             assert w.status()["applied"] is True
-            assert w.status()["desired_mem_clock"] == 12001
+            assert w.status()["desired_mem_offset"] == 300
     finally:
         for p in ps:
             p.stop()
 
 
-def test_mem_clock_applies_alongside_undervolt_and_cap():
+def test_mem_offset_signed_underclock():
+    w = dgpu_tune.DgpuWatcher()
+    w.set_desired(False, 0, True, mem_enabled=True, mem_offset=-200)
+    ps = _patches()
+    for p in ps:
+        p.start()
+    try:
+        with mock.patch.object(dgpu_tune, "apply_tune",
+                               return_value={"ok": True, "offset_mhz": 0}) as ap:
+            w.tick(now=1000.0)
+            assert ap.call_args[0] == (0, 0, -200)
+            assert w.status()["desired_mem_offset"] == -200
+    finally:
+        for p in ps:
+            p.stop()
+
+
+def test_mem_offset_applies_alongside_undervolt_and_cap():
     w = dgpu_tune.DgpuWatcher()
     w.set_desired(True, 100, True, max_enabled=True, max_clock=2100,
-                  mem_enabled=True, mem_clock=11001)
+                  mem_enabled=True, mem_offset=300)
     ps = _patches()
     for p in ps:
         p.start()
@@ -458,22 +475,22 @@ def test_mem_clock_applies_alongside_undervolt_and_cap():
         with mock.patch.object(dgpu_tune, "apply_tune",
                                return_value={"ok": True, "offset_mhz": 100}) as ap:
             w.tick(now=1000.0)
-            assert ap.call_args[0] == (100, 2100, 11001)
+            assert ap.call_args[0] == (100, 2100, 300)
     finally:
         for p in ps:
             p.stop()
 
 
-def test_mem_clock_error_surfaces_and_retries():
+def test_mem_offset_error_surfaces_and_retries():
     w = dgpu_tune.DgpuWatcher()
-    w.set_desired(False, 0, True, mem_enabled=True, mem_clock=12001)
+    w.set_desired(False, 0, True, mem_enabled=True, mem_offset=300)
     ps = _patches()
     for p in ps:
         p.start()
     try:
         with mock.patch.object(dgpu_tune, "apply_tune",
                                return_value={"ok": True, "offset_mhz": 0,
-                                             "mem_clock_error": "not supported"}) as ap:
+                                             "mem_offset_error": "not supported"}) as ap:
             w.tick(now=1000.0)
             assert w.status()["last_error"] == "not supported"
             # Not recorded as applied -> retried rather than silently dropped.
@@ -485,10 +502,10 @@ def test_mem_clock_error_surfaces_and_retries():
             p.stop()
 
 
-def test_mem_clock_cleared_on_suspend():
+def test_mem_offset_cleared_on_suspend():
     w = dgpu_tune.DgpuWatcher()
-    w.set_desired(False, 0, True, mem_enabled=True, mem_clock=12001)
-    w._applied_mem = 12001
+    w.set_desired(False, 0, True, mem_enabled=True, mem_offset=300)
+    w._applied_mem = 300
     ps = _patches(rstatus="suspended", pstate="D3hot")
     for p in ps:
         p.start()
@@ -502,9 +519,9 @@ def test_mem_clock_cleared_on_suspend():
             p.stop()
 
 
-def test_mem_clock_cleared_when_disabled():
+def test_mem_offset_cleared_when_disabled():
     w = dgpu_tune.DgpuWatcher()
-    w.set_desired(False, 0, True, mem_enabled=True, mem_clock=12001)
+    w.set_desired(False, 0, True, mem_enabled=True, mem_offset=300)
     ps = _patches()
     for p in ps:
         p.start()
@@ -513,60 +530,52 @@ def test_mem_clock_cleared_when_disabled():
                                return_value={"ok": True, "offset_mhz": 0}), \
              mock.patch.object(dgpu_tune, "clear_tune") as cl:
             w.tick(now=1000.0)
-            assert w.status()["desired_mem_clock"] == 12001
-            w.set_desired(False, 0, True, mem_enabled=False, mem_clock=12001)
+            assert w.status()["desired_mem_offset"] == 300
+            w.set_desired(False, 0, True, mem_enabled=False, mem_offset=300)
             w.tick(now=1002.0)
             assert cl.called is True
-            assert w.status()["desired_mem_clock"] == 0
+            assert w.status()["desired_mem_offset"] == 0
             assert w.status()["applied"] is False
     finally:
         for p in ps:
             p.stop()
 
 
-def test_set_desired_config_mem_clock_independent():
-    """Toggling the memory pin must not disturb the other two controls."""
+def test_set_desired_config_mem_offset_independent():
+    """Toggling the memory offset must not disturb the other two controls."""
     dgpu_tune.set_desired_config(enabled=True, offset=120)
     dgpu_tune.set_desired_config(max_enabled=True, max_clock=2000)
-    dgpu_tune.set_desired_config(mem_enabled=True, mem_clock=11001)
+    dgpu_tune.set_desired_config(mem_enabled=True, mem_offset=300)
 
     st = dgpu_tune.watcher.status()
     assert st["desired_offset"] == 120
     assert st["desired_max_clock"] == 2000
-    assert st["desired_mem_clock"] == 11001
+    assert st["desired_mem_offset"] == 300
 
-    dgpu_tune.set_desired_config(mem_enabled=False, mem_clock=0)
+    dgpu_tune.set_desired_config(mem_enabled=False, mem_offset=0)
     st = dgpu_tune.watcher.status()
     assert st["desired_offset"] == 120
     assert st["desired_max_clock"] == 2000
-    assert st["desired_mem_clock"] == 0
+    assert st["desired_mem_offset"] == 0
 
 
-def test_mem_clock_choices_uses_supported_list():
-    with mock.patch.object(dgpu_tune, "probe", return_value={
-            "mem_supported_clocks": [405, 810, 9001, 11001, 12001],
-            "mem_max_clock_mhz": 12001}):
-        # Idle states are not useful pin targets.
-        assert dgpu_tune.mem_clock_choices() == [9001, 11001, 12001]
-
-
-def test_mem_clock_choices_falls_back_to_max():
-    with mock.patch.object(dgpu_tune, "probe", return_value={
-            "mem_supported_clocks": [], "mem_max_clock_mhz": 11001}):
-        assert dgpu_tune.mem_clock_choices() == [11001]
+def test_reset_legacy_mem_pin_calls_helper():
+    with mock.patch.object(dgpu_tune, "_run_helper") as rh:
+        dgpu_tune.reset_legacy_mem_pin()
+        rh.assert_called_once_with(["reset-mem-pin"])
 
 
 def test_helper_version_detects_stale_install():
     with mock.patch.object(dgpu_tune, "_probe_cache", {"helper_version": 1}):
         assert dgpu_tune.cached_helper_version() == 1
         assert dgpu_tune.helper_is_current() is False
-    with mock.patch.object(dgpu_tune, "_probe_cache", {"helper_version": 3}):
-        assert dgpu_tune.cached_helper_version() == 3
+    with mock.patch.object(dgpu_tune, "_probe_cache", {"helper_version": 4}):
+        assert dgpu_tune.cached_helper_version() == 4
         assert dgpu_tune.helper_is_current() is True
     # Cold cache: helper_is_current probes once, cached_helper_version does not.
     with mock.patch.object(dgpu_tune, "_probe_cache", None), \
          mock.patch.object(dgpu_tune, "probe",
-                           return_value={"helper_version": 3}) as probe:
+                           return_value={"helper_version": 4}) as probe:
         assert dgpu_tune.cached_helper_version() is None
         assert probe.called is False
         assert dgpu_tune.helper_is_current() is True
@@ -622,10 +631,9 @@ class _FakeBackend:
         self.locked = None
         self.reset_locked = False
         self.ceiling = 2400
-        self.mem_locked = None
-        self.mem_reset = False
+        self.mem_offset = 0
+        self.mem_pin_reset = False
         self.mem_ceiling = 12001
-        self.mem_clocks = [405, 810, 9001, 11001, 12001]
 
     def set_offset(self, mhz):
         self.offset = mhz
@@ -643,18 +651,17 @@ class _FakeBackend:
     def get_max_clock(self, clock_id=0):
         return self.mem_ceiling if clock_id == 2 else self.ceiling
 
-    def get_mem_clocks(self):
-        return list(self.mem_clocks)
+    def set_mem_offset(self, mhz):
+        self.mem_offset = mhz
 
-    def set_mem_clock(self, mhz):
-        self.mem_locked = mhz
+    def get_mem_offset(self):
+        return self.mem_offset
 
-    def reset_mem_clock(self):
-        self.mem_reset = True
-        self.mem_locked = None
-
-    def has_mem_lock(self):
+    def has_mem_offset(self):
         return True
+
+    def reset_mem_locked(self):
+        self.mem_pin_reset = True
 
     def get_util(self):
         return 0
@@ -678,40 +685,50 @@ def test_helper_apply_sets_offset_and_cap(capsys):
     assert out["ok"] is True
     assert out["offset_mhz"] == 100
     assert out["max_clock_mhz"] == 2100
-    assert out["mem_clock_mhz"] == 0
+    assert out["mem_offset_mhz"] == 0
     assert be.offset == 100
     assert be.locked == 2100
-    # An omitted memory clock means stock, so the pin is reset, not left as-is.
-    assert be.mem_reset is True
+    # Any legacy memory-clock pin is dropped on every apply.
+    assert be.mem_pin_reset is True
 
 
-def test_helper_apply_sets_memory_clock(capsys):
+def test_helper_apply_sets_memory_offset(capsys):
     mod = _load_helper()
     be = _FakeBackend()
-    _helper_call(mod, ["apply", "0", "0", "12001"], be)
+    _helper_call(mod, ["apply", "0", "0", "300"], be)
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["ok"] is True
-    assert out["mem_clock_mhz"] == 12001
-    assert be.mem_locked == 12001
+    assert out["mem_offset_mhz"] == 300
+    assert be.mem_offset == 300
     assert be.reset_locked is True
 
 
-def test_helper_apply_mem_clock_error_is_isolated(capsys):
-    """A refused memory lock must not undo the offset/cap, and must be reported."""
+def test_helper_apply_memory_offset_signed(capsys):
+    mod = _load_helper()
+    be = _FakeBackend()
+    _helper_call(mod, ["apply", "0", "0", "-250"], be)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["ok"] is True
+    assert out["mem_offset_mhz"] == -250
+    assert be.mem_offset == -250
+
+
+def test_helper_apply_mem_offset_error_is_isolated(capsys):
+    """A refused memory offset must not undo the offset/cap, and must be reported."""
     mod = _load_helper()
     be = _FakeBackend()
 
     def _boom(_mhz):
-        raise RuntimeError("memory clock lock unsupported")
+        raise RuntimeError("memory clock offset unsupported")
 
-    be.set_mem_clock = _boom
-    _helper_call(mod, ["apply", "100", "2100", "12001"], be)
+    be.set_mem_offset = _boom
+    _helper_call(mod, ["apply", "100", "2100", "300"], be)
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["ok"] is True
     assert out["offset_mhz"] == 100
     assert out["max_clock_mhz"] == 2100
-    assert out["mem_clock_mhz"] == 0
-    assert "memory clock lock unsupported" in out["mem_clock_error"]
+    assert out["mem_offset_mhz"] == 0
+    assert "memory clock offset unsupported" in out["mem_offset_error"]
 
 
 def test_helper_apply_zero_max_unlocks(capsys):
@@ -724,7 +741,7 @@ def test_helper_apply_zero_max_unlocks(capsys):
     assert be.reset_locked is True
 
 
-def test_helper_clear_resets_both(capsys):
+def test_helper_clear_resets_all(capsys):
     mod = _load_helper()
     be = _FakeBackend()
     _helper_call(mod, ["clear"], be)
@@ -732,10 +749,20 @@ def test_helper_clear_resets_both(capsys):
     assert out["ok"] is True
     assert out["offset_mhz"] == 0
     assert out["max_clock_mhz"] == 0
-    assert out["mem_clock_mhz"] == 0
+    assert out["mem_offset_mhz"] == 0
     assert be.offset == 0
     assert be.reset_locked is True
-    assert be.mem_reset is True
+    assert be.mem_offset == 0
+    assert be.mem_pin_reset is True
+
+
+def test_helper_reset_mem_pin(capsys):
+    mod = _load_helper()
+    be = _FakeBackend()
+    _helper_call(mod, ["reset-mem-pin"], be)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["ok"] is True
+    assert be.mem_pin_reset is True
 
 
 def test_helper_probe_reports_ceiling(capsys):
@@ -747,6 +774,5 @@ def test_helper_probe_reports_ceiling(capsys):
     assert out["supported"] is True
     assert out["gpu_max_clock_mhz"] == 2400
     assert out["mem_max_clock_mhz"] == 12001
-    assert out["mem_supported_clocks"] == [405, 810, 9001, 11001, 12001]
-    assert out["mem_lock_api"] is True
+    assert out["mem_offset_api"] is True
     assert out["helper_version"] == mod.HELPER_VERSION

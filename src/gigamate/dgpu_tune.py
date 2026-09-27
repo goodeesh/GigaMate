@@ -35,8 +35,8 @@ Configuration keys (see ``config.py``):
     dgpu_undervolt_auto       bool   auto-apply on boot/wake (else manual)
     dgpu_max_clock_enabled    bool   max-clock cap on/off
     dgpu_max_clock_mhz        int    0 = off, else MHz cap
-    dgpu_mem_clock_enabled    bool   memory-clock pin on/off
-    dgpu_mem_clock_mhz        int    0 = off, else MHz pin
+    dgpu_mem_offset_enabled   bool  memory-clock V/F offset on/off
+    dgpu_mem_offset_mhz       int   signed MHz offset (0 = stock, + = overclock)
 """
 
 from __future__ import annotations
@@ -58,11 +58,11 @@ MAX_OFFSET_MHZ = 255
 MAX_CLOCK_MHZ = 4000  # validation ceiling; the real range comes from the GPU
 MAX_CLOCK_HEADROOM = 300  # added above the observed max so "stock" is uncapped
 MAX_CLOCK_SPAN = 800      # how far below the baseline the cap slider reaches
-MAX_MEM_CLOCK_MHZ = 32000  # validation ceiling; the real list comes from the GPU
-# Memory clocks below this are idle states, not useful pin targets.
-MEM_CLOCK_MIN_PIN_MHZ = 1000
-# The installed helper must understand the memory-clock argument.
-REQUIRED_HELPER_VERSION = 3
+# Memory-clock V/F offset (signed MHz): + = overclock, - = underclock, 0 = stock.
+MEM_OFFSET_MIN_MHZ = -1000
+MEM_OFFSET_MAX_MHZ = 2000
+# The installed helper must understand the memory V/F offset argument.
+REQUIRED_HELPER_VERSION = 4
 
 PCI_SYSFS = Path("/sys/bus/pci/devices")
 NVIDIA_VENDOR = "0x10de"
@@ -246,8 +246,7 @@ def probe(force: bool = False) -> Dict:
         "offset_mhz": res.get("offset_mhz"),
         "gpu_max_clock_mhz": res.get("gpu_max_clock_mhz"),
         "mem_max_clock_mhz": res.get("mem_max_clock_mhz"),
-        "mem_supported_clocks": res.get("mem_supported_clocks") or [],
-        "mem_lock_api": bool(res.get("mem_lock_api")),
+        "mem_offset_api": bool(res.get("mem_offset_api")),
         "helper_version": res.get("helper_version"),
         "error": res.get("error"),
     }
@@ -286,29 +285,19 @@ def helper_is_current() -> bool:
     return isinstance(version, int) and version >= REQUIRED_HELPER_VERSION
 
 
-def mem_clock_choices() -> List[int]:
-    """Selectable memory-clock pins (ascending MHz), best effort.
-
-    Falls back to the reported maximum so the control still works on drivers
-    that cannot enumerate their supported memory clocks.
-    """
+def mem_offset_api_available() -> bool:
+    """Whether the driver exposes the memory-clock V/F offset API (best effort)."""
     try:
-        info = probe()
+        return bool(probe().get("mem_offset_api"))
     except Exception:  # noqa: BLE001
-        return []
-    clocks = [int(c) for c in (info.get("mem_supported_clocks") or [])
-              if int(c) >= MEM_CLOCK_MIN_PIN_MHZ]
-    if clocks:
-        return sorted(set(clocks))
-    top = info.get("mem_max_clock_mhz")
-    return [int(top)] if top else []
+        return False
 
 
 def get_state() -> Dict:
-    """Read the current offset and utilization via the helper.
+    """Read the current offsets and utilization via the helper.
 
     Utilization is what the watcher uses to notice the dGPU going idle; the
-    offset is the applied V/F value. No telemetry is read — see the module
+    offsets are the applied V/F values. No telemetry is read — see the module
     docstring for why.
     """
     return _run_helper(["get"])
@@ -325,12 +314,25 @@ def probe_if_awake(force: bool = False) -> Dict:
     return probe(force=force)
 
 
-def apply_tune(offset_mhz: int, max_clock_mhz: int = 0, mem_clock_mhz: int = 0) -> Dict:
-    """Apply the V/F offset, the max-clock cap and the memory-clock pin."""
+def apply_tune(offset_mhz: int, max_clock_mhz: int = 0, mem_offset_mhz: int = 0) -> Dict:
+    """Apply the GPC V/F offset, the max-clock cap and the memory-clock offset."""
     offset_mhz = max(0, min(MAX_OFFSET_MHZ, int(offset_mhz)))
     max_clock_mhz = max(0, min(MAX_CLOCK_MHZ, int(max_clock_mhz)))
-    mem_clock_mhz = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock_mhz)))
-    return _run_helper(["apply", str(offset_mhz), str(max_clock_mhz), str(mem_clock_mhz)])
+    mem_offset_mhz = max(MEM_OFFSET_MIN_MHZ, min(MEM_OFFSET_MAX_MHZ, int(mem_offset_mhz)))
+    return _run_helper(["apply", str(offset_mhz), str(max_clock_mhz), str(mem_offset_mhz)])
+
+
+def reset_legacy_mem_pin() -> None:
+    """Drop a memory-clock *pin* left by an older GigaMate build.
+
+    The previous control pinned memory via ``nvmlDeviceSetMemoryLockedClocks``;
+    that lock outlives the process, so a build that only knows the new V/F
+    offset must explicitly release it once. Best effort, never raises.
+    """
+    try:
+        _run_helper(["reset-mem-pin"])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def clear_tune() -> Dict:
@@ -421,12 +423,12 @@ class DgpuWatcher:
             "applied": False,
             "offset_mhz": None,
             "max_clock_mhz": None,
-            "mem_clock_mhz": None,
+            "mem_offset_mhz": None,
             "util": None,
             "enabled": False,
             "desired_offset": 0,
             "desired_max_clock": 0,
-            "desired_mem_clock": 0,
+            "desired_mem_offset": 0,
             "auto": True,
             "last_error": None,
         }
@@ -434,13 +436,13 @@ class DgpuWatcher:
     # ── configuration ──
     def set_desired(self, enabled: bool, offset: int, auto: bool = True,
                     max_enabled: bool = False, max_clock: int = 0,
-                    mem_enabled: bool = False, mem_clock: int = 0) -> None:
+                    mem_enabled: bool = False, mem_offset: int = 0) -> None:
         offset = max(0, min(MAX_OFFSET_MHZ, int(offset)))
         max_clock = max(0, min(MAX_CLOCK_MHZ, int(max_clock)))
-        mem_clock = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock)))
+        mem_offset = max(MEM_OFFSET_MIN_MHZ, min(MEM_OFFSET_MAX_MHZ, int(mem_offset)))
         eff_offset = offset if enabled else 0
         eff_max = max_clock if max_enabled else 0
-        eff_mem = mem_clock if mem_enabled else 0
+        eff_mem = mem_offset if mem_enabled else 0
         with self._lock:
             changed = ((eff_offset != self._desired_offset)
                        or (eff_max != self._desired_max)
@@ -455,7 +457,7 @@ class DgpuWatcher:
             self._status["enabled"] = bool(enabled) or bool(max_enabled) or bool(mem_enabled)
             self._status["desired_offset"] = eff_offset
             self._status["desired_max_clock"] = eff_max
-            self._status["desired_mem_clock"] = eff_mem
+            self._status["desired_mem_offset"] = eff_mem
             self._status["auto"] = bool(auto)
             # An explicit change should take effect immediately, even if we had
             # idle-cleared; the idle logic will clear again if still idle.
@@ -471,8 +473,8 @@ class DgpuWatcher:
             bool(cfg.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])),
             bool(cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"])),
             int(cfg.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"])),
-            bool(cfg.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"])),
-            int(cfg.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"])),
+            bool(cfg.get("dgpu_mem_offset_enabled", DEFAULT_CONFIG["dgpu_mem_offset_enabled"])),
+            int(cfg.get("dgpu_mem_offset_mhz", DEFAULT_CONFIG["dgpu_mem_offset_mhz"])),
         )
 
     def status(self) -> Dict:
@@ -525,7 +527,7 @@ class DgpuWatcher:
             return
 
         eff_offset, eff_max, eff_mem = self._target()
-        enabled = eff_offset > 0 or eff_max > 0 or eff_mem > 0
+        enabled = eff_offset > 0 or eff_max > 0 or eff_mem != 0
 
         if not enabled:
             if self._applied_offset or self._applied_max or self._applied_mem:
@@ -561,14 +563,14 @@ class DgpuWatcher:
             self._poll_and_maybe_idle_clear(now)
         self._sync_status()
 
-    def _set_applied(self, offset: int, max_clock: int, mem_clock: int = 0) -> None:
+    def _set_applied(self, offset: int, max_clock: int, mem_offset: int = 0) -> None:
         with self._lock:
             self._applied_offset = offset
             self._applied_max = max_clock
-            self._applied_mem = mem_clock
+            self._applied_mem = mem_offset
             self._status["offset_mhz"] = offset or None
             self._status["max_clock_mhz"] = max_clock or None
-            self._status["mem_clock_mhz"] = mem_clock or None
+            self._status["mem_offset_mhz"] = mem_offset or None
 
     def _do_apply(self, now: float) -> None:
         if now - self._last_apply_fail < RETRY_BACKOFF_SEC:
@@ -579,12 +581,12 @@ class DgpuWatcher:
             # If a clock lock failed, record the offset but keep that clock at 0
             # so we retry (and surface the error) instead of pretending it applied.
             applied_max = 0 if res.get("max_clock_error") else eff_max
-            applied_mem = 0 if res.get("mem_clock_error") else eff_mem
+            applied_mem = 0 if res.get("mem_offset_error") else eff_mem
             self._set_applied(eff_offset, applied_max, applied_mem)
             with self._lock:
                 self._idle_cleared = False
                 self._last_poll = now
-                self._status["last_error"] = res.get("mem_clock_error") or res.get("max_clock_error")
+                self._status["last_error"] = res.get("mem_offset_error") or res.get("max_clock_error")
         else:
             with self._lock:
                 self._last_apply_fail = now
@@ -677,11 +679,11 @@ def set_desired_config(enabled: Optional[bool] = None, offset: Optional[int] = N
                        max_enabled: Optional[bool] = None,
                        max_clock: Optional[int] = None,
                        mem_enabled: Optional[bool] = None,
-                       mem_clock: Optional[int] = None) -> None:
+                       mem_offset: Optional[int] = None) -> None:
     """Persist the desired dGPU tuning and act immediately.
 
     Only the arguments that are not None are changed, so the undervolt,
-    max-clock and memory-clock controls stay independent. Disabling always
+    max-clock and memory-offset controls stay independent. Disabling always
     forces the affected value back to stock, even though applied state is
     process-local.
     """
@@ -704,23 +706,23 @@ def set_desired_config(enabled: Optional[bool] = None, offset: Optional[int] = N
             mc = max(0, min(MAX_CLOCK_MHZ, int(max_clock)))
             cfg["dgpu_max_clock_mhz"] = mc
         if mem_enabled is not None:
-            cfg["dgpu_mem_clock_enabled"] = bool(mem_enabled)
-        if mem_clock is not None:
-            mc = max(0, min(MAX_MEM_CLOCK_MHZ, int(mem_clock)))
-            cfg["dgpu_mem_clock_mhz"] = mc
+            cfg["dgpu_mem_offset_enabled"] = bool(mem_enabled)
+        if mem_offset is not None:
+            mo = max(MEM_OFFSET_MIN_MHZ, min(MEM_OFFSET_MAX_MHZ, int(mem_offset)))
+            cfg["dgpu_mem_offset_mhz"] = mo
         # Keep each stored cap consistent with its switch.
         if not cfg.get("dgpu_max_clock_enabled", False):
             cfg["dgpu_max_clock_mhz"] = 0
-        if not cfg.get("dgpu_mem_clock_enabled", False):
-            cfg["dgpu_mem_clock_mhz"] = 0
+        if not cfg.get("dgpu_mem_offset_enabled", False):
+            cfg["dgpu_mem_offset_mhz"] = 0
         return cfg
 
     cfg = update_config(_mutate)
 
     new_max_enabled = bool(cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"]))
     new_max = int(cfg.get("dgpu_max_clock_mhz", DEFAULT_CONFIG["dgpu_max_clock_mhz"]))
-    new_mem_enabled = bool(cfg.get("dgpu_mem_clock_enabled", DEFAULT_CONFIG["dgpu_mem_clock_enabled"]))
-    new_mem = int(cfg.get("dgpu_mem_clock_mhz", DEFAULT_CONFIG["dgpu_mem_clock_mhz"]))
+    new_mem_enabled = bool(cfg.get("dgpu_mem_offset_enabled", DEFAULT_CONFIG["dgpu_mem_offset_enabled"]))
+    new_mem = int(cfg.get("dgpu_mem_offset_mhz", DEFAULT_CONFIG["dgpu_mem_offset_mhz"]))
     watcher.set_desired(enabled, offset,
                         bool(cfg.get("dgpu_undervolt_auto", DEFAULT_CONFIG["dgpu_undervolt_auto"])),
                         new_max_enabled, new_max, new_mem_enabled, new_mem)
@@ -729,7 +731,7 @@ def set_desired_config(enabled: Optional[bool] = None, offset: Optional[int] = N
     # explicit user action always applies now, even when auto-apply is off.
     bdf = find_nvidia_bdf()
     active = bdf is not None and runtime_status(bdf) == "active"
-    wants = enabled or (new_max_enabled and new_max > 0) or (new_mem_enabled and new_mem > 0)
+    wants = enabled or (new_max_enabled and new_max > 0) or (new_mem_enabled and new_mem != 0)
     if active and wants:
         watcher.tick(force_apply=True)
     elif active:
@@ -761,6 +763,8 @@ def set_auto_config(enabled: bool) -> Dict:
 
 def apply_from_config() -> None:
     """Reconcile the watcher with persisted config and act once (login/resume)."""
+    # Release any memory-clock pin left by an older build before reconciling.
+    reset_legacy_mem_pin()
     watcher.load_desired_from_config()
     watcher.tick()
 
@@ -781,8 +785,8 @@ def human_status() -> str:
         parts.append(f"+{st['desired_offset']} MHz")
     if st.get("desired_max_clock"):
         parts.append(f"cap {st['desired_max_clock']} MHz")
-    if st.get("desired_mem_clock"):
-        parts.append(f"mem {st['desired_mem_clock']} MHz")
+    if st.get("desired_mem_offset"):
+        parts.append(f"mem {st['desired_mem_offset']:+d} MHz")
     label = ", ".join(parts) or "off"
     if st.get("applied"):
         suffix = "" if st.get("auto", True) else " (manual)"
@@ -825,6 +829,9 @@ def run_watcher() -> None:
             return 0.0
 
     watcher.load_desired_from_config()
+    # Drop any legacy memory-clock pin once at startup so a locked clock from
+    # an older build can never linger (the driver keeps it across restarts).
+    reset_legacy_mem_pin()
     watcher.write_state()
     last_mtime = _mtime()
     while not stopping["flag"]:

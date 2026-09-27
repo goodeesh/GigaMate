@@ -203,9 +203,8 @@ def _gpu_page_patches(gp, *, probe=None, state_file=None,
     """Common patch set for GpuPage: no real helper, sysfs or hardware."""
     probe = probe if probe is not None else {
         "supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
-        "mem_max_clock_mhz": 12001,
-        "mem_supported_clocks": [405, 810, 9001, 11001, 12001],
-        "mem_lock_api": True, "helper_version": 2,
+        "mem_max_clock_mhz": 12001, "mem_offset_api": True,
+        "helper_version": 4,
     }
     state_file = state_file if state_file is not None else {}
     return [
@@ -215,7 +214,7 @@ def _gpu_page_patches(gp, *, probe=None, state_file=None,
         patch.object(gp.dgpu_tune, "probe_if_awake", return_value=probe),
         patch.object(gp.dgpu_tune, "read_state_file", return_value=state_file),
         patch.object(gp.dgpu_tune, "wake_holders", return_value=list(holders)),
-        patch.object(gp.dgpu_tune, "cached_helper_version", return_value=3),
+        patch.object(gp.dgpu_tune, "cached_helper_version", return_value=4),
         patch.object(gp, "get_gpu_state", return_value=gpu_state),
     ]
 
@@ -239,36 +238,34 @@ class _StartPatch:
         return False
 
 
-def test_gpu_page_mem_clock_slider(qapp):
-    """The memory slider only offers clocks the GPU reported, and stages values."""
+def test_gpu_page_mem_offset_slider(qapp):
+    """The memory slider is a signed offset, read back from the card."""
     from gigamate import config as config_mod
     from gigamate.gpu import GpuState
     import gigamate.ui.pages.gpu_page as gp
 
     cfg = dict(config_mod.load())
-    cfg.update({"dgpu_mem_clock_enabled": True, "dgpu_mem_clock_mhz": 11001})
+    cfg.update({"dgpu_mem_offset_enabled": True, "dgpu_mem_offset_mhz": 300})
     config_mod.save(cfg)
 
     page = gp.GpuPage()
     gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
-    state_file = {"applied_mem": 11001}
+    state_file = {"applied_mem": 300}
     with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, state_file=state_file)):
         page.reload_from_config()
 
-    # Idle memory states (405/810) are not offered; steps map to real clocks.
-    assert page._mem_choices == [9001, 11001, 12001]
-    assert page.mem_slider.minimum() == 0
-    assert page.mem_slider.maximum() == 2
-    assert page._mem_clock() == 11001
-    assert page.mem_val.text() == "11001 MHz"
-    assert "pinned at 11001 MHz" in page.mem_status_lbl.text()
+    assert page.mem_slider.minimum() == gp.dgpu_tune.MEM_OFFSET_MIN_MHZ
+    assert page.mem_slider.maximum() == gp.dgpu_tune.MEM_OFFSET_MAX_MHZ
+    assert page._mem_offset() == 300
+    assert page.mem_val.text() == "+300 MHz"
+    assert "Applied: +300 MHz" in page.mem_status_lbl.text()
 
     # Dragging only stages: it must not touch the hardware by itself.
     with patch.object(gp.dgpu_tune, "set_desired_config") as sdc:
-        page.mem_slider.setValue(2)
+        page.mem_slider.setValue(-150)
         assert sdc.call_count == 0
-        assert page.mem_val.text() == "12001 MHz (max)"
-        assert "memory clock" in page.apply_hint_lbl.text()
+        assert page.mem_val.text() == "-150 MHz"
+        assert "memory offset" in page.apply_hint_lbl.text()
     page.deleteLater()
 
 
@@ -285,7 +282,7 @@ def test_gpu_page_single_apply_commits_all_controls(qapp):
         page.reload_from_config()
         page.uv_slider.setValue(120)
         page.max_slider.setValue(2500)
-        page.mem_slider.setValue(0)  # 9001 MHz
+        page.mem_slider.setValue(300)
 
         with patch.object(gp.dgpu_tune, "set_desired_config") as sdc, \
              patch.object(page, "_read_published"):
@@ -293,7 +290,7 @@ def test_gpu_page_single_apply_commits_all_controls(qapp):
             sdc.assert_called_once_with(
                 enabled=True, offset=120,
                 max_enabled=True, max_clock=2500,
-                mem_enabled=True, mem_clock=9001,
+                mem_enabled=True, mem_offset=300,
             )
     page.deleteLater()
 
@@ -308,7 +305,7 @@ def test_gpu_page_reset_buttons_apply_immediately(qapp):
     cfg.update({
         "dgpu_undervolt_enabled": True, "dgpu_undervolt_offset_mhz": 100,
         "dgpu_max_clock_enabled": True, "dgpu_max_clock_mhz": 2500,
-        "dgpu_mem_clock_enabled": True, "dgpu_mem_clock_mhz": 11001,
+        "dgpu_mem_offset_enabled": True, "dgpu_mem_offset_mhz": 300,
     })
     config_mod.save(cfg)
 
@@ -325,31 +322,30 @@ def test_gpu_page_reset_buttons_apply_immediately(qapp):
             assert sdc.call_args.kwargs == {"max_enabled": False, "max_clock": 0}
             sdc.reset_mock()
             page._reset_mem()
-            assert sdc.call_args.kwargs == {"mem_enabled": False, "mem_clock": 0}
+            assert sdc.call_args.kwargs == {"mem_enabled": False, "mem_offset": 0}
     page.deleteLater()
 
 
-def test_gpu_page_mem_clock_hidden_when_unsupported(qapp):
-    """No selectable clocks (or a stale helper) must disable the control."""
+def test_gpu_page_mem_offset_hidden_when_unsupported(qapp):
+    """No memory-offset API (or a stale helper) must disable the control."""
     from gigamate.gpu import GpuState
     import gigamate.ui.pages.gpu_page as gp
 
     page = gp.GpuPage()
     gpu = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
     probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
-             "mem_supported_clocks": [], "mem_max_clock_mhz": None}
+             "mem_max_clock_mhz": None, "mem_offset_api": False, "helper_version": 4}
     with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, probe=probe)):
         page.reload_from_config()
-    assert page._mem_choices == []
     assert not page.mem_slider.isEnabled()
-    assert "did not report" in page.mem_support_lbl.text()
+    assert "does not support the memory-clock offset" in page.mem_support_lbl.text()
 
-    # A helper too old to understand the memory argument must say so.
+    # A helper too old to understand the offset argument must say so.
     page2 = gp.GpuPage()
     probe2 = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
-              "mem_supported_clocks": [9001, 12001], "mem_max_clock_mhz": 12001}
+              "mem_max_clock_mhz": 12001, "mem_offset_api": True, "helper_version": 3}
     with _StartPatch(_gpu_page_patches(gp, gpu_state=gpu, probe=probe2)), \
-         patch.object(gp.dgpu_tune, "cached_helper_version", return_value=1):
+         patch.object(gp.dgpu_tune, "cached_helper_version", return_value=3):
         page2.reload_from_config()
     assert "too old" in page2.mem_support_lbl.text()
     assert not page2.mem_slider.isEnabled()
@@ -373,8 +369,7 @@ def test_gpu_page_never_wakes_a_sleeping_dgpu(qapp):
         spawns.append(args[0])
         return {"ok": True, "device": "x", "offset_mhz": 200, "util": 0,
                 "gpu_max_clock_mhz": 3090, "mem_max_clock_mhz": 12001,
-                "mem_supported_clocks": [9001, 11001, 12001],
-                "mem_lock_api": True, "helper_version": 2}
+                "mem_offset_api": True, "helper_version": 4}
 
     asleep = GpuState(present=True, vendor="nvidia", status="suspended", power_state="D3cold")
     page = gp.GpuPage()
@@ -408,8 +403,7 @@ def test_gpu_page_does_not_poll_nvml_while_awake_either(qapp):
         spawns.append(args[0])
         return {"ok": True, "device": "x", "gpu_max_clock_mhz": 3090,
                 "mem_max_clock_mhz": 12001,
-                "mem_supported_clocks": [9001, 11001, 12001],
-                "mem_lock_api": True, "helper_version": 2}
+                "mem_offset_api": True, "helper_version": 4}
 
     awake = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
     state_file = {"ts": 1.0, "offset_mhz": 200,
@@ -448,8 +442,7 @@ def test_gpu_page_shows_configured_value_while_asleep(qapp):
     state_file = {"ts": 1.0, "offset_mhz": 0, "applied_offset": 0, "applied_max": 0}
     probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
              "mem_max_clock_mhz": 12001,
-             "mem_supported_clocks": [9001, 11001, 12001],
-             "mem_lock_api": True, "helper_version": 2}
+             "mem_offset_api": True, "helper_version": 4}
     with _StartPatch(_gpu_page_patches(gp, gpu_state=asleep, probe=probe,
                                        state_file=state_file)):
         page.reload_from_config()
@@ -474,8 +467,7 @@ def test_gpu_page_reports_paused_while_awake_idle(qapp):
                   "applied_mem": 0, "idle_cleared": True, "runtime": "active", "auto": True}
     probe = {"supported": True, "device": "RTX 5060", "gpu_max_clock_mhz": 3090,
              "mem_max_clock_mhz": 12001,
-             "mem_supported_clocks": [9001, 11001, 12001],
-             "mem_lock_api": True, "helper_version": 2}
+             "mem_offset_api": True, "helper_version": 4}
     with _StartPatch(_gpu_page_patches(gp, gpu_state=awake, probe=probe,
                                        state_file=state_file)):
         page.reload_from_config()
