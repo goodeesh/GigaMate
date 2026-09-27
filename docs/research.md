@@ -283,7 +283,8 @@ controls:
   is present in this driver but is documented as unreliable and is rejected on
   mobile parts, so it is deliberately not used.
 - Verified on the AERO X16's RTX 5060 Laptop (`0000:64:00.0`, driver 615.71.09):
-  apply/read-back/clear, locked clocks and the memory-clock pin all work.
+  apply/read-back/clear, locked clocks and the memory-clock V/F offset all work
+  (`nvmlDeviceGetMemClkVfOffset` reads back the applied offset).
 - **Sleep-safety**: opening NVML holds a PM reference and wakes the dGPU, so the
   tuning must be applied only while `power/runtime_status == active` (detected
   via sysfs, which does not wake it), cleared on suspend, and re-applied after
@@ -298,11 +299,11 @@ controls:
   any value re-applies immediately, and publishes its state to
   `$XDG_RUNTIME_DIR/gigamate-dgpu.json` for cross-process status. Config keys:
   `dgpu_undervolt_{enabled,offset_mhz,auto}`,
-  `dgpu_max_clock_{enabled,mhz}`, `dgpu_mem_clock_{enabled,mhz}` and
+  `dgpu_max_clock_{enabled,mhz}`, `dgpu_mem_offset_{enabled,mhz}` and
   `dgpu_telemetry`; CLI
   `gigamate gpu undervolt <0-255|off|status>`,
   `gigamate gpu maxclock <0-4000|off|status>`,
-  `gigamate gpu memclock <MHz|off|status>`,
+  `gigamate gpu memoffset <-1000..2000|off|status>`,
   `gigamate gpu telemetry <on|off|auto|status>` and
   `gigamate gpu auto <on|off|status>`; Center controls (three sliders — one
   Apply commits all of them — each with its own Reset), plus a Settings toggle
