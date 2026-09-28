@@ -76,8 +76,12 @@ class DashboardPage(QWidget):
 
         p_title = QLabel("Power & Thermal Profiles")
         p_title.setProperty("class", "CardTitle")
-        p_sub = QLabel("Select hardware performance and acoustic mode. Dynamic Boost & SmartShift auto-scale.")
+        p_sub = QLabel(
+            "Controls hardware power and thermal policy. Effects vary by laptop model and firmware, "
+            "ranging from fan response curves to TDP/TGP power limits."
+        )
         p_sub.setProperty("class", "CardSubtitle")
+        p_sub.setWordWrap(True)
         prof_layout.addWidget(p_title)
         prof_layout.addWidget(p_sub)
 

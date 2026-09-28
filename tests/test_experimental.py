@@ -161,7 +161,10 @@ class TestSchema:
         assert "Gigabyte GAMING A16 / A18 (family)" in names
         assert "Gigabyte AERO X16 (family)" in names
         for p in dmi:
-            assert p.acpi.confidence == "experimental"
+            if p.name == "Gigabyte GAMING A16 / A18 (family)":
+                assert p.acpi.confidence == "verified"
+            else:
+                assert p.acpi.confidence == "experimental"
             assert validate_profile(p) == []
 
     def test_builtin_usb_profiles_exclude_dmi(self):
