@@ -89,6 +89,33 @@ def find_nvidia_bdf():
     return None
 
 
+def runtime_status(bdf):
+    """Read sysfs runtime_status ('active', 'suspended', etc.) without waking the GPU."""
+    try:
+        with open(os.path.join(_PCI_DEVICES, bdf, "power", "runtime_status")) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def power_state(bdf):
+    """Read sysfs power_state ('D0', 'D3hot', 'D3cold', etc.) without waking the GPU."""
+    try:
+        with open(os.path.join(_PCI_DEVICES, bdf, "power_state")) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def is_dgpu_awake(bdf):
+    """True only when the dGPU is active and not powered down into D3."""
+    rstatus = runtime_status(bdf)
+    pstate = power_state(bdf)
+    if (rstatus == "suspended") or (pstate in ("D3hot", "D3cold")):
+        return False
+    return rstatus == "active"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # NVML backends
 # ──────────────────────────────────────────────────────────────────────────────
@@ -316,8 +343,14 @@ class _PynvmlBackend:
             pass
 
 
-def open_backend(bdf):
-    """Open the best available NVML backend for `bdf`."""
+def open_backend(bdf, allow_wake=False):
+    """Open the best available NVML backend for `bdf`.
+
+    Raises NvmlError if the dGPU is asleep (suspended / D3) unless allow_wake=True,
+    ensuring NVML never inadvertently resumes a powered-down GPU.
+    """
+    if not allow_wake and not is_dgpu_awake(bdf):
+        raise NvmlError("dGPU is suspended or powered down (NVML forbidden to prevent wake)")
     try:
         return _PynvmlBackend().open(bdf)
     except ImportError:
@@ -458,6 +491,9 @@ def cmd_reset_mem_pin():
     bdf = find_nvidia_bdf()
     if bdf is None:
         return _emit({"ok": False, "error": "no NVIDIA dGPU found"})
+    if not is_dgpu_awake(bdf):
+        # A suspended or D3 dGPU has already lost any pin or must not be woken up.
+        return _emit({"ok": True, "device": bdf, "skipped": "dgpu_asleep"})
     try:
         be = open_backend(bdf)
     except Exception as exc:  # noqa: BLE001

@@ -199,3 +199,21 @@ def test_apply_hardware_settings_skips_unverified_model_profile():
         assert results["profile"] is False
         mock_ctrl_cls.assert_not_called()
         mock_sync_sys.assert_not_called()
+
+
+def test_apply_hardware_settings_skips_redundant_acpi_profile_write():
+    """If the current hardware profile already matches target, do not write to EC (prevents dGPU wake)."""
+    cfg = {"acpi_profile": 0, "sync_system_power": False}
+    with patch("gigamate.acpi.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.hardware.resolve_model",
+               return_value=ModelMatch(_verified_profile(), "builtin-usb", False)):
+        mock_ctrl = mock_ctrl_cls.return_value
+        mock_ctrl.available = True
+        mock_ctrl.get_profile.return_value = FanProfile.QUIET
+
+        results = apply_hardware_settings(cfg)
+
+        assert results["profile"] is True
+        mock_ctrl.get_profile.assert_called_once()
+        mock_ctrl.set_profile.assert_not_called()
+

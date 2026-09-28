@@ -80,6 +80,13 @@ class GpuPage(QWidget):
         self._gpu_awake = False
         self._init_ui()
 
+        # Prime the watcher state before the first timer tick so the dGPU-asleep
+        # fallback has valid data from the very first _refresh call.
+        try:
+            self._hw = dgpu_tune.read_state_file() or {}
+        except Exception:
+            pass
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_tick)
         self.timer.start(1500)
@@ -90,9 +97,11 @@ class GpuPage(QWidget):
         self._uv_cfg_key = None
         self._max_cfg_key = None
         self._mem_offset_cfg_key = None
-        # Refresh first so the awake flag (a free sysfs read) is current before
-        # the probe decision is made; otherwise the initial load would look like a
-        # wake transition and probe a tick later instead.
+        # Load the watcher state file first so self._hw is populated before the
+        # first _refresh. This ensures the dGPU-asleep fallback (reading
+        # supported/device from the state file rather than from an NVML probe)
+        # is available on the very first render.
+        self._read_published()
         self._refresh()
         self._read_published(force_probe=True)
         self._refresh()
@@ -509,16 +518,30 @@ class GpuPage(QWidget):
             pass
         if probed:
             self._probed = probed
-        supported = bool(probed.get("supported"))
+
+        # When the probe cache is cold (first open while dGPU is asleep), fall
+        # back to the watcher's state file which already knows if tuning is
+        # supported. This lets the UI show and edit the configured values without
+        # touching NVML (which would wake the dGPU).
+        if not probed:
+            hw_supported = bool(self._hw.get("supported"))
+            hw_device = self._hw.get("device", "NVIDIA GPU")
+            supported = hw_supported and gpu.vendor == "nvidia"
+            probed_for_display = {"supported": hw_supported, "device": hw_device}
+        else:
+            supported = bool(probed.get("supported"))
+            probed_for_display = probed
 
         if gpu.vendor != "nvidia":
             self.uv_support_lbl.setText("Tuning is only available for NVIDIA dGPUs.")
             supported = False
         elif supported:
-            self.uv_support_lbl.setText(f"Supported on {probed.get('device') or 'NVIDIA GPU'}.")
+            device_name = probed_for_display.get("device") or "NVIDIA GPU"
+            asleep_suffix = " — asleep (D3cold)" if not self._gpu_awake else ""
+            self.uv_support_lbl.setText(f"Supported on {device_name}.{asleep_suffix}")
         else:
             self.uv_support_lbl.setText(
-                "Not supported by this GPU/driver: " + str(probed.get("error") or "unavailable")
+                "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
             )
 
         self.uv_slider.setEnabled(supported)
@@ -529,7 +552,7 @@ class GpuPage(QWidget):
         if supported:
             self._sync_uv_controls()
             self._sync_max_controls()
-            self._sync_mem_controls()
+            self._sync_mem_controls(probed_for_display)
         else:
             self.uv_status_lbl.setText("")
             self.max_status_lbl.setText("")
@@ -620,7 +643,7 @@ class GpuPage(QWidget):
             state = "Off (unlocked)"
         self.max_status_lbl.setText(state)
 
-    def _sync_mem_controls(self) -> None:
+    def _sync_mem_controls(self, probed_for_display: Optional[dict] = None) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_mem_offset_enabled", False))
         wanted = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0)
@@ -638,7 +661,18 @@ class GpuPage(QWidget):
         stale_helper = (version is not None
                         and version < dgpu_tune.REQUIRED_HELPER_VERSION)
 
-        offset_api = bool(self._probed.get("mem_offset_api"))
+        # When probe cache is cold (dGPU asleep, no NVML probe run yet), fall
+        # back to the watcher state file which carries mem_offset_api from the
+        # last time the GPU was awake.
+        effective_probed = probed_for_display if probed_for_display is not None else self._probed
+        offset_api = bool(effective_probed.get("mem_offset_api"))
+        # If neither probe nor state file have it yet, assume supported when the
+        # watcher state explicitly says the GPU is supported (avoids hiding the
+        # mem section on every cold open while asleep).
+        if not offset_api and bool(st.get("supported")) and not self._gpu_awake:
+            # Optimistic: we've seen this GPU supported before; re-check when awake.
+            offset_api = True
+
         mem_supported = offset_api and not stale_helper
         if stale_helper:
             self.mem_support_lbl.setText(
@@ -685,3 +719,4 @@ class GpuPage(QWidget):
         else:
             state = "Off (stock)"
         self.mem_status_lbl.setText(state)
+
