@@ -1,6 +1,6 @@
 {
   "name": "Gigabyte GAMING A16 / A18 (family)",
-  "version": 3,
+  "version": 4,
   "dmi": {
     "product_families": ["GIGABYTE GAMING"]
   },
@@ -11,7 +11,7 @@
     "has_fan_control": true,
     "has_temperature": true,
     "has_power_profiles": true,
-    "confidence": "experimental",
+    "confidence": "verified",
     "fan_count": 2,
     "fan_labels": ["CPU Fan", "GPU Fan"],
     "sensor_labels": {

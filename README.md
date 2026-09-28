@@ -263,16 +263,16 @@ For details on the USB RGB protocol and ACPI reverse engineering, see
 
 **Verified** (confirmed on real hardware):
 
-| Key | Match | Model |
-|-----|-------|-------|
-| USB `0414:8105` | Keyboard VID:PID | Gigabyte Aero X16 (EG61VH) |
+| Key | Match | Model | Profiles |
+|-----|-------|-------|----------|
+| USB `0414:8105` | Keyboard VID:PID | Gigabyte Aero X16 (EG61VH) | Quiet / Balanced / Performance / Gaming |
+| DMI `product_family: GIGABYTE GAMING` | DMI | Gigabyte GAMING A16 / A18 family | Eco / Balanced / Boost |
 
 **Experimental** (community-evidenced, unconfirmed — opt-in per machine, see
 [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md)):
 
 | Key | Match | Model | Profiles |
 |-----|-------|-------|----------|
-| DMI `product_family: GIGABYTE GAMING` | DMI | Gigabyte GAMING A16 / A18 family | Eco / Balanced / Boost |
 | DMI `product_name prefix: GIGABYTE AERO X16` | DMI | Gigabyte AERO X16 family (all variants) | Quiet / Balanced / Performance / Gaming |
 
 Experimental profiles appear **disabled** until you enable them once (tray menu,

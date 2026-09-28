@@ -9,14 +9,19 @@ Sensors (temperature, fan RPM, fan duty) are **not** gated — they work on ever
 machine where the `gigamate_acpi` module loads. Only profile *switching* is
 model-gated.
 
+## Promoted to Confirmed
+
+| Model / DMI match | Profiles | Verification |
+|---|---|---|
+| **GIGABYTE GAMING** family — A16 (GA6H gen: CMH/CVH/CTH/CWH/GA6H; 2026 gens; PRO; AMD 3xH/5xH) and A18 | Eco / Balanced / Boost (`0xED` 0–2) | Verified on real hardware (**A16 CMH**, issue #19): temp/fan RPM/duty sensors and in-game GPU power limit switching (55 W baseline up to ~70–80 W Boost) confirmed functional. |
+
 ## Shipped as Experimental
 
 | Model / DMI match | Profiles | Evidence |
 |---|---|---|
-| **GIGABYTE GAMING** family — A16 (GA6H gen: CMH/CVH/CTH/CWH/GA6H; 2026 gens; PRO; AMD 3xH/5xH) and A18 | Eco / Balanced / Boost (`0xED` 0–2) | Linux WMI driver validated **A16 CWH**; Windows `FanControl.GigabyteWMI` confirmed **A16 CVH**; user report on **A16 CMH**. Family-gated by the driver on `product_family == "GIGABYTE GAMING"`. 2026 gens presumed same platform. |
 | **GIGABYTE AERO X16** family (all variants) | Quiet / Balanced / Performance / Gaming (`0xED` 0–3) | In-house reverse-engineering verified on **EG61VH** (`product_name` `GIGABYTE AERO X16 1VH`); the siblings share the platform. |
 
-The DA6H-generation evidence is triple-sourced:
+The DA6H-generation evidence was triple-sourced:
 
 - `JoseLopez36/gigabyte-laptop-wmi-A16` (Linux kernel driver): `perf_mode 0xED`
   values 0–2 = eco/balanced/boost (GPU TGP); `dynamic_boost 0xE7`; `fan_turbo
@@ -27,9 +32,8 @@ The DA6H-generation evidence is triple-sourced:
   extracted from Gigabyte's `ComData.dll` that is **byte-identical** to the
   Linux driver's (`{57, 68, 80, …, 229}` = `{0x39, 0x44, 0x50, …, 0xE5}`).
 - Our own user report (issue #19, A16 CMH): module loads; temp/fan RPM/duty
-  sensors work; fan RPM sane; GPU power limit 55→70 W under load (matches the
-  driver's boost ≈70 W, max 80 W). The `0xED` *profile semantics* were not
-  independently confirmed on the CMH, hence **Experimental**, not Verified.
+  sensors work; fan RPM sane; in-game GPU power limit confirmed switching
+  (55 W to ~70–80 W with Dynamic Boost). Confirmed and enabled by default.
 
 ## Blocked (known, not shipped)
 
