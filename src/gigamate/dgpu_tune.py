@@ -328,7 +328,10 @@ def reset_legacy_mem_pin() -> None:
     The previous control pinned memory via ``nvmlDeviceSetMemoryLockedClocks``;
     that lock outlives the process, so a build that only knows the new V/F
     offset must explicitly release it once. Best effort, never raises.
+    Never runs if the dGPU is suspended or powered down.
     """
+    if not nvml_allowed():
+        return
     try:
         _run_helper(["reset-mem-pin"])
     except Exception:  # noqa: BLE001
@@ -499,12 +502,16 @@ class DgpuWatcher:
         pstate = power_state(bdf)
         asleep = (rstatus == "suspended") or (pstate in ("D3hot", "D3cold"))
 
+        # Probe only if awake or already cached; never wake a sleeping dGPU during tick().
+        probed = probe_if_awake() if not asleep else (dict(_probe_cache) if _probe_cache else {})
+        supp = bool(probed.get("supported")) if probed else None
+
         with self._lock:
             self._status.update({
                 "device": bdf,
                 "runtime": rstatus,
                 "power_state": pstate,
-                "supported": bool(probe().get("supported")),
+                "supported": supp if supp is not None else self._status.get("supported"),
             })
 
         if asleep:

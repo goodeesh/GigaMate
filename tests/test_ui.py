@@ -1674,3 +1674,24 @@ def test_tray_activate_center_falls_back_to_spawn():
              patch("gigamate.tray.subprocess.Popen") as popen:
             tray._activate_center()
         popen.assert_called_once()
+
+
+def test_main_window_init_does_not_wake_suspended_dgpu(qapp):
+    """Opening GigaMate Center while the dGPU is suspended must never invoke the NVML helper."""
+    from gigamate.ui.main_window import MainWindow
+    from gigamate.gpu import GpuState
+
+    fake_gpu = GpuState(present=True, status="suspended", power_state="D3cold", vendor="nvidia")
+    with patch("gigamate.ui.pages.gpu_page.get_gpu_state", return_value=fake_gpu), \
+         patch("gigamate.capabilities.get_gpu_state", return_value=fake_gpu), \
+         patch("gigamate.dgpu_tune.find_nvidia_bdf", return_value="0000:64:00.0"), \
+         patch("gigamate.dgpu_tune.runtime_status", return_value="suspended"), \
+         patch("gigamate.dgpu_tune.power_state", return_value="D3cold"), \
+         patch("gigamate.dgpu_tune._run_helper") as rh:
+        win = MainWindow()
+        # Ensure that during __init__ and page setups no helper subprocess is run
+        rh.assert_not_called()
+
+        # Switch to GPU page
+        win.btn_gpu.click()
+        rh.assert_not_called()

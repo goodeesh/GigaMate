@@ -98,9 +98,14 @@ def _apply_hardware_settings_locked(
                     try:
                         ctrl = AcpiController()
                         acpi_available = ctrl.available
-                        if ctrl.available and ctrl.set_profile(fp):
-                            results["profile"] = True
-                            logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
+                        if ctrl.available:
+                            current_profile = ctrl.get_profile()
+                            if current_profile == fp:
+                                results["profile"] = True
+                                logger.debug(f"Hardware sync: ACPI power profile already {fp.name} ({fp.value}), skipping write")
+                            elif ctrl.set_profile(fp):
+                                results["profile"] = True
+                                logger.info(f"Hardware sync: ACPI power profile set to {fp.name} ({fp.value})")
                     except Exception as exc:
                         logger.warning(f"Hardware sync failed for ACPI power profile: {exc}")
 

@@ -560,9 +560,17 @@ def test_set_desired_config_mem_offset_independent():
 
 
 def test_reset_legacy_mem_pin_calls_helper():
-    with mock.patch.object(dgpu_tune, "_run_helper") as rh:
+    with mock.patch.object(dgpu_tune, "nvml_allowed", return_value=True), \
+         mock.patch.object(dgpu_tune, "_run_helper") as rh:
         dgpu_tune.reset_legacy_mem_pin()
         rh.assert_called_once_with(["reset-mem-pin"])
+
+
+def test_reset_legacy_mem_pin_skips_when_asleep():
+    with mock.patch.object(dgpu_tune, "nvml_allowed", return_value=False), \
+         mock.patch.object(dgpu_tune, "_run_helper") as rh:
+        dgpu_tune.reset_legacy_mem_pin()
+        rh.assert_not_called()
 
 
 def test_helper_version_detects_stale_install():
@@ -670,8 +678,9 @@ class _FakeBackend:
         pass
 
 
-def _helper_call(mod, argv, be):
+def _helper_call(mod, argv, be, awake=True):
     with mock.patch.object(mod, "find_nvidia_bdf", return_value="0000:64:00.0"), \
+         mock.patch.object(mod, "is_dgpu_awake", return_value=awake), \
          mock.patch.object(mod, "open_backend", return_value=be):
         return mod.main(["gigamate-dgpu-nvml", *argv])
 
@@ -763,6 +772,24 @@ def test_helper_reset_mem_pin(capsys):
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["ok"] is True
     assert be.mem_pin_reset is True
+
+
+def test_helper_reset_mem_pin_skips_when_asleep(capsys):
+    mod = _load_helper()
+    be = _FakeBackend()
+    _helper_call(mod, ["reset-mem-pin"], be, awake=False)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["ok"] is True
+    assert out.get("skipped") == "dgpu_asleep"
+    assert be.mem_pin_reset is False
+
+
+def test_helper_open_backend_refuses_when_asleep():
+    mod = _load_helper()
+    with mock.patch.object(mod, "is_dgpu_awake", return_value=False):
+        import pytest
+        with pytest.raises(mod.NvmlError, match="dGPU is suspended"):
+            mod.open_backend("0000:64:00.0")
 
 
 def test_helper_probe_reports_ceiling(capsys):
