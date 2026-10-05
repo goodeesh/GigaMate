@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "name": "GIGABYTE AERO X16 1VH",
+  "vid": "0x0414",
+  "pid": "0x8104",
+  "interfaces": [],
+  "control_interface": 0,
+  "colour_map": {},
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "fan_count": 2,
+    "fan_labels": [
+      "Fan 1",
+      "Fan 2"
+    ],
+    "sensor_labels": {
+      "temp_cpu": "CPU Temp",
+      "temp_socket": "Socket Temp"
+    },
+    "profiles": {
+      "0": {
+        "name": "Quiet",
+        "desc": ""
+      },
+      "1": {
+        "name": "Balanced",
+        "desc": ""
+      },
+      "2": {
+        "name": "Performance",
+        "desc": ""
+      },
+      "3": {
+        "name": "Gaming",
+        "desc": ""
+      }
+    },
+    "backend": "module",
+    "confidence": "verified"
+  }
+}
