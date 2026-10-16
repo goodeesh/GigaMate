@@ -1,8 +1,10 @@
 """Tests for hardware state synchronization and reapplication (hardware.py)."""
 
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
+from gigamate.battery import BatteryInfo
 from gigamate.hardware import apply_hardware_settings
 from gigamate.acpi import FanProfile
 from gigamate.profiles import AcpiConfig, DeviceProfile, ModelMatch
@@ -216,4 +218,104 @@ def test_apply_hardware_settings_skips_redundant_acpi_profile_write():
         assert results["profile"] is True
         mock_ctrl.get_profile.assert_called_once()
         mock_ctrl.set_profile.assert_not_called()
+
+
+def test_apply_hardware_settings_with_topup_active():
+    """Hardware apply respects charge_topup_active from calibration state."""
+    cfg = {
+        "acpi_profile": 0,
+        "sync_system_power": False,
+        "charge_limit_enabled": True,
+        "charge_limit": 80,
+        "startup_apply": True,
+        "brightness": 1,
+        "colour": "light_blue",
+        "charge_topup_active": True,
+    }
+
+    with patch("gigamate.acpi.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.system_power.sync_system_power") as mock_sync_sys, \
+         patch("gigamate.gpu.sync_gpu_power") as mock_sync_gpu, \
+         patch("gigamate.battery.get_battery_manager") as mock_get_bat, \
+         patch("gigamate.protocol.get_keyboard") as mock_get_kb, \
+         patch("gigamate.protocol.set_static") as mock_set_static, \
+         patch("gigamate.hardware.resolve_model",
+               return_value=ModelMatch(_verified_profile(), "builtin-usb", False)), \
+         patch("gigamate.hardware.resolve_active_profile", return_value=_verified_profile()):
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = True
+        mock_ctrl.set_profile.return_value = True
+        mock_ctrl_cls.return_value = mock_ctrl
+
+        mock_bat = MagicMock()
+        mock_bat.is_available = True
+        mock_bat.is_charge_limit_supported.return_value = True
+        mock_bat.set_charge_limit.return_value = True
+        mock_bat.get_battery_info.return_value = BatteryInfo(present=True, status="Charging", capacity=80)
+        mock_get_bat.return_value = mock_bat
+
+        mock_kb = MagicMock()
+        mock_get_kb.return_value = mock_kb
+
+        results = apply_hardware_settings(cfg)
+
+        assert results["profile"] is True
+        assert results["battery"] is True  # top-up sets limit to 100
+        assert results["keyboard"] is True
+
+        mock_bat.set_charge_limit.assert_called_once_with(100)  # top-up writes 100
+        mock_sync_sys.assert_not_called()
+
+
+def test_apply_hardware_settings_with_auto_started_calibration():
+    """Hardware apply applies 100% when auto-calibration was started."""
+    cfg = {
+        "acpi_profile": 0,
+        "sync_system_power": False,
+        "charge_limit_enabled": True,
+        "charge_limit": 80,
+        "startup_apply": True,
+        "brightness": 1,
+        "colour": "light_blue",
+        "charge_topup_active": False,
+        "charge_calibration_auto": True,
+        "charge_calibration_interval_days": 30,
+        "last_full_charge_ts": int(time.time()) - (35 * 86400),
+    }
+
+    with patch("gigamate.acpi.AcpiController") as mock_ctrl_cls, \
+         patch("gigamate.system_power.sync_system_power") as mock_sync_sys, \
+         patch("gigamate.gpu.sync_gpu_power") as mock_sync_gpu, \
+         patch("gigamate.battery.get_battery_manager") as mock_get_bat, \
+         patch("gigamate.protocol.get_keyboard") as mock_get_kb, \
+         patch("gigamate.protocol.set_static") as mock_set_static, \
+         patch("gigamate.hardware.resolve_model",
+               return_value=ModelMatch(_verified_profile(), "builtin-usb", False)), \
+         patch("gigamate.hardware.resolve_active_profile", return_value=_verified_profile()):
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.available = True
+        mock_ctrl.set_profile.return_value = True
+        mock_ctrl_cls.return_value = mock_ctrl
+
+        mock_bat = MagicMock()
+        mock_bat.is_available = True
+        mock_bat.is_charge_limit_supported.return_value = True
+        mock_bat.set_charge_limit.return_value = True
+        mock_bat.get_battery_info.return_value = BatteryInfo(present=True, status="Not charging", capacity=80, ac_online=True)
+        mock_get_bat.return_value = mock_bat
+
+        mock_kb = MagicMock()
+        mock_get_kb.return_value = mock_kb
+
+        results = apply_hardware_settings(cfg)
+
+        assert results["profile"] is True
+        assert results["battery"] is True  # auto-started top-up set limit to 100
+        assert results["keyboard"] is True
+
+        mock_bat.set_charge_limit.assert_called_with(100)
+        mock_sync_sys.assert_not_called()
+
 

@@ -123,18 +123,38 @@ def _apply_hardware_settings_locked(
     # ─────────────────────────────────────────────────────────────
     # 2. Battery Care & Charging Limit
     # ─────────────────────────────────────────────────────────────
-    if cfg.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"]):
-        limit = cfg.get("charge_limit", DEFAULT_CONFIG["charge_limit"])
+    if (
+        cfg.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])
+        or cfg.get("charge_topup_active", False)
+        or cfg.get("charge_calibration_auto", False)
+    ):
         try:
-            from .battery import get_battery_manager
+            from .battery import evaluate_calibration_state, get_battery_manager
 
             battery_mgr = get_battery_manager()
-            if battery_mgr.is_charge_limit_supported():
-                if battery_mgr.set_charge_limit(int(limit)):
-                    results["battery"] = True
-                    logger.info(f"Hardware sync: Battery charge limit set to {limit}%")
+            cal = evaluate_calibration_state(battery_mgr, cfg)
         except Exception as exc:
-            logger.warning(f"Hardware sync failed for battery charge limit: {exc}")
+            logger.warning(f"Hardware sync failed for battery calibration state: {exc}")
+            cal = {"active": False, "event": "idle"}
+
+        if cfg.get("charge_topup_active") or cal.get("event") == "auto_started":
+            try:
+                if battery_mgr.is_charge_limit_supported():
+                    if battery_mgr.set_charge_limit(100):
+                        results["battery"] = True
+                        logger.info("Hardware sync: Battery charge top-up active (100%)")
+            except Exception as exc:
+                logger.warning(f"Hardware sync failed for battery charge top-up: {exc}")
+        elif cfg.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"]):
+            limit = cfg.get("charge_limit", DEFAULT_CONFIG["charge_limit"])
+            try:
+                if battery_mgr.is_charge_limit_supported():
+                    if battery_mgr.set_charge_limit(int(limit)):
+                        results["battery"] = True
+                        logger.info(f"Hardware sync: Battery charge limit set to {limit}%")
+            except Exception as exc:
+                logger.warning(f"Hardware sync failed for battery charge limit: {exc}")
+
 
     # ─────────────────────────────────────────────────────────────
     # 3. Keyboard RGB Lighting
