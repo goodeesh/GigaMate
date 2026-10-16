@@ -62,7 +62,12 @@ from .gpu import get_gpu_state, gpu_short_status_text
 import subprocess
 import shutil
 import logging
-from .battery import get_battery_manager
+from .battery import (
+    get_battery_manager,
+    evaluate_calibration_state,
+    start_topup,
+    cancel_topup,
+)
 from .sleep_handler import get_sleep_handler
 from .hardware import apply_hardware_settings
 from . import updates as update_checker
@@ -352,6 +357,11 @@ class GigaMateTrayApp:
             self._battery_cap_limit = new_limit
         finally:
             self._building = old_building
+
+        new_topup = bool(new_cfg.get("charge_topup_active", False))
+        if getattr(self, "_last_topup_active", None) != new_topup:
+            self._last_topup_active = new_topup
+            self._rebuild_menu()
 
         # Consent changed externally (e.g. `gigamate profile experimental on`):
         # re-resolve the model and rebuild so the controls appear/disappear.
@@ -649,7 +659,12 @@ class GigaMateTrayApp:
         self._menu.append(Gtk.SeparatorMenuItem())
         info = mgr.get_battery_info()
         ac_str = "AC" if info.ac_online else "Battery"
-        bat_header = Gtk.MenuItem(label=f"Battery: {info.capacity}% ({ac_str})")
+        topup_active = bool(self._config.get("charge_topup_active", False))
+        if topup_active:
+            status_text = f"Battery: {info.capacity}% ({ac_str} — Topping up to 100%)"
+        else:
+            status_text = f"Battery: {info.capacity}% ({ac_str})"
+        bat_header = Gtk.MenuItem(label=status_text)
         bat_header.set_sensitive(False)
         self._menu.append(bat_header)
 
@@ -664,11 +679,32 @@ class GigaMateTrayApp:
             # Any limit below 100% counts as an active cap, not just 80%.
             cap_active = bool(limit_enabled) and limit < 100
             chk_limit = Gtk.CheckMenuItem(label=f"Battery Care (Cap at {limit}%)")
-            chk_limit.set_active(cap_active)
+            chk_limit.set_active(cap_active and not topup_active)
             chk_limit.connect("toggled", self._on_toggle_battery_care)
             self._battery_cap_limit = limit
             self._battery_care_item = chk_limit
             self._menu.append(chk_limit)
+
+            if topup_active:
+                topup_item = Gtk.MenuItem(label="Cancel 100% Top-Up")
+                topup_item.connect("activate", self._on_cancel_topup)
+                self._menu.append(topup_item)
+            else:
+                topup_item = Gtk.MenuItem(label="Charge to 100% Once")
+                topup_item.connect("activate", self._on_start_topup)
+                self._menu.append(topup_item)
+
+    def _on_start_topup(self, _widget: Gtk.MenuItem) -> None:
+        mgr = get_battery_manager()
+        if start_topup(mgr):
+            self._config["charge_topup_active"] = True
+            self._rebuild_menu()
+
+    def _on_cancel_topup(self, _widget: Gtk.MenuItem) -> None:
+        mgr = get_battery_manager()
+        cancel_topup(mgr, restore_limit=True)
+        self._config["charge_topup_active"] = False
+        self._rebuild_menu()
 
     def _on_toggle_battery_care(self, widget: Gtk.CheckMenuItem) -> None:
         if self._building:
@@ -1305,10 +1341,19 @@ class GigaMateTrayApp:
 
         # Battery status
         try:
-            bat_info = get_battery_manager().get_battery_info()
+            bat_mgr = get_battery_manager()
+            bat_info = bat_mgr.get_battery_info()
             if bat_info.present:
+                cal = evaluate_calibration_state(bat_mgr, self._config)
+                if cal.get("event") in ("completed", "timeout", "auto_started"):
+                    self._sync_from_external_config()
+                    self._rebuild_menu()
+
                 ac_str = "AC" if bat_info.ac_online else "Bat"
-                parts.append(f"Batt: {bat_info.capacity}% ({ac_str})")
+                if self._config.get("charge_topup_active"):
+                    parts.append(f"Batt: {bat_info.capacity}% ({ac_str} - 100% Top-Up)")
+                else:
+                    parts.append(f"Batt: {bat_info.capacity}% ({ac_str})")
         except Exception:
             pass
 
@@ -1781,6 +1826,8 @@ class GigaMateTrayApp:
                 cfg["charge_limit"] = self._config.get("charge_limit", cfg.get("charge_limit"))
                 cfg["charge_limit_enabled"] = self._config.get(
                     "charge_limit_enabled", cfg.get("charge_limit_enabled"))
+                if "charge_topup_active" in self._config:
+                    cfg["charge_topup_active"] = self._config["charge_topup_active"]
             return cfg
 
         self._config = update_config(_mutate)

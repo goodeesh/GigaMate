@@ -1492,6 +1492,43 @@ def test_tray_save_config_does_not_clobber_when_clean():
         assert captured["charge_limit_enabled"] is False
 
 
+def test_tray_battery_topup_menu_and_actions():
+    """Tray battery section renders top-up button and toggles state."""
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._menu = MagicMock()
+        tray._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": False}
+        tray._rebuild_menu = MagicMock()
+
+        mgr = MagicMock()
+        mgr.is_available = True
+        mgr.is_charge_limit_supported.return_value = True
+        mgr.set_charge_limit.return_value = True
+        from gigamate.battery import BatteryInfo
+        mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=80, ac_online=True)
+
+        with patch("gigamate.tray.get_battery_manager", return_value=mgr):
+            with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
+                with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
+                    # 1. Append battery section with topup inactive
+                    tray._append_battery_section()
+                    assert tray._menu.append.call_count >= 3
+
+                    # 2. Trigger start topup
+                    tray._on_start_topup(MagicMock())
+                    mock_start.assert_called_once_with(mgr)
+                    assert tray._config["charge_topup_active"] is True
+                    tray._rebuild_menu.assert_called_once()
+
+                    # 3. Trigger cancel topup
+                    tray._rebuild_menu.reset_mock()
+                    tray._on_cancel_topup(MagicMock())
+                    mock_cancel.assert_called_once_with(mgr, restore_limit=True)
+                    assert tray._config["charge_topup_active"] is False
+                    tray._rebuild_menu.assert_called_once()
+
+
 def test_onboarding_unsupported_opts_out_everything(qapp):
     from gigamate.capabilities import HardwareCapabilities
     from gigamate.ui.onboarding import OnboardingWizard
