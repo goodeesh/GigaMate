@@ -484,3 +484,114 @@ def test_evaluate_calibration_state_first_run_seed(tmp_path: Path):
             mock_update.assert_called_once()
 
 
+def test_cmd_battery_topup(capsys):
+    """cmd_battery --topup starts topup and prints confirmation."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = True
+    args.cancel_topup = False
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.is_charge_limit_supported.return_value = True
+    mgr.set_charge_limit.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.config.update_config"):
+            cmd_battery(args)
+            captured = capsys.readouterr()
+            assert "Top-up charge to 100% initiated" in captured.out
+
+
+def test_cmd_battery_cancel_topup(capsys):
+    """cmd_battery --cancel-topup cancels topup and restores limit."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = True
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.is_charge_limit_supported.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.config.update_config"):
+            with patch("gigamate.config.load", return_value={"charge_limit_enabled": True, "charge_limit": 80}):
+                cmd_battery(args)
+                captured = capsys.readouterr()
+                assert "Top-up charge cancelled" in captured.out
+
+
+def test_cmd_battery_auto_topup_and_interval(capsys):
+    """cmd_battery --auto-topup and --topup-interval mutate config."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = False
+    args.auto_topup = "on"
+    args.topup_interval = 14
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.cli.update_config") as mock_update:
+            cmd_battery(args)
+            captured = capsys.readouterr()
+            assert "Automatic periodic battery calibration enabled" in captured.out
+            assert "Battery calibration interval set to 14 days" in captured.out
+            assert mock_update.call_count == 2
+
+
+def test_cmd_battery_display_info(capsys):
+    """cmd_battery display shows topup and auto-calibration status."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = False
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.get_battery_info.return_value = BatteryInfo(
+        present=True,
+        name="BAT0",
+        capacity=80,
+        status="Not charging",
+        ac_online=True,
+        charge_limit=80,
+        charge_limit_supported=True,
+        backend="gigamate_acpi",
+    )
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.battery.evaluate_calibration_state"):
+            with patch("gigamate.cli.load_config", return_value={
+                "charge_limit_enabled": True,
+                "charge_limit": 80,
+                "charge_topup_active": True,
+                "charge_calibration_auto": True,
+                "charge_calibration_interval_days": 30,
+                "last_full_charge_ts": int(time.time()) - 86400,
+            }):
+                cmd_battery(args)
+                captured = capsys.readouterr()
+                assert "100% (Top-Up / Calibration active)" in captured.out
+                assert "Auto Calibrate: Enabled (every 30 days)" in captured.out
+                assert "Last Full:      yesterday" in captured.out
+
+
+
