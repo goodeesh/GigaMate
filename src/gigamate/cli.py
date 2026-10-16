@@ -1860,11 +1860,11 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     battery_parser.add_argument("--limit", "-l", type=int, default=None,
                                 help="Set max charge limit (40..100)")
     battery_parser.add_argument("--topup", action="store_true",
-                                help="Initiate one-time top-up charge to 100% (calibration)")
+                                help="Initiate one-time top-up charge to 100%% (calibration)")
     battery_parser.add_argument("--cancel-topup", action="store_true",
                                 help="Cancel active top-up charge and restore configured limit")
     battery_parser.add_argument("--auto-topup", choices=["on", "off"], default=None,
-                                help="Enable or disable periodic auto-calibration (100% top-up every N days)")
+                                help="Enable or disable periodic auto-calibration (100%% top-up every N days)")
     battery_parser.add_argument("--topup-interval", type=int, default=None,
                                 help="Set interval in days for periodic auto-calibration (1..365)")
     battery_parser.add_argument("--status", action="store_true",

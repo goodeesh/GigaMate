@@ -594,4 +594,16 @@ def test_cmd_battery_display_info(capsys):
                 assert "Last Full:      yesterday" in captured.out
 
 
+def test_cmd_battery_parser_help():
+    """Verify that argparse parses battery help strings without ValueError."""
+    import sys
+    from gigamate.cli import _subcommand_main
+
+    with patch.object(sys, "argv", ["gigamate", "battery", "--help"]):
+        with pytest.raises(SystemExit) as exc:
+            _subcommand_main()
+        assert exc.value.code == 0
+
+
+
 
