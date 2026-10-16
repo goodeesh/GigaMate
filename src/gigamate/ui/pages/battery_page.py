@@ -1,8 +1,8 @@
-"""GigaMate Center — Battery Care & Health Page."""
-
-from typing import Optional
+import time
+from typing import Dict, Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -13,7 +13,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ...battery import BatteryManager, get_battery_manager
+from ...battery import (
+    BatteryManager,
+    get_battery_manager,
+    evaluate_calibration_state,
+    start_topup,
+    cancel_topup,
+)
 from ...config import load as load_config, update_config
 from ..flow_layout import FlowContainer
 
@@ -137,6 +143,23 @@ class BatteryPage(QWidget):
         self.limit_status_label = QLabel("")
         self.limit_status_label.setStyleSheet("color: #38a169; font-size: 12px; font-weight: 500;")
         sc_layout.addWidget(self.limit_status_label)
+
+        # One-shot 100% Top-Up
+        topup_row = QHBoxLayout()
+        topup_row.setSpacing(12)
+        self.topup_btn = QPushButton("⚡ Charge to 100% Once")
+        self.topup_btn.setProperty("class", "PrimaryButton")
+        self.topup_btn.setMinimumHeight(32)
+        self.topup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.topup_btn.clicked.connect(self._on_topup_clicked)
+        topup_row.addWidget(self.topup_btn)
+
+        self.topup_status_label = QLabel("")
+        self.topup_status_label.setStyleSheet("color: #38bdf8; font-size: 12px; font-weight: 500;")
+        topup_row.addWidget(self.topup_status_label)
+        topup_row.addStretch()
+        sc_layout.addLayout(topup_row)
+
         c_layout.addWidget(self.slider_container)
 
         # Informational box (shown when charge limiting or battery is unsupported)
@@ -162,17 +185,107 @@ class BatteryPage(QWidget):
         c_layout.addWidget(self.unsupported_notice)
 
         layout.addWidget(self.care_card)
+
+        # ── Periodic Calibration (BMS Health) Card ──
+        self.cal_card = QFrame()
+        self.cal_card.setProperty("class", "Card")
+        cal_layout = QVBoxLayout(self.cal_card)
+        cal_layout.setSpacing(12)
+
+        cal_title = QLabel("Periodic Calibration (BMS Health)")
+        cal_title.setProperty("class", "CardTitle")
+        cal_layout.addWidget(cal_title)
+
+        cal_sub = QLabel(
+            "Continuous charge limiting can cause the battery gauge (coulomb counter) to drift over time. "
+            "Periodic calibration charges to 100% to reset the fuel gauge baseline. Once full, GigaMate stops "
+            "charging and restores your limit; natural power draw will drift the battery back down without disconnecting AC."
+        )
+        cal_sub.setProperty("class", "CardSubtitle")
+        cal_sub.setWordWrap(True)
+        cal_layout.addWidget(cal_sub)
+
+        # Toggle row
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(12)
+        self.auto_cal_chk = QCheckBox("Enable automatic periodic calibration to 100%")
+        self.auto_cal_chk.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.auto_cal_chk.toggled.connect(self._on_auto_cal_toggled)
+        toggle_row.addWidget(self.auto_cal_chk)
+        toggle_row.addStretch()
+        cal_layout.addLayout(toggle_row)
+
+        # Interval selection row
+        self.interval_row_widget = QWidget()
+        i_layout = QHBoxLayout(self.interval_row_widget)
+        i_layout.setContentsMargins(0, 0, 0, 0)
+        i_layout.setSpacing(8)
+
+        i_label = QLabel("Calibration Interval:")
+        i_label.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        i_layout.addWidget(i_label)
+
+        self.interval_buttons: Dict[int, QPushButton] = {}
+        for days, label_text in [(14, "14 Days"), (30, "30 Days (Recommended)"), (60, "60 Days")]:
+            btn = QPushButton(label_text)
+            btn.setProperty("class", "PresetButton")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, d=days: self._set_cal_interval(d))
+            self.interval_buttons[days] = btn
+            i_layout.addWidget(btn)
+        i_layout.addStretch()
+        cal_layout.addWidget(self.interval_row_widget)
+
+        # Telemetry info (last full charge)
+        self.last_full_label = QLabel("Last Full Charge: Calculating...")
+        self.last_full_label.setStyleSheet("color: #8896ab; font-size: 12px; font-weight: 500;")
+        cal_layout.addWidget(self.last_full_label)
+
+        layout.addWidget(self.cal_card)
         layout.addStretch()
 
         # Initial load
         self.reload_from_config()
 
     def reload_from_config(self) -> None:
-        """Reload charge limit and telemetry from saved config."""
+        """Reload charge limit, calibration settings, and telemetry from saved config."""
         cfg = load_config()
         saved_limit = cfg.get("charge_limit", 80)
         self._set_slider_value(saved_limit)
+
+        auto_cal = bool(cfg.get("charge_calibration_auto", False))
+        self.auto_cal_chk.blockSignals(True)
+        self.auto_cal_chk.setChecked(auto_cal)
+        self.auto_cal_chk.blockSignals(False)
+        self.interval_row_widget.setEnabled(auto_cal)
+
+        interval = int(cfg.get("charge_calibration_interval_days", 30))
+        self._update_interval_buttons(interval)
+
         self._refresh_battery_data()
+
+    def _update_interval_buttons(self, active_days: int) -> None:
+        for days, btn in self.interval_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(days == active_days)
+            btn.blockSignals(False)
+
+    def _set_cal_interval(self, days: int) -> None:
+        update_config(lambda c: {**c, "charge_calibration_interval_days": days})
+        self._update_interval_buttons(days)
+
+    def _on_auto_cal_toggled(self, checked: bool) -> None:
+        update_config(lambda c: {**c, "charge_calibration_auto": checked})
+        self.interval_row_widget.setEnabled(checked)
+
+    def _on_topup_clicked(self) -> None:
+        cfg = load_config()
+        if cfg.get("charge_topup_active"):
+            cancel_topup(self.battery_mgr, restore_limit=True)
+        else:
+            start_topup(self.battery_mgr)
+        self.reload_from_config()
 
     def _make_chip(self, title: str, label_attr_name: str, icon_str: str) -> QFrame:
         chip = QFrame()
@@ -245,6 +358,7 @@ class BatteryPage(QWidget):
             # Update care card for desktop / no-battery mode
             self.slider_container.setVisible(False)
             self.care_sub.setVisible(False)
+            self.cal_card.setVisible(False)
             self.unsupported_notice.setVisible(True)
             self.notice_title.setText("⚡ Continuous AC Mains Power Mode")
             self.notice_body.setText(
@@ -264,13 +378,49 @@ class BatteryPage(QWidget):
         else:
             self.health_label.setText("Health: Available")
 
+        cfg = load_config()
+        try:
+            cal = evaluate_calibration_state(self.battery_mgr, cfg)
+            if cal.get("event") in ("completed", "timeout", "auto_started"):
+                cfg = load_config()
+        except Exception:
+            pass
+
+        topup_active = bool(cfg.get("charge_topup_active", False))
+        if topup_active:
+            self.topup_btn.setText("✕ Cancel 100% Top-Up")
+            self.topup_btn.setProperty("class", "DangerButton")
+            self.topup_status_label.setText("● Top-Up Active (Will restore to limit once full)")
+        else:
+            self.topup_btn.setText("⚡ Charge to 100% Once")
+            self.topup_btn.setProperty("class", "PrimaryButton")
+            self.topup_status_label.setText("")
+
+        self.topup_btn.style().unpolish(self.topup_btn)
+        self.topup_btn.style().polish(self.topup_btn)
+
+        last_full = cfg.get("last_full_charge_ts", 0)
+        if last_full > 0:
+            days_ago = max(0, int((time.time() - last_full) / 86400))
+            if days_ago == 0:
+                age_str = "Today"
+            elif days_ago == 1:
+                age_str = "Yesterday"
+            else:
+                age_str = f"{days_ago} days ago"
+            self.last_full_label.setText(f"Last Full Charge: {age_str}")
+        else:
+            self.last_full_label.setText("Last Full Charge: Never recorded")
+
         if is_supported:
             self.slider_container.setVisible(True)
             self.care_sub.setVisible(True)
+            self.cal_card.setVisible(True)
             self.unsupported_notice.setVisible(False)
         else:
             self.slider_container.setVisible(False)
             self.care_sub.setVisible(False)
+            self.cal_card.setVisible(False)
             self.unsupported_notice.setVisible(True)
             self.notice_title.setText("ℹ️ Hardware Charge Limiting Unavailable")
             self.notice_body.setText(

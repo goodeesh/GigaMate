@@ -118,6 +118,7 @@ class GigaMateTrayApp:
         self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
         self._battery_care_item: Optional[Gtk.CheckMenuItem] = None
         self._battery_dirty = False
+        self._last_topup_active = False
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
@@ -359,7 +360,7 @@ class GigaMateTrayApp:
             self._building = old_building
 
         new_topup = bool(new_cfg.get("charge_topup_active", False))
-        if getattr(self, "_last_topup_active", None) != new_topup:
+        if getattr(self, "_last_topup_active", False) != new_topup:
             self._last_topup_active = new_topup
             self._rebuild_menu()
 
@@ -1846,10 +1847,10 @@ class GigaMateTrayApp:
 
     def _clear_menu(self) -> None:
         """Destroy existing menu (safe for rebuild)."""
-        if self._status_timer_id is not None:
+        if getattr(self, "_status_timer_id", None) is not None:
             GLib.source_remove(self._status_timer_id)
             self._status_timer_id = None
-        if self._menu is not None:
+        if getattr(self, "_menu", None) is not None:
             self._menu.destroy()
             self._menu = None
         self._colour_items = {}

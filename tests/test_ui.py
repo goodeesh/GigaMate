@@ -681,6 +681,56 @@ def test_battery_page(qapp):
     assert "Limit: 80%" in page.slider_label.text()
 
 
+def test_battery_page_topup_and_calibration(qapp):
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.config import load as load_config, save as save_config
+
+    page = BatteryPage()
+
+    # Verify topup button exists
+    assert page.topup_btn is not None
+    assert "Charge to 100% Once" in page.topup_btn.text()
+
+    # Toggle topup on
+    with patch("gigamate.ui.pages.battery_page.start_topup", return_value=True) as mock_start:
+        with patch("gigamate.ui.pages.battery_page.load_config", return_value={
+            "charge_limit": 80,
+            "charge_topup_active": False,
+            "charge_calibration_auto": False,
+            "charge_calibration_interval_days": 30,
+        }):
+            page._on_topup_clicked()
+            mock_start.assert_called_once()
+
+    # Auto calibration checkbox
+    assert page.auto_cal_chk is not None
+    assert page.auto_cal_chk.isChecked() is False  # Opt-in default False
+
+    # Check auto calibration
+    page.auto_cal_chk.setChecked(True)
+    cfg = load_config()
+    assert cfg.get("charge_calibration_auto") is True
+    assert page.interval_row_widget.isEnabled() is True
+
+    # Interval buttons
+    assert 30 in page.interval_buttons
+    assert 14 in page.interval_buttons
+    assert 60 in page.interval_buttons
+
+    page.interval_buttons[14].click()
+    cfg = load_config()
+    assert cfg.get("charge_calibration_interval_days") == 14
+    assert page.interval_buttons[14].isChecked() is True
+
+    # Reload from config with topup active
+    cfg["charge_topup_active"] = True
+    save_config(cfg)
+    page.reload_from_config()
+    assert "Cancel 100% Top-Up" in page.topup_btn.text()
+    assert "Top-Up Active" in page.topup_status_label.text()
+
+
+
 def test_rgb_page_all_profile_colours(qapp):
     from gigamate.ui.main_window import MainWindow
 
