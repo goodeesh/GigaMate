@@ -55,6 +55,11 @@ DEFAULT_CONFIG = {
     "idle_timeout_sec": 60,
     "charge_limit": 80,
     "charge_limit_enabled": False,
+    "charge_topup_active": False,
+    "charge_topup_started_ts": 0,
+    "charge_calibration_auto": False,
+    "charge_calibration_interval_days": 30,
+    "last_full_charge_ts": 0,
     # Discrete-GPU (NVIDIA) sleep-aware undervolt: V/F clock offset in MHz.
     # 0 = stock/off. Applied only while the dGPU is awake (see dgpu_tune.py).
     "dgpu_undervolt_enabled": False,
@@ -214,6 +219,28 @@ def load():
             data["experimental_profiles_enabled"] = bool(data["experimental_profiles_enabled"])
         if "startup_apply" in data:
             data["startup_apply"] = bool(data["startup_apply"])
+        if "charge_topup_active" in data:
+            data["charge_topup_active"] = bool(data["charge_topup_active"])
+        if "charge_topup_started_ts" in data:
+            try:
+                v = int(data["charge_topup_started_ts"])
+                data["charge_topup_started_ts"] = v if v >= 0 else 0
+            except (ValueError, TypeError):
+                data["charge_topup_started_ts"] = 0
+        if "charge_calibration_auto" in data:
+            data["charge_calibration_auto"] = bool(data["charge_calibration_auto"])
+        if "charge_calibration_interval_days" in data:
+            try:
+                v = int(data["charge_calibration_interval_days"])
+                data["charge_calibration_interval_days"] = v if 7 <= v <= 90 else DEFAULT_CONFIG["charge_calibration_interval_days"]
+            except (ValueError, TypeError):
+                data["charge_calibration_interval_days"] = DEFAULT_CONFIG["charge_calibration_interval_days"]
+        if "last_full_charge_ts" in data:
+            try:
+                v = int(data["last_full_charge_ts"])
+                data["last_full_charge_ts"] = v if v >= 0 else 0
+            except (ValueError, TypeError):
+                data["last_full_charge_ts"] = 0
         if "charge_limit" in data:
             try:
                 cl = int(data["charge_limit"])
@@ -296,6 +323,15 @@ def _coerce_charge_limit(value) -> int:
     except (ValueError, TypeError):
         return DEFAULT_CONFIG["charge_limit"]
     return v if 40 <= v <= 100 else DEFAULT_CONFIG["charge_limit"]
+
+
+def _coerce_calibration_interval(value) -> int:
+    """Return a valid 7..90 calibration interval days, falling back to the default."""
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["charge_calibration_interval_days"]
+    return v if 7 <= v <= 90 else DEFAULT_CONFIG["charge_calibration_interval_days"]
 
 
 def _coerce_dgpu_offset(value) -> int:
@@ -430,6 +466,12 @@ def _write_config(config):
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
         "hotkey_overrides": _sanitize_hotkey_overrides(config.get("hotkey_overrides")),
+        "charge_topup_active": bool(config.get("charge_topup_active", DEFAULT_CONFIG["charge_topup_active"])),
+        "charge_topup_started_ts": max(0, int(config.get("charge_topup_started_ts", 0) or 0)),
+        "charge_calibration_auto": bool(config.get("charge_calibration_auto", DEFAULT_CONFIG["charge_calibration_auto"])),
+        "charge_calibration_interval_days": _coerce_calibration_interval(
+            config.get("charge_calibration_interval_days", DEFAULT_CONFIG["charge_calibration_interval_days"])),
+        "last_full_charge_ts": max(0, int(config.get("last_full_charge_ts", 0) or 0)),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:

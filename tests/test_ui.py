@@ -681,6 +681,56 @@ def test_battery_page(qapp):
     assert "Limit: 80%" in page.slider_label.text()
 
 
+def test_battery_page_topup_and_calibration(qapp):
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.config import load as load_config, save as save_config
+
+    page = BatteryPage()
+
+    # Verify topup button exists
+    assert page.topup_btn is not None
+    assert "Charge to 100% Once" in page.topup_btn.text()
+
+    # Toggle topup on
+    with patch("gigamate.ui.pages.battery_page.start_topup", return_value=True) as mock_start:
+        with patch("gigamate.ui.pages.battery_page.load_config", return_value={
+            "charge_limit": 80,
+            "charge_topup_active": False,
+            "charge_calibration_auto": False,
+            "charge_calibration_interval_days": 30,
+        }):
+            page._on_topup_clicked()
+            mock_start.assert_called_once()
+
+    # Auto calibration checkbox
+    assert page.auto_cal_chk is not None
+    assert page.auto_cal_chk.isChecked() is False  # Opt-in default False
+
+    # Check auto calibration
+    page.auto_cal_chk.setChecked(True)
+    cfg = load_config()
+    assert cfg.get("charge_calibration_auto") is True
+    assert page.interval_row_widget.isEnabled() is True
+
+    # Interval buttons
+    assert 30 in page.interval_buttons
+    assert 14 in page.interval_buttons
+    assert 60 in page.interval_buttons
+
+    page.interval_buttons[14].click()
+    cfg = load_config()
+    assert cfg.get("charge_calibration_interval_days") == 14
+    assert page.interval_buttons[14].isChecked() is True
+
+    # Reload from config with topup active
+    cfg["charge_topup_active"] = True
+    save_config(cfg)
+    page.reload_from_config()
+    assert "Cancel 100% Top-Up" in page.topup_btn.text()
+    assert "Top-Up Active" in page.topup_status_label.text()
+
+
+
 def test_rgb_page_all_profile_colours(qapp):
     from gigamate.ui.main_window import MainWindow
 
@@ -1490,6 +1540,43 @@ def test_tray_save_config_does_not_clobber_when_clean():
 
         assert captured["charge_limit"] == 80
         assert captured["charge_limit_enabled"] is False
+
+
+def test_tray_battery_topup_menu_and_actions():
+    """Tray battery section renders top-up button and toggles state."""
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._menu = MagicMock()
+        tray._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": False}
+        tray._rebuild_menu = MagicMock()
+
+        mgr = MagicMock()
+        mgr.is_available = True
+        mgr.is_charge_limit_supported.return_value = True
+        mgr.set_charge_limit.return_value = True
+        from gigamate.battery import BatteryInfo
+        mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=80, ac_online=True)
+
+        with patch("gigamate.tray.get_battery_manager", return_value=mgr):
+            with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
+                with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
+                    # 1. Append battery section with topup inactive
+                    tray._append_battery_section()
+                    assert tray._menu.append.call_count >= 3
+
+                    # 2. Trigger start topup
+                    tray._on_start_topup(MagicMock())
+                    mock_start.assert_called_once_with(mgr)
+                    assert tray._config["charge_topup_active"] is True
+                    tray._rebuild_menu.assert_called_once()
+
+                    # 3. Trigger cancel topup
+                    tray._rebuild_menu.reset_mock()
+                    tray._on_cancel_topup(MagicMock())
+                    mock_cancel.assert_called_once_with(mgr, restore_limit=True)
+                    assert tray._config["charge_topup_active"] is False
+                    tray._rebuild_menu.assert_called_once()
 
 
 def test_onboarding_unsupported_opts_out_everything(qapp):

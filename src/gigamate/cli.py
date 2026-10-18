@@ -1584,11 +1584,42 @@ def cmd_tray(args) -> None:
 
 def cmd_battery(args) -> None:
     """Show battery status or set charge limit."""
-    from .battery import get_battery_manager
+    from .battery import (
+        get_battery_manager,
+        evaluate_calibration_state,
+        start_topup,
+        cancel_topup,
+    )
     mgr = get_battery_manager()
     if not mgr.is_available:
         print("No battery detected on this system.", file=sys.stderr)
         sys.exit(1)
+
+    if getattr(args, "topup", False):
+        if start_topup(mgr):
+            print("Top-up charge to 100% initiated. Limit will automatically restore once full.")
+            return
+        else:
+            print("Failed to initiate top-up charge (unsupported or error).", file=sys.stderr)
+            sys.exit(1)
+
+    if getattr(args, "cancel_topup", False):
+        cancel_topup(mgr, restore_limit=True)
+        print("Top-up charge cancelled; configured charge threshold restored.")
+        return
+
+    mutated = False
+    if getattr(args, "auto_topup", None) is not None:
+        enabled = (args.auto_topup.strip().lower() == "on")
+        update_config(lambda cfg: {**cfg, "charge_calibration_auto": enabled})
+        print(f"Automatic periodic battery calibration {'enabled' if enabled else 'disabled'}.")
+        mutated = True
+
+    if getattr(args, "topup_interval", None) is not None:
+        days = max(1, min(365, int(args.topup_interval)))
+        update_config(lambda cfg: {**cfg, "charge_calibration_interval_days": days})
+        print(f"Battery calibration interval set to {days} days.")
+        mutated = True
 
     if getattr(args, "limit", None) is not None:
         try:
@@ -1608,6 +1639,13 @@ def cmd_battery(args) -> None:
             sys.exit(1)
         return
 
+    if mutated:
+        return
+
+    cfg = load_config()
+    evaluate_calibration_state(mgr, cfg)
+    cfg = load_config()
+
     info = mgr.get_battery_info()
     print("Battery Information:")
     print(f"  Device:         {info.name}")
@@ -1619,8 +1657,27 @@ def cmd_battery(args) -> None:
     if info.cycle_count is not None:
         print(f"  Cycle Count:    {info.cycle_count}")
     if info.charge_limit_supported:
-        limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
+        topup_active = cfg.get("charge_topup_active", False)
+        if topup_active:
+            limit_str = "100% (Top-Up / Calibration active)"
+        else:
+            limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
         print(f"  Charge Limit:   {limit_str} (Backend: {info.backend})")
+        auto_cal = cfg.get("charge_calibration_auto", False)
+        cal_interval = cfg.get("charge_calibration_interval_days", 30)
+        print(f"  Auto Calibrate: {'Enabled' if auto_cal else 'Disabled'} (every {cal_interval} days)")
+        last_full = cfg.get("last_full_charge_ts", 0)
+        if last_full > 0:
+            days_ago = max(0, int((time.time() - last_full) / 86400))
+            if days_ago == 0:
+                age_str = "today"
+            elif days_ago == 1:
+                age_str = "yesterday"
+            else:
+                age_str = f"{days_ago} days ago"
+            print(f"  Last Full:      {age_str}")
+        else:
+            print("  Last Full:      Never recorded")
     else:
         print("  Charge Limit:   Unsupported by current kernel/firmware")
 
@@ -1802,6 +1859,14 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     battery_parser = sub.add_parser("battery", help="Battery health and charge threshold limiter")
     battery_parser.add_argument("--limit", "-l", type=int, default=None,
                                 help="Set max charge limit (40..100)")
+    battery_parser.add_argument("--topup", action="store_true",
+                                help="Initiate one-time top-up charge to 100%% (calibration)")
+    battery_parser.add_argument("--cancel-topup", action="store_true",
+                                help="Cancel active top-up charge and restore configured limit")
+    battery_parser.add_argument("--auto-topup", choices=["on", "off"], default=None,
+                                help="Enable or disable periodic auto-calibration (100%% top-up every N days)")
+    battery_parser.add_argument("--topup-interval", type=int, default=None,
+                                help="Set interval in days for periodic auto-calibration (1..365)")
     battery_parser.add_argument("--status", action="store_true",
                                 help="Show detailed battery status")
 

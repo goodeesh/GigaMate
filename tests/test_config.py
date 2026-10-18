@@ -135,6 +135,62 @@ def test_invalid_charge_limit_falls_back_to_default(isolated_config):
     assert config_module.load()["charge_limit"] == config_module.DEFAULT_CONFIG["charge_limit"]
 
 
+def test_charge_topup_defaults(isolated_config):
+    """Verify default presence and type coercion for charge topup/calibration keys."""
+    loaded = config_module.load()
+    assert loaded["charge_topup_active"] is False
+    assert loaded["charge_topup_started_ts"] == 0
+    assert loaded["charge_calibration_auto"] is False
+    assert loaded["charge_calibration_interval_days"] == 30
+    assert loaded["last_full_charge_ts"] == 0
+
+
+def test_charge_topup_type_coercion(isolated_config):
+    """Verify invalid types are coerced using bool()/int() coercion rules."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    # bool("yes") is True (non-empty string is truthy) - same as other bool keys
+    isolated_config.write_text('{"charge_topup_active": "yes"}')
+    loaded = config_module.load()
+    assert loaded["charge_topup_active"] is True
+
+    # Invalid int for started_ts (negative)
+    isolated_config.write_text('{"charge_topup_started_ts": -5}')
+    loaded = config_module.load()
+    assert loaded["charge_topup_started_ts"] == 0
+
+    # Calibration interval out of range (too low)
+    isolated_config.write_text('{"charge_calibration_interval_days": 3}')
+    loaded = config_module.load()
+    assert loaded["charge_calibration_interval_days"] == 30
+
+    # Calibration interval out of range (too high)
+    isolated_config.write_text('{"charge_calibration_interval_days": 100}')
+    loaded = config_module.load()
+    assert loaded["charge_calibration_interval_days"] == 30
+
+    # last_full_charge_ts with non-int string
+    isolated_config.write_text('{"last_full_charge_ts": "abc"}')
+    loaded = config_module.load()
+    assert loaded["last_full_charge_ts"] == 0
+
+
+def test_charge_topup_roundtrip(isolated_config):
+    """Verify roundtrip of charge topup/calibration keys through save/load."""
+    config_module.save({
+        "charge_topup_active": True,
+        "charge_topup_started_ts": 1700000000,
+        "charge_calibration_auto": True,
+        "charge_calibration_interval_days": 14,
+        "last_full_charge_ts": 1699999999,
+    })
+    loaded = config_module.load()
+    assert loaded["charge_topup_active"] is True
+    assert loaded["charge_topup_started_ts"] == 1700000000
+    assert loaded["charge_calibration_auto"] is True
+    assert loaded["charge_calibration_interval_days"] == 14
+    assert loaded["last_full_charge_ts"] == 1699999999
+
+
 def test_invalid_acpi_profile_is_dropped(isolated_config):
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
     isolated_config.write_text('{"acpi_profile": 9}')
