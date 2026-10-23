@@ -70,7 +70,8 @@ keyboard (e.g. GIGABYTE GAMING A16) and are named `dmi_<slug>.json`.
 | `pid` | string | see note | USB Product ID as hex string, e.g. `"0x8105"` |
 | `dmi` | object | see note | DMI key for ACPI-only laptops (below). Required when `vid`/`pid` are absent. |
 | `interfaces` | array of int | yes | USB interfaces to detach for RGB control, e.g. `[1, 3]` |
-| `control_interface` | int | yes | USB interface for ctrl_transfer, typically `3` |
+| `control_interface` | int | yes | USB control interface, typically `3` for vendor reports or `4` for LampArray |
+| `rgb_protocol` | string | no | `vendor` (default) or `lamparray` (hidraw; no driver detach) |
 | `colour_map` | object | yes | Keyboard RGB colour definitions (empty for ACPI-only profiles) |
 | `acpi` | object | no | ACPI/fan/power profile capabilities |
 | `hotkeys` | object | no | Hardware hotkey definitions (e.g. mode/performance switch, vendor key) |
@@ -132,6 +133,12 @@ at each brightness level.
   }
 }
 ```
+
+For `rgb_protocol: "lamparray"`, each pair is `[palette_index, brightness_percent]`.
+Palette indices are 1-based in this order: red, green, yellow, blue, orange,
+dark_yellow, purple, light_purple, white, light_blue, blush_pink. Brightness is
+0–100 and scales the RGB channels. `gigamate calibrate rgb` detects a LampArray
+interface and creates this profile without interactive colour mapping.
 
 ### colour_map sub-fields
 

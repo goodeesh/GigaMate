@@ -38,6 +38,7 @@ def _safe_apply_hardware_settings(*args, **kwargs):
 @pytest.fixture(autouse=True)
 def _no_real_hardware(monkeypatch, tmp_path):
     """Replace hardware/config side-effect entry points with inert doubles."""
+    monkeypatch.setattr("gigamate.lamparray.find_device", lambda *a, **k: None)
     # ── Config isolation (all tests) ──
     import gigamate.config as config_mod
 

@@ -25,6 +25,7 @@ import sys
 import os
 import time
 import argparse
+from dataclasses import replace
 from typing import Optional, List
 
 from .protocol import (
@@ -220,17 +221,40 @@ def cmd_rgb_calibrate(args) -> None:
             print("Try: lsusb | grep -i gigabyte")
             sys.exit(1)
         vid, pid = detected
+    from .lamparray import find_device as find_lamparray, LampArrayDevice, make_profile
+    lamp = find_lamparray(vid, pid, getattr(args, "interface", None))
+    if lamp is not None:
+        try:
+            count = LampArrayDevice(lamp[0]).lamp_count()
+        except (OSError, ValueError) as exc:
+            print(f"Cannot access LampArray keyboard {lamp[0]}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        # LampArray uses direct RGB; the older byte-by-byte calibration is unnecessary.
+        profile = make_profile(vid, pid, lamp[1])
+        existing = resolve_profile(vid, pid)
+        if existing is not None:
+            profile = replace(existing, rgb_protocol=profile.rgb_protocol,
+                              interfaces=profile.interfaces,
+                              control_interface=profile.control_interface,
+                              colour_map=profile.colour_map)
+        path = save_user_profile(profile)
+        print(f"HID LampArray: {lamp[0]}, interface {lamp[1]}, {count} lamp(s).")
+        print("Direct RGB supported; colour calibration is unnecessary.")
+        print(f"Profile saved: {path}")
+        print("Try: gigamate rgb static light_purple")
+        print("Reload profiles or restart GigaMate to enable the keyboard controls.")
+        return
     existing = resolve_profile(vid, pid)
     if existing is not None:
         print(f"Model already supported: {existing.name}")
         ans = input("Re-run calibration anyway? [y/N] ").strip().lower()
         if ans != "y":
             return
-    dev = get_keyboard(vid, pid)
+    dev = get_keyboard(vid, pid, interfaces=[])
     if dev is None:
         print(f"Keyboard not found (VID={vid:04X} PID={pid:04X})")
         sys.exit(1)
-    new_profile = run_calibrate(dev, vid, pid)
+    new_profile = run_calibrate(dev, vid, pid, interface=getattr(args, "interface", None))
     if new_profile is None:
         print("Calibration cancelled.")
         return
@@ -1747,6 +1771,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     cal_rgb_parser = rgb_sub.add_parser("calibrate", help="Interactive RGB calibration")
     cal_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     cal_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    cal_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
+                                help="USB RGB control interface (default: auto-detect)")
 
     # rgb idle
     idle_parser = rgb_sub.add_parser(
@@ -1787,6 +1813,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     calibrate_rgb_parser = calibrate_sub.add_parser("rgb", help="Keyboard RGB calibration")
     calibrate_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     calibrate_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    calibrate_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
+                                      help="USB RGB control interface (default: auto-detect)")
 
     calibrate_acpi_parser = calibrate_sub.add_parser("acpi", help="ACPI capabilities probe")
     calibrate_acpi_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
@@ -1796,6 +1824,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     calibrate_all_parser = calibrate_sub.add_parser("all", help="RGB + ACPI calibration")
     calibrate_all_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     calibrate_all_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    calibrate_all_parser.add_argument("--interface", "-i", type=int, default=None,
+                                      help="USB RGB control interface (default: auto-detect)")
 
     # --- version subcommand ---
     sub.add_parser("version", help="Show version")

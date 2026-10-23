@@ -75,8 +75,12 @@ def get_keyboard(vid=None, pid=None, profile=None, interfaces=None):
         vid, pid = detected
         if profile is None:
             profile = resolve_profile(vid, pid)
-        if interfaces is None and profile is not None:
-            interfaces = profile.interfaces
+    if interfaces is None and profile is not None:
+        interfaces = profile.interfaces
+    if profile is not None and profile.rgb_protocol == "lamparray":
+        from .lamparray import find_device, LampArrayDevice
+        found = find_device(vid, pid, profile.control_interface)
+        return LampArrayDevice(found[0]) if found else None
     dev = usb.core.find(idVendor=vid, idProduct=pid)
     if dev is None:
         return None
@@ -110,12 +114,22 @@ def set_static(dev, colour, level=2, profile=None, interface=INTERFACE):
     if level not in (0, 1, 2):
         level = 2
     byte5, byte4 = cmap[colour][level]
+    if profile is not None and profile.rgb_protocol == "lamparray":
+        try:
+            return dev.set_colour(byte5, byte4)
+        except (OSError, ValueError):
+            return False
     cmd = make_command(PROGRAMS["static"], SPEEDS["medium"], byte4, byte5)
     iface = profile.control_interface if profile else interface
     return send_command(dev, cmd, iface)
 
 
 def set_off(dev, profile=None, interface=INTERFACE):
+    if profile is not None and profile.rgb_protocol == "lamparray":
+        try:
+            return dev.set_colour(1, 0)
+        except (OSError, ValueError):
+            return False
     cmd = make_command(PROGRAMS["static"], SPEEDS["medium"], 0x00, 0x01)
     iface = profile.control_interface if profile else interface
     return send_command(dev, cmd, iface)
