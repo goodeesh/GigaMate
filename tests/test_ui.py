@@ -69,6 +69,74 @@ def test_main_window_creation(qapp):
     assert win.stack.currentIndex() == 0
 
 
+@pytest.mark.parametrize("visible,status", [(False, "active"), (True, "suspended")])
+def test_gpu_holders_skip_hidden_or_sleeping(qapp, visible, status):
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    page.setVisible(visible)
+    try:
+        with patch.object(gp.dgpu_tune, "wake_holders") as scan:
+            page._refresh_holders(GpuState(present=True, vendor="nvidia", status=status))
+            scan.assert_not_called()
+            assert not page._holders_busy
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_gpu_holders_scan_keeps_ui_responsive_and_caches(qapp):
+    import threading
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtTest import QTest
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    page.show()
+    page.timer.stop()
+    awake = GpuState(present=True, vendor="nvidia", status="active")
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    worker_threads = []
+
+    def slow_scan():
+        worker_threads.append(threading.get_ident())
+        started.set()
+        release.wait(3)
+        done.set()
+        return ["game"]
+
+    try:
+        with patch.object(gp.dgpu_tune, "wake_holders", side_effect=slow_scan) as scan, \
+             patch.object(gp, "get_gpu_state", return_value=awake):
+            page._refresh_holders(awake)
+            assert started.wait(1)
+            assert len(worker_threads) == 1
+            assert worker_threads[0] != threading.get_ident()
+            heartbeat = []
+            QTimer.singleShot(0, lambda: heartbeat.append(True))
+            QTest.qWait(30)
+            assert heartbeat == [True]
+            page._refresh_holders(awake)
+            assert scan.call_count == 1
+            release.set()
+            assert done.wait(1)
+            for _ in range(100):
+                QTest.qWait(10)
+                if not page._holders_busy:
+                    break
+            assert page.gpu_holders_lbl.text() == "Awake held by: game"
+            page._refresh_holders(awake)
+            assert scan.call_count == 1
+    finally:
+        release.set()
+        page.close()
+        page.deleteLater()
+
+
 def test_gpu_page_max_clock_controls(qapp):
     from gigamate import config as config_mod
     from gigamate.gpu import GpuState
