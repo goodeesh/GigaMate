@@ -24,6 +24,9 @@ read and can never wake the GPU; NVML is touched only for a probe, and only
 while the dGPU is already awake.
 """
 
+import queue
+import threading
+import time
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
@@ -78,6 +81,13 @@ class GpuPage(QWidget):
         self._probed: dict = {}
         self._was_awake = False
         self._gpu_awake = False
+        self._holders_results = queue.Queue()
+        self._holders_busy = False
+        self._holders_checked_at = None
+        self._holders = []
+        self._holders_timer = QTimer(self)
+        self._holders_timer.setInterval(100)
+        self._holders_timer.timeout.connect(self._collect_holders)
         self._init_ui()
 
         # Prime the watcher state before the first timer tick so the dGPU-asleep
@@ -489,6 +499,57 @@ class GpuPage(QWidget):
         self._read_published()
         self._refresh()
 
+    def _refresh_holders(self, gpu) -> None:
+        # The process/fd walk can take seconds. Never run it on the Qt thread,
+        # or for a hidden page / sleeping GPU where its result is not displayed.
+        if not self.isVisible() or gpu.vendor != "nvidia" or gpu.status != "active":
+            self._holders = []
+            self._holders_checked_at = None
+            self.gpu_holders_lbl.setText("")
+            return
+        self.gpu_holders_lbl.setText(
+            "Awake held by: " + ", ".join(self._holders) if self._holders else "")
+        now = time.monotonic()
+        if self._holders_busy or (
+            self._holders_checked_at is not None
+            and now - self._holders_checked_at < 10.0
+        ):
+            return
+        self._holders_busy = True
+        self._holders_checked_at = now
+        results = self._holders_results
+        scan = dgpu_tune.wake_holders
+
+        def collect():
+            # Capture only the queue/function; never retain or access Qt widgets
+            # from the worker. A daemon worker also cannot delay GUI shutdown.
+            try:
+                holders = scan()
+            except Exception:
+                holders = []
+            results.put(holders)
+
+        threading.Thread(target=collect, name="gigamate-gpu-holders", daemon=True).start()
+        self._holders_timer.start()
+
+    def _collect_holders(self) -> None:
+        try:
+            holders = self._holders_results.get_nowait()
+        except queue.Empty:
+            return
+        self._holders_busy = False
+        self._holders_timer.stop()
+        gpu = get_gpu_state()
+        if self.isVisible() and gpu.vendor == "nvidia" and gpu.status == "active":
+            self._holders = holders
+            self._holders_checked_at = time.monotonic()
+            self.gpu_holders_lbl.setText(
+                "Awake held by: " + ", ".join(holders) if holders else "")
+        else:
+            self._holders = []
+            self._holders_checked_at = None
+            self.gpu_holders_lbl.setText("")
+
     # ── refresh ──
     def _refresh(self) -> None:
         gpu = get_gpu_state()
@@ -499,15 +560,7 @@ class GpuPage(QWidget):
             self.gpu_holders_lbl.setText("")
         else:
             self.gpu_state_lbl.setText(gpu_status_text(gpu))
-            holders = []
-            try:
-                holders = dgpu_tune.wake_holders()
-            except Exception:
-                pass
-            if gpu.status == "active" and holders:
-                self.gpu_holders_lbl.setText("Awake held by: " + ", ".join(holders))
-            else:
-                self.gpu_holders_lbl.setText("")
+            self._refresh_holders(gpu)
 
         supported = False
         # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
