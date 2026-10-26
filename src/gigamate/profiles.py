@@ -2,11 +2,13 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import usb.core
+import usb.util
 
 from .paths import CONFIG_DIR
 
@@ -90,6 +92,7 @@ class DeviceProfile:
     hotkeys: Dict[str, dict] = field(default_factory=dict)
     dmi: Optional[DmiConfig] = None
     version: int = 1
+    rgb_protocol: str = "vendor"
 
     @property
     def id(self) -> Tuple[int, int]:
@@ -144,6 +147,8 @@ class DeviceProfile:
         result["interfaces"] = list(self.interfaces)
         result["control_interface"] = self.control_interface
         result["colour_map"] = cmap
+        if self.rgb_protocol != "vendor":
+            result["rgb_protocol"] = self.rgb_protocol
         if self.acpi is not None:
             result["acpi"] = {
                 "has_fan_control": self.acpi.has_fan_control,
@@ -197,6 +202,7 @@ class DeviceProfile:
             pid=pid,
             name=d.get("name", f"{vid:04X}:{pid:04X}"),
             version=d.get("version", 1),
+            rgb_protocol=d.get("rgb_protocol", "vendor"),
             interfaces=list(d.get("interfaces", [1, 3])),
             control_interface=int(d.get("control_interface", 3)),
             colour_map=cmap,
@@ -569,6 +575,9 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
     if profile.has_rgb and not has_usb_key:
         errors.append("RGB profiles require a USB vid/pid")
 
+    if profile.rgb_protocol not in ("vendor", "lamparray"):
+        errors.append(f"Unknown RGB protocol: {profile.rgb_protocol}")
+
     if profile.has_rgb and not profile.interfaces:
         errors.append("No USB interfaces specified")
 
@@ -636,13 +645,36 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
     return errors
 
 
+@contextmanager
+def _claimed_calibration_interface(dev, iface: int):
+    """Temporarily claim a candidate and restore its input driver afterward."""
+    detached = False
+    try:
+        try:
+            if dev.is_kernel_driver_active(iface):
+                dev.detach_kernel_driver(iface)
+                detached = True
+        except NotImplementedError:
+            pass
+        usb.util.claim_interface(dev, iface)
+        yield
+    finally:
+        try:
+            usb.util.release_interface(dev, iface)
+        finally:
+            if detached:
+                dev.attach_kernel_driver(iface)
+
+
 def _test_interface(dev, iface: int) -> bool:
     from .protocol import make_command
     try:
-        cmd = make_command(0x01, 0x06, 0x00, 0x01)
-        dev.ctrl_transfer(0x21, 0x09, 0x0300, iface, cmd)
+        with _claimed_calibration_interface(dev, iface):
+            cmd = make_command(0x01, 0x06, 0x00, 0x01)
+            dev.ctrl_transfer(0x21, 0x09, 0x0300, iface, cmd)
         return True
-    except usb.core.USBError:
+    except usb.core.USBError as exc:
+        print(f"  Interface {iface}: {exc}")
         return False
 
 
@@ -652,9 +684,7 @@ def _send_raw(dev, byte5: int, byte4: int, iface: int):
     dev.ctrl_transfer(0x21, 0x09, 0x0300, iface, cmd)
 
 
-def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
-    from .protocol import make_command
-
+def calibrate(dev, vid: int, pid: int, interface: Optional[int] = None) -> Optional[DeviceProfile]:
     print()
     print("=" * 60)
     print("  GigaMate — Keyboard RGB Calibration")
@@ -663,11 +693,23 @@ def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
     print(f"Detected: VID={vid:04X} PID={pid:04X}")
     print()
 
-    interfaces_to_detach = [1]
+    try:
+        available = {int(iface.bInterfaceNumber) for iface in dev.get_active_configuration()}
+    except usb.core.USBError as exc:
+        print(f"Cannot access the USB keyboard: {exc}")
+        print("Calibration needs USB device access; hidraw permissions alone are insufficient.")
+        print("Install the GigaMate udev rules, or run calibration with sudo.")
+        return None
+    if interface is not None and interface not in available:
+        print(f"USB interface {interface} is unavailable. Available: {sorted(available)}")
+        return None
+    # Keep the known RGB interface first, then discover other actual interfaces.
+    candidates = ([interface] if interface is not None else
+                  sorted(available, key=lambda iface: (iface != 3, iface)))
     working_iface = None
 
     print("Step 0: Finding control interface")
-    for iface in [3, 0, 1, 2]:
+    for iface in candidates:
         if _test_interface(dev, iface):
             print(f"  Interface {iface}: responds ✓")
             working_iface = iface
@@ -679,19 +721,11 @@ def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
         print("\nNo USB interface responded. Calibration aborted.")
         return None
 
-    if working_iface not in interfaces_to_detach:
-        interfaces_to_detach.append(working_iface)
-    if 3 not in interfaces_to_detach and 3 != working_iface:
-        interfaces_to_detach.append(3)
+    with _claimed_calibration_interface(dev, working_iface):
+        return _calibrate_colours(dev, vid, pid, working_iface)
 
-    for iface in interfaces_to_detach:
-        try:
-            if dev.is_kernel_driver_active(iface):
-                dev.detach_kernel_driver(iface)
-                print(f"  Detached kernel driver from interface {iface}")
-        except (usb.core.USBError, NotImplementedError):
-            pass
 
+def _calibrate_colours(dev, vid: int, pid: int, working_iface: int) -> Optional[DeviceProfile]:
     time.sleep(0.2)
     print()
 
@@ -822,7 +856,7 @@ def calibrate(dev, vid: int, pid: int) -> Optional[DeviceProfile]:
         vid=vid,
         pid=pid,
         name=model_name,
-        interfaces=sorted(set(interfaces_to_detach)),
+        interfaces=[working_iface],
         control_interface=working_iface,
         colour_map=colour_map,
     )
