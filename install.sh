@@ -274,7 +274,7 @@ install_system_deps() {
             warn "  - evdev (Python input monitoring, for keyboard idle auto-off)"
             warn "  - PyGObject + Gtk 3.0 + AppIndicator3"
             warn "  - Linux kernel headers (for ACPI kernel module)"
-            warn "  - Python 3.8+"
+            warn "  - Python 3.10+"
             echo
             if [ "$ASSUME_YES" = true ]; then
                 info "--yes given, continuing non-interactively."

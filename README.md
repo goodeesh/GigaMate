@@ -122,6 +122,7 @@ Your laptop isn't supported yet? Run these three commands:
 
 ```sh
 gigamate calibrate rgb              # Map keyboard colours (5 min)
+gigamate calibrate rgb --interface 4  # Use a specific control interface (including LampArray)
 gigamate calibrate acpi             # Probe ACPI + generate a candidate profile
 gigamate profile contribute         # Print PR instructions to share
 ```

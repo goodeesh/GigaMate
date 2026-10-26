@@ -13,6 +13,32 @@ The RGB control channel is on a vendor-specific interface (typically interface 3
 | **3** | **Vendor-specific (0xFF01)** | **RGB control channel** |
 | 4 | Digitizer/touchpad | Leave untouched |
 
+The table describes the supported Aero X16 profile. Other models may use a
+different interface. Calibration discovers the device's actual USB interfaces;
+use `gigamate calibrate rgb --interface 4` to test a specific interface. A
+successful USB transfer alone does not prove that the LEDs changed.
+
+Vendor-protocol calibration uses PyUSB and needs access to the USB device under
+`/dev/bus/usb/`. Access to a `/dev/hidraw*` node alone is insufficient.
+
+## HID LampArray keyboards
+
+Some models, including the GAMING A16 with USB ID `0414:8104`, expose HID
+LampArray on interface 4 (usage page `0x59`). These need a different protocol.
+GigaMate detects that descriptor and uses hidraw feature ioctls, as the
+`gigabyte-kbd` utility does. `gigamate calibrate rgb` saves a LampArray profile
+automatically; colour mapping and root USB access are unnecessary when the
+hidraw node is accessible.
+
+The supported report layout is:
+
+- Report 1 (23 bytes, read): lamp count at bytes 1–2 (little endian).
+- Report 6 (2 bytes, write): `[6, 0]` disables autonomous mode.
+- Report 5 (10 bytes, write): `[5, 1, start_lo, start_hi, end_lo, end_hi, R, G, B, 255]`.
+
+Brightness scales RGB because this keyboard's intensity channel is on/off.
+The legacy vendor report below remains available for older keyboards.
+
 ## Command Format
 
 8-byte USB HID Feature Report sent via control transfer:
