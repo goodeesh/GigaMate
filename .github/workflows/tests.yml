@@ -7,11 +7,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: when the `latest` alias rolled over to
+    # Ubuntu 26.04, actions/python-versions had no builds for the older
+    # interpreters below, so those legs failed during setup and never ran a test.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        # 3.8 and 3.9 are EOL upstream and no longer have runner builds.
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4

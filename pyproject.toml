@@ -23,7 +23,7 @@ classifiers = [
     "Topic :: Hardware :: Hardware Drivers",
     "Topic :: System :: Monitoring",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "pyusb>=1.2",
     # evdev 2.x needs Python >=3.11; 1.9.x covers 3.8+ (idle.py only
