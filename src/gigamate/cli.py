@@ -25,6 +25,7 @@ import sys
 import os
 import time
 import argparse
+from dataclasses import replace
 from typing import Optional, List
 
 from .protocol import (
@@ -220,17 +221,40 @@ def cmd_rgb_calibrate(args) -> None:
             print("Try: lsusb | grep -i gigabyte")
             sys.exit(1)
         vid, pid = detected
+    from .lamparray import find_device as find_lamparray, LampArrayDevice, make_profile
+    lamp = find_lamparray(vid, pid, getattr(args, "interface", None))
+    if lamp is not None:
+        try:
+            count = LampArrayDevice(lamp[0]).lamp_count()
+        except (OSError, ValueError) as exc:
+            print(f"Cannot access LampArray keyboard {lamp[0]}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        # LampArray uses direct RGB; the older byte-by-byte calibration is unnecessary.
+        profile = make_profile(vid, pid, lamp[1])
+        existing = resolve_profile(vid, pid)
+        if existing is not None:
+            profile = replace(existing, rgb_protocol=profile.rgb_protocol,
+                              interfaces=profile.interfaces,
+                              control_interface=profile.control_interface,
+                              colour_map=profile.colour_map)
+        path = save_user_profile(profile)
+        print(f"HID LampArray: {lamp[0]}, interface {lamp[1]}, {count} lamp(s).")
+        print("Direct RGB supported; colour calibration is unnecessary.")
+        print(f"Profile saved: {path}")
+        print("Try: gigamate rgb static light_purple")
+        print("Reload profiles or restart GigaMate to enable the keyboard controls.")
+        return
     existing = resolve_profile(vid, pid)
     if existing is not None:
         print(f"Model already supported: {existing.name}")
         ans = input("Re-run calibration anyway? [y/N] ").strip().lower()
         if ans != "y":
             return
-    dev = get_keyboard(vid, pid)
+    dev = get_keyboard(vid, pid, interfaces=[])
     if dev is None:
         print(f"Keyboard not found (VID={vid:04X} PID={pid:04X})")
         sys.exit(1)
-    new_profile = run_calibrate(dev, vid, pid)
+    new_profile = run_calibrate(dev, vid, pid, interface=getattr(args, "interface", None))
     if new_profile is None:
         print("Calibration cancelled.")
         return
@@ -1584,11 +1608,42 @@ def cmd_tray(args) -> None:
 
 def cmd_battery(args) -> None:
     """Show battery status or set charge limit."""
-    from .battery import get_battery_manager
+    from .battery import (
+        get_battery_manager,
+        evaluate_calibration_state,
+        start_topup,
+        cancel_topup,
+    )
     mgr = get_battery_manager()
     if not mgr.is_available:
         print("No battery detected on this system.", file=sys.stderr)
         sys.exit(1)
+
+    if getattr(args, "topup", False):
+        if start_topup(mgr):
+            print("Top-up charge to 100% initiated. Limit will automatically restore once full.")
+            return
+        else:
+            print("Failed to initiate top-up charge (unsupported or error).", file=sys.stderr)
+            sys.exit(1)
+
+    if getattr(args, "cancel_topup", False):
+        cancel_topup(mgr, restore_limit=True)
+        print("Top-up charge cancelled; configured charge threshold restored.")
+        return
+
+    mutated = False
+    if getattr(args, "auto_topup", None) is not None:
+        enabled = (args.auto_topup.strip().lower() == "on")
+        update_config(lambda cfg: {**cfg, "charge_calibration_auto": enabled})
+        print(f"Automatic periodic battery calibration {'enabled' if enabled else 'disabled'}.")
+        mutated = True
+
+    if getattr(args, "topup_interval", None) is not None:
+        days = max(1, min(365, int(args.topup_interval)))
+        update_config(lambda cfg: {**cfg, "charge_calibration_interval_days": days})
+        print(f"Battery calibration interval set to {days} days.")
+        mutated = True
 
     if getattr(args, "limit", None) is not None:
         try:
@@ -1608,6 +1663,13 @@ def cmd_battery(args) -> None:
             sys.exit(1)
         return
 
+    if mutated:
+        return
+
+    cfg = load_config()
+    evaluate_calibration_state(mgr, cfg)
+    cfg = load_config()
+
     info = mgr.get_battery_info()
     print("Battery Information:")
     print(f"  Device:         {info.name}")
@@ -1619,8 +1681,27 @@ def cmd_battery(args) -> None:
     if info.cycle_count is not None:
         print(f"  Cycle Count:    {info.cycle_count}")
     if info.charge_limit_supported:
-        limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
+        topup_active = cfg.get("charge_topup_active", False)
+        if topup_active:
+            limit_str = "100% (Top-Up / Calibration active)"
+        else:
+            limit_str = f"{info.charge_limit}%" if info.charge_limit else "None (100%)"
         print(f"  Charge Limit:   {limit_str} (Backend: {info.backend})")
+        auto_cal = cfg.get("charge_calibration_auto", False)
+        cal_interval = cfg.get("charge_calibration_interval_days", 30)
+        print(f"  Auto Calibrate: {'Enabled' if auto_cal else 'Disabled'} (every {cal_interval} days)")
+        last_full = cfg.get("last_full_charge_ts", 0)
+        if last_full > 0:
+            days_ago = max(0, int((time.time() - last_full) / 86400))
+            if days_ago == 0:
+                age_str = "today"
+            elif days_ago == 1:
+                age_str = "yesterday"
+            else:
+                age_str = f"{days_ago} days ago"
+            print(f"  Last Full:      {age_str}")
+        else:
+            print("  Last Full:      Never recorded")
     else:
         print("  Charge Limit:   Unsupported by current kernel/firmware")
 
@@ -1690,6 +1771,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     cal_rgb_parser = rgb_sub.add_parser("calibrate", help="Interactive RGB calibration")
     cal_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     cal_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    cal_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
+                                help="USB RGB control interface (default: auto-detect)")
 
     # rgb idle
     idle_parser = rgb_sub.add_parser(
@@ -1730,6 +1813,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     calibrate_rgb_parser = calibrate_sub.add_parser("rgb", help="Keyboard RGB calibration")
     calibrate_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     calibrate_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    calibrate_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
+                                      help="USB RGB control interface (default: auto-detect)")
 
     calibrate_acpi_parser = calibrate_sub.add_parser("acpi", help="ACPI capabilities probe")
     calibrate_acpi_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
@@ -1739,6 +1824,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     calibrate_all_parser = calibrate_sub.add_parser("all", help="RGB + ACPI calibration")
     calibrate_all_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     calibrate_all_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+    calibrate_all_parser.add_argument("--interface", "-i", type=int, default=None,
+                                      help="USB RGB control interface (default: auto-detect)")
 
     # --- version subcommand ---
     sub.add_parser("version", help="Show version")
@@ -1802,6 +1889,14 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     battery_parser = sub.add_parser("battery", help="Battery health and charge threshold limiter")
     battery_parser.add_argument("--limit", "-l", type=int, default=None,
                                 help="Set max charge limit (40..100)")
+    battery_parser.add_argument("--topup", action="store_true",
+                                help="Initiate one-time top-up charge to 100%% (calibration)")
+    battery_parser.add_argument("--cancel-topup", action="store_true",
+                                help="Cancel active top-up charge and restore configured limit")
+    battery_parser.add_argument("--auto-topup", choices=["on", "off"], default=None,
+                                help="Enable or disable periodic auto-calibration (100%% top-up every N days)")
+    battery_parser.add_argument("--topup-interval", type=int, default=None,
+                                help="Set interval in days for periodic auto-calibration (1..365)")
     battery_parser.add_argument("--status", action="store_true",
                                 help="Show detailed battery status")
 

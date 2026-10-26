@@ -1,6 +1,8 @@
+import time
 import pytest
 from pathlib import Path
-from gigamate.battery import BatteryManager, BatteryInfo
+from unittest.mock import MagicMock, patch
+from gigamate.battery import BatteryManager, BatteryInfo, is_effectively_full, start_topup, cancel_topup, evaluate_calibration_state
 
 
 def test_battery_detection_and_status(tmp_path: Path):
@@ -264,4 +266,344 @@ def test_dual_battery_charge_limit(tmp_path: Path):
     assert mgr.set_charge_limit(80) is True
     assert (bat0 / "charge_control_end_threshold").read_text().strip() == "80"
     assert (bat1 / "charge_control_end_threshold").read_text().strip() == "80"
+
+
+def test_is_effectively_full():
+    """is_effectively_full returns True for fully charged batteries."""
+    # Full status with cap >= 99
+    info = BatteryInfo(present=True, status="Full", capacity=100)
+    assert is_effectively_full(info) is True
+
+    # Not charging with capacity >= 99
+    info = BatteryInfo(present=True, status="Not charging", capacity=99)
+    assert is_effectively_full(info) is True
+
+    # Unknown status with capacity >= 99
+    info = BatteryInfo(present=True, status="Unknown", capacity=100)
+    assert is_effectively_full(info) is True
+
+    # Not present
+    info = BatteryInfo(present=False, status="Full", capacity=100)
+    assert is_effectively_full(info) is False
+
+    # Charging status - should not be effectively full
+    info = BatteryInfo(present=True, status="Charging", capacity=100)
+    assert is_effectively_full(info) is False
+
+    # Capacity just below threshold
+    info = BatteryInfo(present=True, status="Full", capacity=98)
+    assert is_effectively_full(info) is False
+
+    # Not charging with capacity < 99
+    info = BatteryInfo(present=True, status="Not charging", capacity=98)
+    assert is_effectively_full(info) is False
+
+
+def test_start_topup_no_manager(tmp_path: Path):
+    """start_topup uses get_battery_manager when no mgr provided."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = True
+    mock_instance.set_charge_limit.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config") as mock_update:
+            result = start_topup()
+            assert result is True
+            mock_instance.set_charge_limit.assert_called_once_with(100)
+            mock_update.assert_called_once()
+
+
+def test_start_topup_not_supported(tmp_path: Path):
+    """start_topup returns False when charge limit not supported."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = False
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config"):
+            result = start_topup()
+            assert result is False
+            mock_instance.set_charge_limit.assert_not_called()
+
+
+def test_start_topup_set_fails(tmp_path: Path):
+    """start_topup returns False when set_charge_limit fails."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = True
+    mock_instance.set_charge_limit.return_value = False
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config"):
+            result = start_topup()
+            assert result is False
+
+
+def test_cancel_topup_with_restore(tmp_path: Path):
+    """cancel_topup restores charge limit when restore_limit=True."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config") as mock_update:
+            with patch("gigamate.config.load") as mock_load:
+                mock_load.return_value = {"charge_limit_enabled": True, "charge_limit": 80}
+
+                result = cancel_topup(restore_limit=True)
+                assert result is True
+                mock_instance.set_charge_limit.assert_called_once_with(80)
+
+
+def test_cancel_topup_without_restore(tmp_path: Path):
+    """cancel_topup does not restore charge limit when restore_limit=False."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config") as mock_update:
+            with patch("gigamate.config.load") as mock_load:
+                mock_load.return_value = {"charge_limit_enabled": True, "charge_limit": 80}
+
+                result = cancel_topup(restore_limit=False)
+                assert result is True
+                mock_instance.set_charge_limit.assert_not_called()
+
+
+def test_cancel_topup_no_limit_enabled(tmp_path: Path):
+    """cancel_topup skips restore when charge_limit_enabled is False."""
+    mock_instance = MagicMock()
+    mock_instance.is_charge_limit_supported.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mock_instance):
+        with patch("gigamate.config.update_config") as mock_update:
+            with patch("gigamate.config.load") as mock_load:
+                mock_load.return_value = {"charge_limit_enabled": False, "charge_limit": 80}
+
+                result = cancel_topup(restore_limit=True)
+                assert result is True
+                mock_instance.set_charge_limit.assert_not_called()
+
+
+def test_evaluate_calibration_state_no_battery(tmp_path: Path):
+    """evaluate_calibration_state returns no_battery when no battery."""
+    mgr = MagicMock()
+    mgr.is_available = False
+
+    result = evaluate_calibration_state(mgr=mgr)
+    assert result == {"active": False, "reason": "no_battery"}
+
+
+def test_evaluate_calibration_state_completed(tmp_path: Path):
+    """evaluate_calibration_state completes top-up when battery is full."""
+    mgr = MagicMock()
+    mgr.is_available = True
+
+    info = BatteryInfo(present=True, status="Full", capacity=100, ac_online=False)
+    mgr.get_battery_info.return_value = info
+
+    with patch("gigamate.config.load") as mock_load:
+        with patch("gigamate.config.update_config") as mock_update:
+            mock_load.return_value = {
+                "charge_topup_active": True,
+                "charge_topup_started_ts": 1000,
+                "last_full_charge_ts": 0,
+            }
+
+            result = evaluate_calibration_state(mgr=mgr, cfg=mock_load.return_value)
+            assert result == {"active": False, "event": "completed"}
+            assert mock_update.call_count >= 1
+
+
+def test_evaluate_calibration_state_timeout(tmp_path: Path):
+    """evaluate_calibration_state times out after 24h."""
+    mgr = MagicMock()
+    mgr.is_available = True
+
+    info = BatteryInfo(present=True, status="Not charging", capacity=95, ac_online=False)
+    mgr.get_battery_info.return_value = info
+
+    with patch("gigamate.config.load") as mock_load:
+        with patch("gigamate.config.update_config") as mock_update:
+            mock_load.return_value = {
+                "charge_topup_active": True,
+                "charge_topup_started_ts": 100,  # old timestamp
+                "last_full_charge_ts": 0,
+            }
+
+            result = evaluate_calibration_state(mgr=mgr, cfg=mock_load.return_value)
+            assert result == {"active": False, "event": "timeout"}
+            mock_update.assert_called_once()
+
+
+def test_evaluate_calibration_state_auto_started(tmp_path: Path):
+    """evaluate_calibration_state auto-starts calibration when conditions met."""
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.is_charge_limit_supported.return_value = True
+    mgr.set_charge_limit.return_value = True
+
+    info = BatteryInfo(present=True, status="Not charging", capacity=85, ac_online=True)
+    mgr.get_battery_info.return_value = info
+
+    with patch("gigamate.config.load") as mock_load:
+        with patch("gigamate.config.update_config") as mock_update:
+            # 35 days since last full charge (> 30 days interval)
+            mock_load.return_value = {
+                "charge_limit_enabled": True,
+                "charge_limit": 80,
+                "charge_calibration_auto": True,
+                "charge_calibration_interval_days": 30,
+                "charge_topup_active": False,
+                "last_full_charge_ts": int(time.time()) - (35 * 86400),
+            }
+
+            result = evaluate_calibration_state(mgr=mgr, cfg=mock_load.return_value)
+            assert result == {"active": True, "event": "auto_started"}
+            mock_update.assert_called_once()
+
+
+def test_evaluate_calibration_state_first_run_seed(tmp_path: Path):
+    """evaluate_calibration_state seeds last_full_ts on first run when not set."""
+    mgr = MagicMock()
+    mgr.is_available = True
+
+    info = BatteryInfo(present=True, status="Not charging", capacity=85, ac_online=True)
+    mgr.get_battery_info.return_value = info
+
+    with patch("gigamate.config.load") as mock_load:
+        with patch("gigamate.config.update_config") as mock_update:
+            mock_load.return_value = {
+                "charge_limit_enabled": True,
+                "charge_limit": 80,
+                "charge_calibration_auto": True,
+                "charge_topup_active": False,
+                "last_full_charge_ts": 0,
+            }
+
+            result = evaluate_calibration_state(mgr=mgr, cfg=mock_load.return_value)
+            # Seeds to now on first run, does not start immediately
+            assert result == {"active": False, "event": "idle"}
+            mock_update.assert_called_once()
+
+
+def test_cmd_battery_topup(capsys):
+    """cmd_battery --topup starts topup and prints confirmation."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = True
+    args.cancel_topup = False
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.is_charge_limit_supported.return_value = True
+    mgr.set_charge_limit.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.config.update_config"):
+            cmd_battery(args)
+            captured = capsys.readouterr()
+            assert "Top-up charge to 100% initiated" in captured.out
+
+
+def test_cmd_battery_cancel_topup(capsys):
+    """cmd_battery --cancel-topup cancels topup and restores limit."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = True
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.is_charge_limit_supported.return_value = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.config.update_config"):
+            with patch("gigamate.config.load", return_value={"charge_limit_enabled": True, "charge_limit": 80}):
+                cmd_battery(args)
+                captured = capsys.readouterr()
+                assert "Top-up charge cancelled" in captured.out
+
+
+def test_cmd_battery_auto_topup_and_interval(capsys):
+    """cmd_battery --auto-topup and --topup-interval mutate config."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = False
+    args.auto_topup = "on"
+    args.topup_interval = 14
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.cli.update_config") as mock_update:
+            cmd_battery(args)
+            captured = capsys.readouterr()
+            assert "Automatic periodic battery calibration enabled" in captured.out
+            assert "Battery calibration interval set to 14 days" in captured.out
+            assert mock_update.call_count == 2
+
+
+def test_cmd_battery_display_info(capsys):
+    """cmd_battery display shows topup and auto-calibration status."""
+    from gigamate.cli import cmd_battery
+    args = MagicMock()
+    args.limit = None
+    args.topup = False
+    args.cancel_topup = False
+    args.auto_topup = None
+    args.topup_interval = None
+    args.status = False
+
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.get_battery_info.return_value = BatteryInfo(
+        present=True,
+        name="BAT0",
+        capacity=80,
+        status="Not charging",
+        ac_online=True,
+        charge_limit=80,
+        charge_limit_supported=True,
+        backend="gigamate_acpi",
+    )
+
+    with patch("gigamate.battery.get_battery_manager", return_value=mgr):
+        with patch("gigamate.battery.evaluate_calibration_state"):
+            with patch("gigamate.cli.load_config", return_value={
+                "charge_limit_enabled": True,
+                "charge_limit": 80,
+                "charge_topup_active": True,
+                "charge_calibration_auto": True,
+                "charge_calibration_interval_days": 30,
+                "last_full_charge_ts": int(time.time()) - 86400,
+            }):
+                cmd_battery(args)
+                captured = capsys.readouterr()
+                assert "100% (Top-Up / Calibration active)" in captured.out
+                assert "Auto Calibrate: Enabled (every 30 days)" in captured.out
+                assert "Last Full:      yesterday" in captured.out
+
+
+def test_cmd_battery_parser_help():
+    """Verify that argparse parses battery help strings without ValueError."""
+    import sys
+    from gigamate.cli import _subcommand_main
+
+    with patch.object(sys, "argv", ["gigamate", "battery", "--help"]):
+        with pytest.raises(SystemExit) as exc:
+            _subcommand_main()
+        assert exc.value.code == 0
+
+
+
 

@@ -69,6 +69,74 @@ def test_main_window_creation(qapp):
     assert win.stack.currentIndex() == 0
 
 
+@pytest.mark.parametrize("visible,status", [(False, "active"), (True, "suspended")])
+def test_gpu_holders_skip_hidden_or_sleeping(qapp, visible, status):
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    page.setVisible(visible)
+    try:
+        with patch.object(gp.dgpu_tune, "wake_holders") as scan:
+            page._refresh_holders(GpuState(present=True, vendor="nvidia", status=status))
+            scan.assert_not_called()
+            assert not page._holders_busy
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_gpu_holders_scan_keeps_ui_responsive_and_caches(qapp):
+    import threading
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtTest import QTest
+    from gigamate.gpu import GpuState
+    import gigamate.ui.pages.gpu_page as gp
+
+    page = gp.GpuPage()
+    page.show()
+    page.timer.stop()
+    awake = GpuState(present=True, vendor="nvidia", status="active")
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    worker_threads = []
+
+    def slow_scan():
+        worker_threads.append(threading.get_ident())
+        started.set()
+        release.wait(3)
+        done.set()
+        return ["game"]
+
+    try:
+        with patch.object(gp.dgpu_tune, "wake_holders", side_effect=slow_scan) as scan, \
+             patch.object(gp, "get_gpu_state", return_value=awake):
+            page._refresh_holders(awake)
+            assert started.wait(1)
+            assert len(worker_threads) == 1
+            assert worker_threads[0] != threading.get_ident()
+            heartbeat = []
+            QTimer.singleShot(0, lambda: heartbeat.append(True))
+            QTest.qWait(30)
+            assert heartbeat == [True]
+            page._refresh_holders(awake)
+            assert scan.call_count == 1
+            release.set()
+            assert done.wait(1)
+            for _ in range(100):
+                QTest.qWait(10)
+                if not page._holders_busy:
+                    break
+            assert page.gpu_holders_lbl.text() == "Awake held by: game"
+            page._refresh_holders(awake)
+            assert scan.call_count == 1
+    finally:
+        release.set()
+        page.close()
+        page.deleteLater()
+
+
 def test_gpu_page_max_clock_controls(qapp):
     from gigamate import config as config_mod
     from gigamate.gpu import GpuState
@@ -679,6 +747,56 @@ def test_battery_page(qapp):
     page._set_slider_value(80)
     assert page.limit_slider.value() == 80
     assert "Limit: 80%" in page.slider_label.text()
+
+
+def test_battery_page_topup_and_calibration(qapp):
+    from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.config import load as load_config, save as save_config
+
+    page = BatteryPage()
+
+    # Verify topup button exists
+    assert page.topup_btn is not None
+    assert "Charge to 100% Once" in page.topup_btn.text()
+
+    # Toggle topup on
+    with patch("gigamate.ui.pages.battery_page.start_topup", return_value=True) as mock_start:
+        with patch("gigamate.ui.pages.battery_page.load_config", return_value={
+            "charge_limit": 80,
+            "charge_topup_active": False,
+            "charge_calibration_auto": False,
+            "charge_calibration_interval_days": 30,
+        }):
+            page._on_topup_clicked()
+            mock_start.assert_called_once()
+
+    # Auto calibration checkbox
+    assert page.auto_cal_chk is not None
+    assert page.auto_cal_chk.isChecked() is False  # Opt-in default False
+
+    # Check auto calibration
+    page.auto_cal_chk.setChecked(True)
+    cfg = load_config()
+    assert cfg.get("charge_calibration_auto") is True
+    assert page.interval_row_widget.isEnabled() is True
+
+    # Interval buttons
+    assert 30 in page.interval_buttons
+    assert 14 in page.interval_buttons
+    assert 60 in page.interval_buttons
+
+    page.interval_buttons[14].click()
+    cfg = load_config()
+    assert cfg.get("charge_calibration_interval_days") == 14
+    assert page.interval_buttons[14].isChecked() is True
+
+    # Reload from config with topup active
+    cfg["charge_topup_active"] = True
+    save_config(cfg)
+    page.reload_from_config()
+    assert "Cancel 100% Top-Up" in page.topup_btn.text()
+    assert "Top-Up Active" in page.topup_status_label.text()
+
 
 
 def test_rgb_page_all_profile_colours(qapp):
@@ -1490,6 +1608,43 @@ def test_tray_save_config_does_not_clobber_when_clean():
 
         assert captured["charge_limit"] == 80
         assert captured["charge_limit_enabled"] is False
+
+
+def test_tray_battery_topup_menu_and_actions():
+    """Tray battery section renders top-up button and toggles state."""
+    GigaMateTrayApp = _import_tray_app()
+    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
+        tray = GigaMateTrayApp()
+        tray._menu = MagicMock()
+        tray._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": False}
+        tray._rebuild_menu = MagicMock()
+
+        mgr = MagicMock()
+        mgr.is_available = True
+        mgr.is_charge_limit_supported.return_value = True
+        mgr.set_charge_limit.return_value = True
+        from gigamate.battery import BatteryInfo
+        mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=80, ac_online=True)
+
+        with patch("gigamate.tray.get_battery_manager", return_value=mgr):
+            with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
+                with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
+                    # 1. Append battery section with topup inactive
+                    tray._append_battery_section()
+                    assert tray._menu.append.call_count >= 3
+
+                    # 2. Trigger start topup
+                    tray._on_start_topup(MagicMock())
+                    mock_start.assert_called_once_with(mgr)
+                    assert tray._config["charge_topup_active"] is True
+                    tray._rebuild_menu.assert_called_once()
+
+                    # 3. Trigger cancel topup
+                    tray._rebuild_menu.reset_mock()
+                    tray._on_cancel_topup(MagicMock())
+                    mock_cancel.assert_called_once_with(mgr, restore_limit=True)
+                    assert tray._config["charge_topup_active"] is False
+                    tray._rebuild_menu.assert_called_once()
 
 
 def test_onboarding_unsupported_opts_out_everything(qapp):

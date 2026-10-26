@@ -16,6 +16,7 @@ Supports:
 from dataclasses import dataclass
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -342,3 +343,135 @@ def get_battery_manager() -> BatteryManager:
     if _default_manager is None:
         _default_manager = BatteryManager()
     return _default_manager
+
+
+def is_effectively_full(info: BatteryInfo) -> bool:
+    """Returns True if battery is effectively full.
+
+    Present and (status == 'Full' or (capacity >= 99 and status in ('Full', 'Not charging', 'Unknown'))).
+    """
+    if not getattr(info, "present", False):
+        return False
+    status = getattr(info, "status", "")
+    try:
+        cap = int(getattr(info, "capacity", 0) or 0)
+    except (ValueError, TypeError):
+        cap = 0
+    if cap >= 99 and status in ("Full", "Not charging", "Unknown"):
+        return True
+    return False
+
+
+def start_topup(mgr: Optional[BatteryManager] = None) -> bool:
+    """Start a top-up charge to 100%.
+
+    Uses ``mgr`` or ``get_battery_manager()``. Returns False if charge limit
+    is not supported. Writes 100 via ``set_charge_limit(100)`` and atomically
+    updates config: ``charge_topup_active=True``, ``charge_topup_started_ts``.
+    """
+    from .config import update_config
+
+    if mgr is None:
+        mgr = get_battery_manager()
+
+    if not mgr.is_charge_limit_supported():
+        return False
+
+    if not mgr.set_charge_limit(100):
+        return False
+
+    update_config(lambda c: {**c, "charge_topup_active": True, "charge_topup_started_ts": int(time.time())})
+    return True
+
+
+def cancel_topup(mgr: Optional[BatteryManager] = None, restore_limit: bool = True) -> bool:
+    """Cancel an in-progress top-up.
+
+    Uses ``mgr`` or ``get_battery_manager()``. Atomically updates config:
+    ``charge_topup_active=False``, ``charge_topup_started_ts=0``.
+
+    If ``restore_limit`` is True, restores the charge limit from config
+    (if ``charge_limit_enabled`` is set, targets the stored limit clamped to
+    [40, 100]).
+    """
+    from .config import update_config, load as load_config
+
+    if mgr is None:
+        mgr = get_battery_manager()
+
+    update_config(lambda c: {**c, "charge_topup_active": False, "charge_topup_started_ts": 0})
+
+    if restore_limit:
+        cfg = load_config()
+        if cfg.get("charge_limit_enabled"):
+            target = cfg.get("charge_limit", 80)
+            if 40 <= target <= 100:
+                mgr.set_charge_limit(target)
+    return True
+
+
+def evaluate_calibration_state(mgr: Optional[BatteryManager] = None, cfg: Optional[dict] = None) -> dict:
+    """Evaluate the battery calibration state machine.
+
+    Uses ``mgr`` or ``get_battery_manager()``. If ``cfg`` is None, loads from
+    disk via ``load_config()``.
+
+    Returns a dict with keys ``active`` (bool) and ``event`` (str or None).
+    Possible events: 'completed', 'timeout', 'auto_started', 'in_progress', 'idle'.
+    """
+    from .config import update_config, load as load_config
+
+    if mgr is None:
+        mgr = get_battery_manager()
+
+    if cfg is None:
+        cfg = load_config()
+
+    if not getattr(mgr, "is_available", False):
+        return {"active": False, "reason": "no_battery"}
+
+    info = mgr.get_battery_info()
+    now = int(time.time())
+
+    # Record last_full_charge_ts on edge or throttled (once per hour when full)
+    if is_effectively_full(info):
+        try:
+            last_full = int(cfg.get("last_full_charge_ts", 0) or 0)
+        except (ValueError, TypeError):
+            last_full = 0
+        if abs(now - last_full) > 3600:
+            update_config(lambda c: {**c, "last_full_charge_ts": now})
+
+    # If topup in progress:
+    if cfg.get("charge_topup_active"):
+        if is_effectively_full(info):
+            cancel_topup(mgr=mgr, restore_limit=True)
+            update_config(lambda c: {**c, "last_full_charge_ts": now})
+            return {"active": False, "event": "completed"}
+        try:
+            started = int(cfg.get("charge_topup_started_ts", 0) or 0)
+        except (ValueError, TypeError):
+            started = 0
+        if started > 0 and (now - started >= 86400 or now < started):
+            cancel_topup(mgr=mgr, restore_limit=True)
+            return {"active": False, "event": "timeout"}
+        return {"active": True, "event": "in_progress"}
+
+    # Check periodic auto-calibration:
+    if cfg.get("charge_limit_enabled") and cfg.get("charge_limit", 80) < 100 and cfg.get("charge_calibration_auto"):
+        if not cfg.get("charge_topup_active") and getattr(info, "ac_online", False):
+            try:
+                last_full = int(cfg.get("last_full_charge_ts", 0) or 0)
+            except (ValueError, TypeError):
+                last_full = 0
+            try:
+                interval_days = int(cfg.get("charge_calibration_interval_days", 30) or 30)
+            except (ValueError, TypeError):
+                interval_days = 30
+            if last_full <= 0:
+                update_config(lambda c: {**c, "last_full_charge_ts": now})
+            elif (now - last_full) >= interval_days * 86400:
+                if start_topup(mgr=mgr):
+                    return {"active": True, "event": "auto_started"}
+    return {"active": False, "event": "idle"}
+
