@@ -578,7 +578,58 @@ install_udev() {
     sudo cp "$rules_src" "$rules_dst"
     sudo udevadm control --reload-rules 2>/dev/null || true
     sudo udevadm trigger 2>/dev/null || true
-    info "udev rule installed. You may need to unplug/replug the keyboard."
+    info "udev rule installed. Reboot (or log out and back in) to apply the new permissions."
+}
+
+# --- Verify keyboard access after installing the rule ---
+verify_udev_access() {
+    local node=""
+    local h id
+    for h in /sys/class/hidraw/hidraw*; do
+        [ -e "$h/device/uevent" ] || continue
+        id="$(grep -h '^HID_ID=' "$h/device/uevent" 2>/dev/null || true)"
+        case "$id" in
+            *0003:00000414:*)
+                node="/dev/$(basename "$h")"
+                break
+                ;;
+        esac
+    done
+
+    if [ -z "$node" ]; then
+        info "No Gigabyte keyboard hidraw node present; skipping access check."
+        return
+    fi
+
+    local target_user="${SUDO_USER:-$USER}"
+    if [ -z "$target_user" ]; then
+        info "Cannot verify keyboard access: no target user detected."
+        return
+    fi
+    if [ "$(id -u)" -eq 0 ] && [ "$target_user" = root ]; then
+        info "Running as root; check keyboard access as a normal user after reboot."
+        return
+    fi
+
+    local can_write=false
+    if [ "$(id -u)" -eq 0 ]; then
+        if command -v runuser >/dev/null 2>&1; then
+            runuser -u "$target_user" -- test -w "$node" && can_write=true
+        else
+            info "Cannot verify keyboard access as root without runuser."
+            return
+        fi
+    else
+        test -w "$node" && can_write=true
+    fi
+
+    if [ "$can_write" = true ]; then
+        info "Keyboard access OK: $node is writable by $target_user."
+    else
+        warn "Keyboard node $node is not writable by $target_user."
+        warn "Reboot (or log out and back in) to apply the new permissions."
+        warn "If it still fails, run 'gigamate doctor' after reboot."
+    fi
 }
 
 # --- Configure GPU power management (Dynamic Boost / SmartShift) ---
@@ -927,6 +978,7 @@ main() {
     install_python_pkg
     build_kernel_module
     install_udev
+    verify_udev_access
     configure_gpu_power
     install_dgpu_helper
     install_repair_helper
