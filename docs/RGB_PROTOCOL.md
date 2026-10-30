@@ -30,6 +30,26 @@ GigaMate detects that descriptor and uses hidraw feature ioctls, as the
 automatically; colour mapping and root USB access are unnecessary when the
 hidraw node is accessible.
 
+### Permissions
+
+The LampArray protocol opens a `/dev/hidraw*` node read-write. udev creates that
+node on every boot, so a manual `chmod` is lost at the next boot and the number
+can change. `data/99-gigamate.rules` grants access to the active local user with
+`MODE="0660"` plus a logind `uaccess` ACL, and tags the node for `plugdev` as a
+fallback.
+
+Find the keyboard node by its HID identity:
+
+```sh
+for h in /sys/class/hidraw/hidraw*; do
+  echo "$h: $(grep HID_ID "$h/device/uevent")"
+done
+```
+
+A working node looks like `crw-rw----+ root plugdev` and has a `user:<you>:rw-`
+entry in `getfacl`. Remote sessions (SSH) and systems without systemd-logind do
+not receive the ACL. See the troubleshooting section in the README.
+
 The supported report layout is:
 
 - Report 1 (23 bytes, read): lamp count at bytes 1–2 (little endian).
