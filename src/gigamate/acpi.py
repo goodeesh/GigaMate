@@ -12,6 +12,7 @@ Usage:
 
 import enum
 import os
+import shutil
 import subprocess
 import threading
 from abc import ABC, abstractmethod
@@ -82,6 +83,62 @@ class AcpiCapabilities:
     fan_count: int = 0
     profile_ids: List[int] = field(default_factory=lambda: [0, 1, 2, 3])
     backend: str = "none"  # "module", "acpi_call", "mock", "none"
+
+
+@dataclass
+class AcpiModuleStatus:
+    """Why the ``gigamate_acpi`` module is or is not usable right now."""
+
+    running_kernel: str
+    loaded: bool = False
+    sysfs_present: bool = False
+    module_for_running: bool = False
+    other_kernels: List[str] = field(default_factory=list)
+    # loaded, not-loaded, wrong-kernel, not-installed, amw0-missing,
+    # amw0-no-response, unknown
+    reason: str = "unknown"
+
+    @property
+    def summary(self) -> str:
+        if self.reason == "loaded":
+            return f"loaded for {self.running_kernel}"
+        if self.reason == "amw0-no-response":
+            return f"loaded for {self.running_kernel}, but sensor reads returned nothing"
+        if self.reason == "amw0-missing":
+            return f"loaded for {self.running_kernel}, but AMW0 was not found"
+        if self.reason == "not-loaded":
+            return f"installed for {self.running_kernel}, not loaded"
+        if self.reason == "wrong-kernel":
+            kernels = ", ".join(self.other_kernels) or "another kernel"
+            return f"installed for {kernels}, not for running {self.running_kernel}"
+        if self.reason == "not-installed":
+            return "not installed"
+        return "unknown"
+
+    @property
+    def hint(self) -> str:
+        if self.reason == "loaded":
+            return "ACPI sensors are available."
+        if self.reason == "amw0-no-response":
+            return ("AMW0 is present, but the known sensor commands returned nothing. "
+                    "This model may use a different EC command set.")
+        if self.reason == "amw0-missing":
+            return ("The module loaded but did not find an AMW0 device. "
+                    "Check 'dmesg | grep gigamate_acpi'.")
+        if self.reason == "not-loaded":
+            return ("Run 'sudo modprobe gigamate_acpi'. If it fails, check "
+                    "'dmesg | grep gigamate_acpi'.")
+        if self.reason == "wrong-kernel":
+            if len(self.other_kernels) > 1:
+                target = "one of: " + ", ".join(self.other_kernels)
+            else:
+                target = self.other_kernels[0] if self.other_kernels else "the installed kernel"
+            return (f"Reboot into {target}, or install headers for {self.running_kernel} "
+                    "and run 'gigamate repair'.")
+        if self.reason == "not-installed":
+            return ("Re-run install.sh, or install the kernel headers for "
+                    f"{self.running_kernel} and run 'gigamate repair'.")
+        return "Run 'gigamate doctor' for more detail."
 
 
 # ──────────────────────────────────────────────
@@ -297,6 +354,86 @@ class AcpiCallBackend(AcpiBackend):
 
 
 GIGAMATE_ACPI_SYSFS = Path("/sys/devices/platform/gigamate_acpi")
+MODULES_DIR = Path("/lib/modules")
+
+
+def _module_kernels() -> List[str]:
+    """Kernels that have a gigamate_acpi module file installed."""
+    found = set()
+    patterns = (
+        "*/updates/dkms/gigamate_acpi.ko*",
+        "*/updates/gigamate_acpi.ko*",
+        "*/extra/gigamate_acpi.ko*",
+        "*/kernel/**/gigamate_acpi.ko*",
+    )
+    for pattern in patterns:
+        try:
+            for path in MODULES_DIR.glob(pattern):
+                try:
+                    found.add(path.relative_to(MODULES_DIR).parts[0])
+                except (ValueError, IndexError):
+                    continue
+        except OSError:
+            continue
+    return sorted(found)
+
+
+def _module_available(kernel: str) -> bool:
+    if kernel in _module_kernels():
+        return True
+    modinfo = shutil.which("modinfo")
+    if not modinfo:
+        return False
+    try:
+        proc = subprocess.run(
+            [modinfo, "-k", kernel, "gigamate_acpi"],
+            capture_output=True,
+            timeout=3,
+        )
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _sysfs_has_sensor() -> bool:
+    """Whether any of the sensor attributes can actually be read."""
+    for name in ("temp1_input", "fan1_input", "pwm1"):
+        try:
+            int((GIGAMATE_ACPI_SYSFS / name).read_text().strip())
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def acpi_module_status() -> AcpiModuleStatus:
+    """Explain why the ACPI backend is or is not available."""
+    running = os.uname().release
+    loaded = Path("/sys/module/gigamate_acpi").exists()
+    sysfs_present = GIGAMATE_ACPI_SYSFS.is_dir()
+    installed = _module_kernels()
+    status = AcpiModuleStatus(
+        running_kernel=running,
+        loaded=loaded,
+        sysfs_present=sysfs_present,
+        module_for_running=_module_available(running),
+        other_kernels=[kernel for kernel in installed if kernel != running],
+    )
+
+    if loaded:
+        if not sysfs_present:
+            status.reason = "amw0-missing"
+        elif not _sysfs_has_sensor():
+            status.reason = "amw0-no-response"
+        else:
+            status.reason = "loaded"
+    elif status.module_for_running:
+        status.reason = "not-loaded"
+    elif status.other_kernels:
+        status.reason = "wrong-kernel"
+    else:
+        status.reason = "not-installed"
+    return status
 
 
 class ModuleBackend(AcpiBackend):
