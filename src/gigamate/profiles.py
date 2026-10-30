@@ -699,6 +699,7 @@ def calibrate(dev, vid: int, pid: int, interface: Optional[int] = None) -> Optio
         print(f"Cannot access the USB keyboard: {exc}")
         print("Calibration needs USB device access; hidraw permissions alone are insufficient.")
         print("Install the GigaMate udev rules, or run calibration with sudo.")
+        print("See README.md, Troubleshooting: Keyboard RGB: Permission denied.")
         return None
     if interface is not None and interface not in available:
         print(f"USB interface {interface} is unavailable. Available: {sorted(available)}")
