@@ -61,6 +61,7 @@ from .acpi import (
     AcpiController,
     FanProfile,
     FanState,
+    acpi_module_status,
     probe_acpi_capabilities,
     AcpiCapabilities,
 )
@@ -874,7 +875,9 @@ def cmd_profile_report(args) -> None:
               f"fan_duty={caps.has_fan_duty} fans={caps.fan_count}")
         print(f"  Interface answers profile writes: {caps.has_power_profiles}")
     else:
+        status = acpi_module_status()
         print("  ACPI backend:       none")
+        print(f"  ACPI module:        {status.summary}")
     if match is None:
         print("  Model profile:      none")
     else:
@@ -1045,15 +1048,14 @@ def cmd_detect_acpi(args) -> None:
 def _print_acpi_caps(caps: AcpiCapabilities) -> None:
     """Print ACPI capabilities in a human-readable format."""
     if caps.backend == "none":
+        status = acpi_module_status()
         print("  No ACPI interface detected.")
+        print(f"  Running kernel: {status.running_kernel}")
+        print(f"  Module:         {status.summary}")
+        print(f"  {status.hint}")
         print()
-        print("  To enable ACPI features:")
-        print("    1. Install kernel headers and re-run install.sh")
-        print("       (builds and loads the bundled gigamate_acpi module, no extra packages)")
-        print("    2. If you already have the acpi_call module installed,")
-        print("       it is used automatically as a fallback.")
-        print("    3. If the module exists but is missing for the running kernel,")
-        print("       run 'gigamate repair' to rebuild and reload it.")
+        print("  ACPI features use the bundled gigamate_acpi module.")
+        print("  If the acpi_call module is already installed, it is used as a fallback.")
         return
 
     backend_name = {"module": "kernel module", "acpi_call": "acpi_call", "mock": "mock"}.get(

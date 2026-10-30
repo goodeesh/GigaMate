@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .acpi import acpi_module_status
+
 
 RULE_PATH = Path("/etc/udev/rules.d/99-gigamate.rules")
 RULE_URL = (
@@ -191,14 +193,6 @@ def session_details() -> Tuple[Dict[str, str], str]:
     return details, logind
 
 
-def acpi_state() -> str:
-    if Path("/sys/devices/platform/gigamate_acpi").exists():
-        return "module loaded"
-    if Path("/proc/acpi/call").exists():
-        return "acpi_call fallback"
-    return "not available"
-
-
 def permission_lines(path: str) -> List[str]:
     """Return a short, actionable explanation for a denied hidraw open."""
     lines = [f"udev rule: {rule_state()} ({RULE_PATH})"]
@@ -290,8 +284,11 @@ def run_doctor() -> int:
     print(f"  logind       {logind}")
     print()
 
+    status = acpi_module_status()
     print("ACPI")
-    print(f"  {acpi_state()}")
+    print(f"  kernel       {status.running_kernel}")
+    print(f"  module       {status.summary}")
+    print(f"  {status.hint}")
     print()
 
     if failed_node is not None:
