@@ -873,7 +873,7 @@ def cmd_profile_report(args) -> None:
         print(f"  ACPI backend:       {caps.backend}")
         print(f"  Sensors:            temp={caps.has_temperature} fan_rpm={caps.has_fan_rpm} "
               f"fan_duty={caps.has_fan_duty} fans={caps.fan_count}")
-        print(f"  Interface answers profile writes: {caps.has_power_profiles}")
+        print(f"  Profile interface present: {caps.has_power_profiles}")
     else:
         status = acpi_module_status()
         print("  ACPI backend:       none")
@@ -1236,6 +1236,7 @@ _ACPI_PROFILE_TEMPLATES = {
     "AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
     "AORUS": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
     "GIGABYTE AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
+    "GIGABYTE EAGLE": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
     "GIGABYTE GAMING": {0: "eco", 1: "balanced", 2: "boost"},
 }
 
@@ -1275,7 +1276,7 @@ def cmd_calibrate_acpi(args) -> None:
         if profile is None:
             profile = DeviceProfile(
                 vid=vid, pid=pid, name=dmi_model or f"{vid:04X}:{pid:04X}",
-                interfaces=[], control_interface=0,
+                version=3, interfaces=[], control_interface=0,
             )
             print(f"Creating a new ACPI-only profile for: {profile.name}")
         else:
@@ -1286,7 +1287,8 @@ def cmd_calibrate_acpi(args) -> None:
         profile = match_dmi_profile(load_user_dmi_profiles())
         if profile is None:
             profile = DeviceProfile(
-                vid=0, pid=0, name=dmi_model, interfaces=[], control_interface=0,
+                vid=0, pid=0, name=dmi_model, version=3,
+                interfaces=[], control_interface=0,
                 dmi=DmiConfig(product_names=[dmi_model]),
             )
             print(f"Creating a new DMI-keyed profile for: {profile.name}")
@@ -1332,6 +1334,19 @@ def cmd_calibrate_acpi(args) -> None:
         print("known for this model family, so power-profile switching stays DISABLED.")
         print()
 
+    # A newly generated profile is unverified by definition. Re-running
+    # calibration on an existing profile that already declares working
+    # profiles must not downgrade a verified model.
+    existing_acpi = profile.acpi
+    if (
+        existing_acpi is not None
+        and existing_acpi.has_power_profiles
+        and existing_acpi.profiles
+    ):
+        confidence = existing_acpi.confidence
+    else:
+        confidence = "experimental"
+
     profile.acpi = AcpiConfig(
         has_fan_control=caps.has_fan_rpm or caps.has_fan_duty,
         has_temperature=caps.has_temperature,
@@ -1341,6 +1356,7 @@ def cmd_calibrate_acpi(args) -> None:
         sensor_labels=sensor_labels,
         profiles=profiles_map,
         backend=caps.backend,
+        confidence=confidence,
     )
 
     path = save_user_profile(profile)

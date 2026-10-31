@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "name": "GIGABYTE EAGLE 9MJ",
+  "dmi": {
+    "product_names": [
+      "GIGABYTE EAGLE 9MJ"
+    ],
+    "product_name_prefixes": [],
+    "product_families": []
+  },
+  "interfaces": [],
+  "control_interface": 0,
+  "colour_map": {},
+  "acpi": {
+    "has_fan_control": true,
+    "has_temperature": true,
+    "has_power_profiles": true,
+    "fan_count": 2,
+    "fan_labels": [
+      "Fan 1",
+      "Fan 2"
+    ],
+    "sensor_labels": {
+      "temp_cpu": "CPU Temp",
+      "temp_socket": "Socket Temp"
+    },
+    "profiles": {
+      "0": {
+        "name": "Quiet",
+        "desc": "Lowest power limits"
+      },
+      "1": {
+        "name": "Balanced",
+        "desc": "Balanced power limits"
+      },
+      "2": {
+        "name": "Performance",
+        "desc": "High power limits with Dynamic Boost"
+      },
+      "3": {
+        "name": "Gaming",
+        "desc": "Same power as Performance, higher fan curve (unconfirmed)"
+      }
+    },
+    "backend": "module",
+    "confidence": "experimental"
+  }
+}
