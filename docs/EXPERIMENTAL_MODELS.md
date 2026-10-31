@@ -20,6 +20,7 @@ model-gated.
 | Model / DMI match | Profiles | Evidence |
 |---|---|---|
 | **GIGABYTE AERO X16** family (all variants) | Quiet / Balanced / Performance / Gaming (`0xED` 0–3) | In-house reverse-engineering verified on **EG61VH** (`product_name` `GIGABYTE AERO X16 1VH`); the siblings share the platform. |
+| **GIGABYTE EAGLE 9MJ** (`product_name`) | Quiet / Balanced / Performance / Gaming (`0xED` 0-3) | DSDT from issue #34 confirms `0xED` accepts 0-3. Sensors and battery charge limit confirmed on real hardware (kernel 7.3.0, GigaMate 4.4.1). Profile switching and GiMate mode names not yet verified. |
 
 The DA6H-generation evidence was triple-sourced:
 
