@@ -558,27 +558,40 @@ install_python_pkg() {
 install_udev() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local rules_src="$script_dir/data/99-gigamate.rules"
-    local rules_dst="/etc/udev/rules.d/99-gigamate.rules"
+    local rules_src="$script_dir/data/70-gigamate.rules"
+    local rules_dst="/etc/udev/rules.d/70-gigamate.rules"
+    local legacy_99="/etc/udev/rules.d/99-gigamate.rules"
+    local legacy_old="/etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules"
+    local rules_changed=false
 
     header "Installing udev rule"
 
-    # Remove old rule if present
-    if [ -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules ]; then
-        sudo rm -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules
-        info "Removed old udev rule (99-gigabyte-keyboard-rgb.rules)."
-    fi
+    # Remove rules from older releases before checking the new file. A stale
+    # 99 rule must disappear even when the 70 rule is already current.
+    local old_rule
+    for old_rule in "$legacy_99" "$legacy_old"; do
+        if [ -f "$old_rule" ]; then
+            sudo rm -f "$old_rule"
+            info "Removed old udev rule ($(basename "$old_rule"))."
+            rules_changed=true
+        fi
+    done
 
     if [ -f "$rules_dst" ] && cmp -s "$rules_src" "$rules_dst"; then
         info "udev rule up to date: $rules_dst"
-        return
+    else
+        info "Installing udev rule (needs sudo)..."
+        sudo install -Dm644 "$rules_src" "$rules_dst"
+        rules_changed=true
     fi
 
-    info "Installing udev rule (needs sudo)..."
-    sudo cp "$rules_src" "$rules_dst"
-    sudo udevadm control --reload-rules 2>/dev/null || true
-    sudo udevadm trigger 2>/dev/null || true
-    info "udev rule installed. Reboot (or log out and back in) to apply the new permissions."
+    if [ "$rules_changed" = true ]; then
+        sudo udevadm control --reload-rules 2>/dev/null || true
+        sudo udevadm trigger 2>/dev/null || true
+        info "udev rule installed. Reboot (or log out and back in) to apply the new permissions."
+    else
+        info "udev rule unchanged."
+    fi
 }
 
 # --- Verify keyboard access after installing the rule ---

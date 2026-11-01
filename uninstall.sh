@@ -94,9 +94,18 @@ fi
 # --- Remove udev rule ---
 header "udev rule"
 
-if [ -f /etc/udev/rules.d/99-gigamate.rules ]; then
-    info "Removing udev rule (needs sudo)..."
-    sudo rm -f /etc/udev/rules.d/99-gigamate.rules
+rules_removed=false
+for rule in \
+    /etc/udev/rules.d/70-gigamate.rules \
+    /etc/udev/rules.d/99-gigamate.rules \
+    /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules; do
+    if [ -f "$rule" ]; then
+        sudo rm -f "$rule"
+        info "Removed udev rule ($(basename "$rule"))."
+        rules_removed=true
+    fi
+done
+if [ "$rules_removed" = true ]; then
     sudo udevadm control --reload-rules 2>/dev/null || true
     info "udev rule removed."
 fi
@@ -105,13 +114,6 @@ if [ -f /etc/udev/rules.d/99-gigamate-smartshift.rules ]; then
     sudo rm -f /etc/udev/rules.d/99-gigamate-smartshift.rules
     sudo udevadm control --reload-rules 2>/dev/null || true
     info "Removed SmartShift udev rule."
-fi
-
-# Also clean up old udev rule
-if [ -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules ]; then
-    sudo rm -f /etc/udev/rules.d/99-gigabyte-keyboard-rgb.rules
-    sudo udevadm control --reload-rules 2>/dev/null || true
-    info "Removed old udev rule (99-gigabyte-keyboard-rgb.rules)."
 fi
 
 # --- Remove polkit rule ---

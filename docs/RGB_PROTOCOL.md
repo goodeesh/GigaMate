@@ -34,9 +34,9 @@ hidraw node is accessible.
 
 The LampArray protocol opens a `/dev/hidraw*` node read-write. udev creates that
 node on every boot, so a manual `chmod` is lost at the next boot and the number
-can change. `data/99-gigamate.rules` grants access to the active local user with
-`MODE="0660"` plus a logind `uaccess` ACL, and tags the node for `plugdev` as a
-fallback.
+can change. `data/70-gigamate.rules` tags the device with `uaccess`, and the
+standard logind flow applies the ACL to the active local user. The file must
+keep the 70 prefix so it loads before `73-seat-late.rules`.
 
 Find the keyboard node by its HID identity:
 
@@ -46,7 +46,7 @@ for h in /sys/class/hidraw/hidraw*; do
 done
 ```
 
-A working node looks like `crw-rw----+ root plugdev` and has a `user:<you>:rw-`
+A working node looks like `crw-rw----+ root root` and has a `user:<you>:rw-`
 entry in `getfacl`. Remote sessions (SSH) and systems without systemd-logind do
 not receive the ACL. See the troubleshooting section in the README.
 

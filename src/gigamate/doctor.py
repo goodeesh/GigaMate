@@ -19,9 +19,10 @@ from typing import Dict, List, Optional, Tuple
 from .acpi import acpi_module_status
 
 
-RULE_PATH = Path("/etc/udev/rules.d/99-gigamate.rules")
+RULE_PATH = Path("/etc/udev/rules.d/70-gigamate.rules")
+LEGACY_RULE_PATH = Path("/etc/udev/rules.d/99-gigamate.rules")
 RULE_URL = (
-    "https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/99-gigamate.rules"
+    "https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/70-gigamate.rules"
 )
 KEYBOARD_VENDORS = {0x0414, 0x1044, 0x04D9}
 
@@ -146,7 +147,13 @@ def open_error(path: str) -> Optional[OSError]:
 
 
 def rule_state() -> str:
-    if not RULE_PATH.exists():
+    new_present = RULE_PATH.exists()
+    old_present = LEGACY_RULE_PATH.exists()
+    if old_present and not new_present:
+        return "old 99-gigamate.rules present; reinstall GigaMate"
+    if old_present:
+        return "present, but old 99-gigamate.rules is still installed"
+    if not new_present:
         return "missing"
     try:
         text = RULE_PATH.read_text()
@@ -205,12 +212,17 @@ def permission_lines(path: str) -> List[str]:
     if error is not None:
         lines.append(f"open error: {error}")
 
-    if "missing" in lines[0] or "does not cover" in lines[0]:
+    if (
+        "missing" in lines[0]
+        or "does not cover" in lines[0]
+        or "old 99-gigamate.rules" in lines[0]
+    ):
         lines.extend([
             "",
             "Permanent fix (do not use chmod, it is lost on reboot):",
-            f"  sudo install -Dm644 <GigaMate-checkout>/data/99-gigamate.rules {RULE_PATH}",
+            f"  sudo install -Dm644 <GigaMate-checkout>/data/70-gigamate.rules {RULE_PATH}",
             f"  # or: curl -sSL {RULE_URL} | sudo tee {RULE_PATH} >/dev/null",
+            f"  sudo rm -f {LEGACY_RULE_PATH}",
             "  sudo udevadm control --reload-rules",
             "  sudo udevadm trigger --subsystem-match=hidraw",
             "  reboot",
