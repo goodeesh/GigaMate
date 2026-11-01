@@ -21,9 +21,9 @@ Known risks:
 - ACPI profile switching adjusts CPU/GPU power limits.
 - To allow control without root, the kernel module exposes `profile` and
   `charge_limit` as world-writable (`0666`). Any local user on the machine can
-  therefore change these settings. The keyboard is handled differently: a udev
-  rule grants the active local user access through a logind ACL (`0660` plus
-  `uaccess`), not world-writable permissions.
+  therefore change these settings. The keyboard is handled differently: the
+  `70-gigamate.rules` rule grants the active local user access through a logind
+  ACL (`uaccess`), not world-writable permissions.
 
 Tested on specific Gigabyte models only. Other models may behave differently.
 Experimental profile support is unconfirmed on your exact unit — it may do
@@ -175,7 +175,8 @@ the ACPI kernel module. If you only want the Python side and the udev rule:
 git clone https://github.com/goodeesh/GigaMate.git
 cd GigaMate
 
-sudo install -Dm644 data/99-gigamate.rules /etc/udev/rules.d/99-gigamate.rules
+sudo install -Dm644 data/70-gigamate.rules /etc/udev/rules.d/70-gigamate.rules
+sudo rm -f /etc/udev/rules.d/99-gigamate.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 
@@ -354,33 +355,38 @@ Cannot access LampArray keyboard /dev/hidrawN: [Errno 13] Permission denied
 every boot, so the permission comes back. It also lets every local user read
 the keyboard. Do not use `chmod` as the permanent fix.
 
-GigaMate ships a udev rule that gives the active local user access through a
-logind ACL. Check the rule and the node:
+GigaMate ships a 70 prefixed udev rule that gives the active local user access
+through a logind ACL. Check the rule and the node:
 
 ```sh
-ls -l /etc/udev/rules.d/99-gigamate.rules
+ls -l /etc/udev/rules.d/70-gigamate.rules
+ls -l /etc/udev/rules.d/99-gigamate.rules 2>/dev/null || true
 ls -l /dev/hidraw*
 gigamate doctor
 ```
 
 | What `ls -l` shows | Meaning | What to do |
 |---|---|---|
-| `crw------- root root` | The rule is missing or was not applied | Install the rule, then reboot |
-| `crw-rw---- root plugdev` with no `+` | The rule ran, but `uaccess` did not grant your session | Run `gigamate doctor` and check the session note below |
-| `crw-rw----+ root plugdev` with an ACL entry for your user | Working | No permission problem |
+| `crw------- root root` | The rule is missing or was rejected | Install the rule, then reboot |
+| `crw-rw---- root root` with no `+` | Another rule set the mode, but `uaccess` did not grant your session | Run `gigamate doctor` and check the session note below |
+| `crw-rw----+ root root` with an ACL entry for your user | Working | No permission problem |
 
-Install the rule, reload udev, then reboot:
+Install the rule, remove the old 99 file, reload udev, then reboot:
 
 ```sh
-sudo install -Dm644 data/99-gigamate.rules /etc/udev/rules.d/99-gigamate.rules
+sudo install -Dm644 data/70-gigamate.rules /etc/udev/rules.d/70-gigamate.rules
 
 # or without a checkout:
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/99-gigamate.rules \
-  | sudo tee /etc/udev/rules.d/99-gigamate.rules >/dev/null
+curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/70-gigamate.rules \
+  | sudo tee /etc/udev/rules.d/70-gigamate.rules >/dev/null
 
+sudo rm -f /etc/udev/rules.d/99-gigamate.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=hidraw
 ```
+
+The rule must keep the 70 prefix. A rule numbered 99 runs after
+`73-seat-late.rules`, so the standard `uaccess` ACL is not applied.
 
 Remote sessions (SSH) and systems without systemd-logind, for example systems
 that use seatd, do not receive the `uaccess` ACL. Run GigaMate from the local

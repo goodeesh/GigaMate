@@ -1,0 +1,21 @@
+# GigaMate keyboard and hidraw access.
+#
+# Keep the 70 prefix. 73-seat-late.rules applies the logind uaccess ACL only
+# to devices tagged before it runs, so a rule numbered 99 would be too late.
+#
+# No GROUP or MODE is set here. On systems without a system plugdev group,
+# systemd rejects GROUP="plugdev" and can drop the whole rule. TAG+="uaccess"
+# is enough for the active local user.
+#
+# Systems without systemd-logind need a separate group based rule.
+
+# Primary Gigabyte keyboard controller.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0414", ATTRS{idProduct}=="*", TAG+="uaccess"
+
+# Shared/generic USB vendors historically used by Gigabyte keyboards.
+# Restrict Holtek (04D9) to prevent access to arbitrary external keyboards.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1044", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1044", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04D9", ATTRS{idProduct}=="8105", TAG+="uaccess"
