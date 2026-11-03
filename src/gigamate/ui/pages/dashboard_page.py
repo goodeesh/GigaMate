@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
-from ...gpu import get_gpu_state, gpu_status_text
+from ...gpu import GpuState, get_gpu_state, gpu_status_text
+from ...power_limits import SystemPowerLimits, discover_power_limits
 from ...profiles import profile_usable, resolve_model
 from ...system_power import sync_system_power
 
@@ -123,6 +124,33 @@ class DashboardPage(QWidget):
         prof_layout.addWidget(self.btn_enable_experimental)
 
         prof_layout.addLayout(btn_layout)
+
+        # ── Discovered Profile Power Limits Comparison Matrix ──
+        self.power_limits_container = QFrame()
+        pl_layout = QVBoxLayout(self.power_limits_container)
+        pl_layout.setContentsMargins(0, 6, 0, 0)
+        pl_layout.setSpacing(8)
+
+        self.power_battery_notice = QLabel(
+            "⚡ Running on battery — firmware applies reduced battery power limits."
+        )
+        self.power_battery_notice.setStyleSheet(
+            "color: #f6ad55; font-size: 12px; font-weight: 600; padding: 4px 2px;"
+        )
+        self.power_battery_notice.setVisible(False)
+        pl_layout.addWidget(self.power_battery_notice)
+
+        self.compare_limits_frame = QFrame()
+        self.compare_limits_frame.setProperty("class", "MetricTile")
+        self.compare_grid = QGridLayout(self.compare_limits_frame)
+        self.compare_grid.setContentsMargins(16, 12, 16, 12)
+        self.compare_grid.setHorizontalSpacing(18)
+        self.compare_grid.setVerticalSpacing(6)
+        pl_layout.addWidget(self.compare_limits_frame)
+
+        self._last_limits_key = None
+        self.power_limits_container.setVisible(False)
+        prof_layout.addWidget(self.power_limits_container)
         layout.addWidget(prof_card)
 
         # ── Live Telemetry Cards ──
@@ -280,6 +308,7 @@ class DashboardPage(QWidget):
     def _refresh_telemetry(self) -> None:
         """Update sensor numbers and highlight active profile."""
         current_prof_id: Optional[int] = None
+        usable = False
         self._ensure_acpi_controller()
 
         if self.acpi_ctrl.available:
@@ -443,3 +472,114 @@ class DashboardPage(QWidget):
 
         for pid, btn in self._profile_buttons.items():
             btn.setChecked(current_prof_id == pid)
+
+        self._update_power_limits_ui(
+            active_prof_id=current_prof_id,
+            usable=usable and self.acpi_ctrl.available,
+            gpu=gpu,
+        )
+
+    def _update_power_limits_ui(
+        self,
+        active_prof_id: Optional[int],
+        usable: bool = True,
+        gpu: Optional[GpuState] = None,
+    ) -> None:
+        """Render the per-profile power comparison matrix, hiding any absent/invalid metrics."""
+        if not usable:
+            self.power_limits_container.setVisible(False)
+            return
+
+        sys_limits = discover_power_limits(active_profile_id=active_prof_id, gpu_state=gpu)
+        valid_pids = [k for k, p in sorted(sys_limits.profiles.items()) if p.has_any]
+        if not valid_pids:
+            self.power_limits_container.setVisible(False)
+            return
+
+        pid = active_prof_id if active_prof_id in sys_limits.profiles else valid_pids[0]
+
+        self.power_limits_container.setVisible(True)
+        self.power_battery_notice.setVisible(sys_limits.on_battery)
+        self.compare_limits_frame.setVisible(True)
+
+        cache_key = (
+            tuple((k, sys_limits.profiles[k]) for k in valid_pids),
+            pid,
+            sys_limits.dynamic_boost_active,
+        )
+        if cache_key != self._last_limits_key:
+            self._last_limits_key = cache_key
+            self._rebuild_compare_matrix(sys_limits, valid_pids, pid)
+
+    def _rebuild_compare_matrix(
+        self, sys_limits: SystemPowerLimits, valid_pids: list[int], active_pid: int
+    ) -> None:
+        while self.compare_grid.count():
+            item = self.compare_grid.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        default_names = {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
+        match = self._model_profile()
+        decl_profiles = match.profile.acpi.profiles if (match is not None and match.profile.acpi) else {}
+
+        hdr_metric = QLabel("Power Limit")
+        hdr_metric.setStyleSheet(
+            "color: #8896ab; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;"
+        )
+        self.compare_grid.addWidget(hdr_metric, 0, 0)
+
+        for col_idx, pid in enumerate(valid_pids, start=1):
+            pname = (decl_profiles.get(str(pid)) or {}).get("name", default_names.get(pid, f"Mode {pid}"))
+            prefix = "● " if pid == active_pid else ""
+            lbl = QLabel(f"{prefix}{pname}")
+            color = "#63b3ed" if pid == active_pid else "#94a3b8"
+            lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 700;")
+            self.compare_grid.addWidget(lbl, 0, col_idx)
+
+        rows = [
+            (
+                "Combined (CPU + GPU)",
+                lambda p: f"{p.combined_w} W" if p.combined_w is not None else None,
+            ),
+            (
+                "CPU Shared (w/ GPU)",
+                lambda p: f"{p.cpu_shared_w} W" if p.cpu_shared_w is not None else None,
+            ),
+            (
+                "Max CPU (Sustained / Burst)",
+                lambda p: (
+                    f"{p.cpu_sustained_w}W / {p.cpu_burst_w}W"
+                    if p.cpu_sustained_w is not None and p.cpu_burst_w is not None and p.cpu_burst_w > p.cpu_sustained_w
+                    else (f"{p.cpu_sustained_w} W" if p.cpu_sustained_w is not None else None)
+                ),
+            ),
+            (
+                "GPU Fixed (no Boost)",
+                lambda p: f"{p.gpu_fixed_w} W" if p.gpu_fixed_w is not None else None,
+            ),
+            (
+                "GPU w/ Dynamic Boost",
+                lambda p: (
+                    f"Up to {p.gpu_boost_w} W"
+                    if p.gpu_boost_w is not None and p.gpu_fixed_w is not None and p.gpu_boost_w > p.gpu_fixed_w
+                    else (f"{p.gpu_boost_w} W" if p.gpu_boost_w is not None else None)
+                ),
+            ),
+        ]
+
+        row_idx = 1
+        for label_text, extractor in rows:
+            vals = [extractor(sys_limits.profiles[pid]) for pid in valid_pids]
+            if all(v is None for v in vals):
+                continue
+            r_lbl = QLabel(label_text)
+            r_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+            self.compare_grid.addWidget(r_lbl, row_idx, 0)
+            for col_idx, (pid, val_str) in enumerate(zip(valid_pids, vals), start=1):
+                v_lbl = QLabel(val_str or "")
+                weight = "800" if pid == active_pid else "500"
+                color = "#ffffff" if pid == active_pid else "#94a3b8"
+                v_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: {weight};")
+                self.compare_grid.addWidget(v_lbl, row_idx, col_idx)
+            row_idx += 1
