@@ -367,6 +367,22 @@ def cmd_status(args) -> None:
                 pname = _profile_name(state.profile, profile)
                 print(f"  ── Power Profile ──")
                 print(f"     {pname}  ({state.profile.value})")
+                try:
+                    from .power_limits import discover_power_limits
+                    sys_limits = discover_power_limits(active_profile_id=state.profile.value)
+                    lim = sys_limits.profiles.get(state.profile.value)
+                    if lim is not None and lim.has_any and not sys_limits.on_battery:
+                        if lim.combined_w is not None:
+                            print(f"     Combined:     {lim.combined_w} W")
+                        if lim.cpu_sustained_w is not None:
+                            burst = f" ({lim.cpu_burst_w} W burst)" if lim.cpu_burst_w and lim.cpu_burst_w > lim.cpu_sustained_w else ""
+                            print(f"     CPU Max:      {lim.cpu_sustained_w} W{burst}")
+                        if lim.gpu_fixed_w is not None:
+                            print(f"     GPU Fixed:    {lim.gpu_fixed_w} W")
+                        if lim.gpu_boost_w is not None and lim.gpu_fixed_w is not None and lim.gpu_boost_w > lim.gpu_fixed_w:
+                            print(f"     GPU Boost:    Up to {lim.gpu_boost_w} W")
+                except Exception:
+                    pass
                 print()
     else:
         print(f"  ACPI:  ❌ Not available")

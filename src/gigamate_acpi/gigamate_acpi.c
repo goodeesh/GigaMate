@@ -355,6 +355,106 @@ static struct device_attribute dev_attr_charge_limit_writable = {
 };
 
 /* ────────────────────────────────────────────
+ * Sysfs attributes — NVIDIA NVPCF (read-only) & WMBD AML slice
+ * ──────────────────────────────────────────── */
+
+#define WMBD_AML_MAX_LEN 4096
+static u8 wmbd_aml_buf[WMBD_AML_MAX_LEN];
+static size_t wmbd_aml_len;
+
+static int acpi_npcf_read(const char *field)
+{
+	char path[32];
+	unsigned long long val = 0;
+	acpi_status status;
+
+	snprintf(path, sizeof(path), "\\_SB.NPCF.%s", field);
+	status = acpi_evaluate_integer(NULL, path, NULL, &val);
+	if (ACPI_FAILURE(status))
+		return -ENODATA;
+	return (int)val;
+}
+
+#define DEFINE_NPCF_ATTR(lname, uname)					\
+static ssize_t npcf_##lname##_show(struct device *dev,			\
+				   struct device_attribute *attr,	\
+				   char *buf)				\
+{									\
+	int val = acpi_npcf_read(#uname);				\
+	if (val < 0)							\
+		return val;						\
+	return sysfs_emit(buf, "%d\n", val);				\
+}									\
+static DEVICE_ATTR_RO(npcf_##lname)
+
+DEFINE_NPCF_ATTR(atpp, ATPP);
+DEFINE_NPCF_ATTR(acbt, ACBT);
+DEFINE_NPCF_ATTR(amat, AMAT);
+DEFINE_NPCF_ATTR(dbac, DBAC);
+
+static ssize_t wmbd_aml_read(struct file *filp, struct kobject *kobj,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+			     const struct bin_attribute *attr,
+#else
+			     struct bin_attribute *attr,
+#endif
+			     char *buf, loff_t off, size_t count)
+{
+	if (wmbd_aml_len == 0)
+		return -ENODATA;
+	return memory_read_from_buffer(buf, count, &off, wmbd_aml_buf, wmbd_aml_len);
+}
+
+static struct bin_attribute bin_attr_wmbd_aml = {
+	.attr = { .name = "wmbd_aml", .mode = 0444 },
+	.size = WMBD_AML_MAX_LEN,
+	.read = wmbd_aml_read,
+};
+
+static void gigamate_cache_wmbd_aml(void)
+{
+	struct acpi_table_header *dsdt = NULL;
+	acpi_status status;
+	const u8 *base;
+	u32 len, i;
+
+	wmbd_aml_len = 0;
+	status = acpi_get_table(ACPI_SIG_DSDT, 0, &dsdt);
+	if (ACPI_FAILURE(status) || !dsdt || dsdt->length <= sizeof(*dsdt) + 4)
+		return;
+
+	base = (const u8 *)dsdt;
+	len = dsdt->length;
+	for (i = sizeof(*dsdt); i + 5 <= len; i++) {
+		if (base[i] == 'W' && base[i + 1] == 'M' &&
+		    base[i + 2] == 'B' && base[i + 3] == 'D' &&
+		    (base[i + 4] & 0x07) == 0x03) {
+			size_t copy_len = len - i;
+			if (copy_len > WMBD_AML_MAX_LEN)
+				copy_len = WMBD_AML_MAX_LEN;
+			memcpy(wmbd_aml_buf, base + i, copy_len);
+			wmbd_aml_len = copy_len;
+			break;
+		}
+	}
+	/* Fallback if a BIOS declares WMBD with a different argument count */
+	if (wmbd_aml_len == 0) {
+		for (i = sizeof(*dsdt); i + 4 <= len; i++) {
+			if (base[i] == 'W' && base[i + 1] == 'M' &&
+			    base[i + 2] == 'B' && base[i + 3] == 'D') {
+				size_t copy_len = len - i;
+				if (copy_len > WMBD_AML_MAX_LEN)
+					copy_len = WMBD_AML_MAX_LEN;
+				memcpy(wmbd_aml_buf, base + i, copy_len);
+				wmbd_aml_len = copy_len;
+				break;
+			}
+		}
+	}
+	acpi_put_table(dsdt);
+}
+
+/* ────────────────────────────────────────────
  * File operations: create/remove attributes on probe/remove
  * ──────────────────────────────────────────── */
 
@@ -379,6 +479,10 @@ static const struct device_attribute *gigamate_acpi_dev_attrs[] = {
 	&dev_attr_pwm1_total,
 	&dev_attr_profile_writable,
 	&dev_attr_charge_limit_writable,
+	&dev_attr_npcf_atpp,
+	&dev_attr_npcf_acbt,
+	&dev_attr_npcf_amat,
+	&dev_attr_npcf_dbac,
 	NULL,
 };
 
@@ -401,6 +505,8 @@ static int gigamate_acpi_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
+	gigamate_cache_wmbd_aml();
+
 	/* Create sysfs files under the device directory */
 	for (attr = gigamate_acpi_dev_attrs; *attr; attr++) {
 		ret = device_create_file(&pdev->dev, *attr);
@@ -414,6 +520,10 @@ static int gigamate_acpi_probe(struct platform_device *pdev)
 		}
 	}
 
+	ret = device_create_bin_file(&pdev->dev, &bin_attr_wmbd_aml);
+	if (ret)
+		pr_warn(DRIVER_NAME ": failed to create wmbd_aml sysfs bin file (%d)\n", ret);
+
 	pr_info(DRIVER_NAME ": AMW0 interface ready\n");
 	return 0;
 }
@@ -426,10 +536,12 @@ static int gigamate_acpi_remove(struct platform_device *pdev)
 {
 	const struct device_attribute **attr;
 
+	device_remove_bin_file(&pdev->dev, &bin_attr_wmbd_aml);
 	for (attr = gigamate_acpi_dev_attrs; *attr; attr++)
 		device_remove_file(&pdev->dev, *attr);
 
 	amw0_handle = NULL;
+	wmbd_aml_len = 0;
 	current_profile = -1;
 	current_charge_limit = -1;
 	pr_info(DRIVER_NAME ": module removed\n");
