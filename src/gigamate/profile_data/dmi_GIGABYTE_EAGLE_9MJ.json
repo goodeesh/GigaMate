@@ -39,10 +39,10 @@
       },
       "3": {
         "name": "Gaming",
-        "desc": "Same power as Performance, higher fan curve (unconfirmed)"
+        "desc": "Same power as Performance, higher fan curve"
       }
     },
     "backend": "module",
-    "confidence": "experimental"
+    "confidence": "verified"
   }
 }
