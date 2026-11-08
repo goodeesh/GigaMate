@@ -160,8 +160,13 @@ class TestSchema:
         names = {p.name for p in dmi}
         assert "Gigabyte GAMING A16 / A18 (family)" in names
         assert "Gigabyte AERO X16 (family)" in names
+        assert "GIGABYTE EAGLE 9MJ" in names
+        verified = {
+            "Gigabyte GAMING A16 / A18 (family)",
+            "GIGABYTE EAGLE 9MJ",
+        }
         for p in dmi:
-            if p.name == "Gigabyte GAMING A16 / A18 (family)":
+            if p.name in verified:
                 assert p.acpi.confidence == "verified"
             else:
                 assert p.acpi.confidence == "experimental"
