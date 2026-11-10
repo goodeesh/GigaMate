@@ -74,9 +74,16 @@ The tray icon provides instant status and quick actions:
 GigaMate Center...
 Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
-Battery: 85% (AC)  [x] Battery Care (Cap at 80%)
-Colour / Brightness / Backlight idle off
+Keyboard → Colour (Red … Blush Pink) / Brightness / Backlight idle off: 10 seconds
+Battery: 85% (AC) → [x] Battery Care (Cap at 80%) / Charge to 100% Once
+Settings → Sync system power profile / Apply on startup / Reload profiles /
+           Set up GigaMate… / Calibrate keyboard… / Check for updates / About
+Quit
 ```
+
+The top level stays deliberately short: desktop shells (Plasma in particular)
+split tall tray menus into extra columns instead of scrolling them, so anything
+that is not a one-click action lives in a flyout.
 
 ### CLI
 

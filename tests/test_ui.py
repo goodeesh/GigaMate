@@ -1629,9 +1629,14 @@ def test_tray_battery_topup_menu_and_actions():
         with patch("gigamate.tray.get_battery_manager", return_value=mgr):
             with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
                 with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
-                    # 1. Append battery section with topup inactive
-                    tray._append_battery_section()
-                    assert tray._menu.append.call_count >= 3
+                    # 1. Append battery section with topup inactive: one flyout row
+                    parent = tray._append_battery_section()
+                    assert parent is tray._battery_parent_item
+                    tray._menu.append.assert_called_once_with(parent)
+                    labels = [c.get_label()
+                              for c in parent.get_submenu().get_children()]
+                    assert "Battery Care (Cap at 80%)" in labels
+                    assert "Charge to 100% Once" in labels
 
                     # 2. Trigger start topup
                     tray._on_start_topup(MagicMock())
