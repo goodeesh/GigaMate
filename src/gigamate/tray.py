@@ -117,6 +117,8 @@ class GigaMateTrayApp:
         self._sync_system_power = self._config.get("sync_system_power", False)
         self._sync_power_item: Optional[Gtk.CheckMenuItem] = None
         self._battery_care_item: Optional[Gtk.CheckMenuItem] = None
+        self._battery_parent_item: Optional[Gtk.MenuItem] = None
+        self._battery_parent_label: Optional[str] = None
         self._battery_dirty = False
         self._last_topup_active = False
 
@@ -476,11 +478,14 @@ class GigaMateTrayApp:
             return IDLE_STEP_OFF
         return _nearest_idle_step(self._idle_timeout)
 
+    def _idle_parent_label(self) -> str:
+        """Label of the idle submenu parent item (shows the effective timeout)."""
+        return f"Backlight idle off: {_idle_step_label(self._idle_effective_step())}"
+
     def _update_idle_parent_label(self) -> None:
         if self._idle_parent_item is not None:
             try:
-                self._idle_parent_item.set_label(
-                    f"Idle timeout: {_idle_step_label(self._idle_effective_step())}")
+                self._idle_parent_item.set_label(self._idle_parent_label())
             except Exception:
                 pass
 
@@ -512,19 +517,17 @@ class GigaMateTrayApp:
         self._update_idle_parent_label()
         self._init_idle()
 
-    def _append_idle_section(self) -> None:
+    def _append_idle_section(self, menu: Optional[Gtk.Menu] = None) -> None:
         """Add idle auto-off submenu (Off/10s/30s/1m/2m, RGB menus only)."""
         if self._profile is None or not self._profile.has_rgb:
             return
-        header = Gtk.MenuItem(label="Backlight idle off")
-        header.set_sensitive(False)
-        self._menu.append(header)
+        target = menu if menu is not None else self._menu
+        target.append(Gtk.SeparatorMenuItem())
 
-        self._idle_parent_item = Gtk.MenuItem(
-            label=f"Idle timeout: {_idle_step_label(self._idle_effective_step())}")
+        self._idle_parent_item = Gtk.MenuItem(label=self._idle_parent_label())
         submenu = Gtk.Menu()
         self._idle_parent_item.set_submenu(submenu)
-        self._menu.append(self._idle_parent_item)
+        target.append(self._idle_parent_item)
 
         group = None
         self._idle_timeout_items = {}
@@ -577,6 +580,34 @@ class GigaMateTrayApp:
         self._indicator.set_menu(self._menu)
         self._refresh_tray_icon()
 
+    def _add_separator(self, menu: Optional[Gtk.Menu] = None) -> None:
+        """Append a separator unless the last child already is one.
+
+        Keeps optional sections (battery, keyboard, dGPU) from stacking
+        consecutive separators when the section before them is absent.
+        """
+        target = menu if menu is not None else self._menu
+        try:
+            children = target.get_children()
+        except Exception:
+            children = []
+        if children and isinstance(children[-1], Gtk.SeparatorMenuItem):
+            return
+        target.append(Gtk.SeparatorMenuItem())
+
+    def _make_submenu(self, label: str) -> Gtk.MenuItem:
+        """Append a submenu parent item and return it (children added by caller).
+
+        The tray menu must stay short: Plasma's popup lays out SNI menus in
+        multiple columns when they are taller than the screen, which looks
+        broken. Everything that is not a one-click action therefore lives in
+        a flyout instead of a flat row.
+        """
+        parent = Gtk.MenuItem(label=label)
+        parent.set_submenu(Gtk.Menu())
+        self._menu.append(parent)
+        return parent
+
     def _init_sleep_handler(self) -> None:
         """Initialize clean state handling before suspend and after wake."""
         try:
@@ -605,7 +636,7 @@ class GigaMateTrayApp:
         item = Gtk.MenuItem(label="GigaMate Center...")
         item.connect("activate", self._on_open_center)
         self._menu.append(item)
-        self._menu.append(Gtk.SeparatorMenuItem())
+        self._add_separator()
 
     def _activate_center(self) -> None:
         """Raise an existing Center instance via IPC, else launch one."""
@@ -651,49 +682,80 @@ class GigaMateTrayApp:
         except Exception:
             pass
 
-    def _append_battery_section(self) -> None:
-        """Add battery info and charge limit toggle."""
-        mgr = get_battery_manager()
-        if not mgr.is_available:
-            return
-
-        self._menu.append(Gtk.SeparatorMenuItem())
-        info = mgr.get_battery_info()
+    def _battery_label(self, info) -> str:
+        """Submenu (or status) label for the current battery state."""
         ac_str = "AC" if info.ac_online else "Battery"
         topup_active = bool(self._config.get("charge_topup_active", False))
         if topup_active:
-            status_text = f"Battery: {info.capacity}% ({ac_str} — Topping up to 100%)"
+            return f"Battery: {info.capacity}% ({ac_str} — Topping up to 100%)"
+        return f"Battery: {info.capacity}% ({ac_str})"
+
+    def _update_battery_label(self, info) -> None:
+        """Keep the battery flyout label in sync with capacity/AC state."""
+        parent = getattr(self, "_battery_parent_item", None)
+        if parent is None:
+            return
+        label = self._battery_label(info)
+        if label == getattr(self, "_battery_parent_label", None):
+            return
+        self._battery_parent_label = label
+        try:
+            parent.set_label(label)
+        except Exception:
+            pass
+
+    def _append_battery_section(self) -> Optional[Gtk.MenuItem]:
+        """Add a Battery flyout: live state plus charge-limit controls.
+
+        The live percentage stays in the parent label, so it is visible
+        without opening the flyout.
+        """
+        self._battery_parent_item = None
+        self._battery_parent_label = None
+        mgr = get_battery_manager()
+        if not mgr.is_available:
+            return None
+
+        info = mgr.get_battery_info()
+        topup_active = bool(self._config.get("charge_topup_active", False))
+
+        if not mgr.is_charge_limit_supported():
+            # Nothing actionable: keep a single, non-interactive info row.
+            item = Gtk.MenuItem(label=self._battery_label(info))
+            item.set_sensitive(False)
+            self._menu.append(item)
+            return item
+
+        label = self._battery_label(info)
+        parent = self._make_submenu(label)
+        self._battery_parent_item = parent
+        self._battery_parent_label = label
+        submenu = parent.get_submenu()
+
+        limit_enabled = self._config.get("charge_limit_enabled", False)
+        try:
+            limit = int(self._config.get("charge_limit", 80))
+        except (TypeError, ValueError):
+            limit = 80
+        if not (40 <= limit <= 100):
+            limit = 80
+        # Any limit below 100% counts as an active cap, not just 80%.
+        cap_active = bool(limit_enabled) and limit < 100
+        chk_limit = Gtk.CheckMenuItem(label=f"Battery Care (Cap at {limit}%)")
+        chk_limit.set_active(cap_active and not topup_active)
+        chk_limit.connect("toggled", self._on_toggle_battery_care)
+        self._battery_cap_limit = limit
+        self._battery_care_item = chk_limit
+        submenu.append(chk_limit)
+
+        if topup_active:
+            topup_item = Gtk.MenuItem(label="Cancel 100% Top-Up")
+            topup_item.connect("activate", self._on_cancel_topup)
         else:
-            status_text = f"Battery: {info.capacity}% ({ac_str})"
-        bat_header = Gtk.MenuItem(label=status_text)
-        bat_header.set_sensitive(False)
-        self._menu.append(bat_header)
-
-        if mgr.is_charge_limit_supported():
-            limit_enabled = self._config.get("charge_limit_enabled", False)
-            try:
-                limit = int(self._config.get("charge_limit", 80))
-            except (TypeError, ValueError):
-                limit = 80
-            if not (40 <= limit <= 100):
-                limit = 80
-            # Any limit below 100% counts as an active cap, not just 80%.
-            cap_active = bool(limit_enabled) and limit < 100
-            chk_limit = Gtk.CheckMenuItem(label=f"Battery Care (Cap at {limit}%)")
-            chk_limit.set_active(cap_active and not topup_active)
-            chk_limit.connect("toggled", self._on_toggle_battery_care)
-            self._battery_cap_limit = limit
-            self._battery_care_item = chk_limit
-            self._menu.append(chk_limit)
-
-            if topup_active:
-                topup_item = Gtk.MenuItem(label="Cancel 100% Top-Up")
-                topup_item.connect("activate", self._on_cancel_topup)
-                self._menu.append(topup_item)
-            else:
-                topup_item = Gtk.MenuItem(label="Charge to 100% Once")
-                topup_item.connect("activate", self._on_start_topup)
-                self._menu.append(topup_item)
+            topup_item = Gtk.MenuItem(label="Charge to 100% Once")
+            topup_item.connect("activate", self._on_start_topup)
+        submenu.append(topup_item)
+        return parent
 
     def _on_start_topup(self, _widget: Gtk.MenuItem) -> None:
         mgr = get_battery_manager()
@@ -741,11 +803,10 @@ class GigaMateTrayApp:
         item = Gtk.MenuItem(label="No Gigabyte hardware detected")
         item.set_sensitive(False)
         self._menu.append(item)
+        self._add_separator()
         self._append_battery_section()
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_settings_items()
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_about()
+        self._add_separator()
+        self._append_settings_section()
         self._append_quit()
 
     def _build_acpi_only_menu(self) -> None:
@@ -759,11 +820,10 @@ class GigaMateTrayApp:
 
         self._append_status_section()
         self._append_power_profile_section()
+        self._add_separator()
         self._append_battery_section()
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_settings_items()
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_about()
+        self._add_separator()
+        self._append_settings_section()
         self._append_quit()
 
     def _build_unsupported_menu(self) -> None:
@@ -788,79 +848,81 @@ class GigaMateTrayApp:
         if self._acpi_controller is not None:
             self._append_power_profile_section()
             self._append_status_section()
+            self._add_separator()
             self._append_battery_section()
 
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_settings_items()
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_about()
+        self._add_separator()
+        self._append_settings_section()
         self._append_quit()
 
     def _build_supported_menu(self) -> None:
-        """Full menu: Status on top, then Profiles, then Colours, Brightness."""
+        """Full menu: live status, power profiles, then grouped flyouts.
+
+        Deliberately short: Plasma renders SNI menus in extra columns when
+        they are taller than the screen (see ``_make_submenu``).
+        """
         # ── Open GigaMate Center ──
         self._append_center_item()
 
         # ── Live Status section (ACPI) — always on top ──
         self._append_status_section()
 
-        # ── Power Profile section (ACPI) ──
+        # ── Power Profile section (ACPI) — primary action, one click away ──
         self._append_power_profile_section()
 
-        # ── Battery Care section ──
+        # ── Grouped flyouts: Keyboard (RGB + idle), Battery, Settings ──
+        self._add_separator()
+        self._append_keyboard_section()
         self._append_battery_section()
+        self._append_settings_section()
 
-        # ── Keyboard RGB section ──
-        if self._profile is not None and self._profile.has_rgb:
-            self._menu.append(Gtk.SeparatorMenuItem())
-            colour_header = Gtk.MenuItem(label="Colour")
-            colour_header.set_sensitive(False)
-            self._menu.append(colour_header)
-
-            colour_group = None
-            for cname in self._profile.colour_names:
-                label = cname.replace("_", " ").title()
-                item = Gtk.RadioMenuItem(group=colour_group, label=label)
-                if colour_group is None:
-                    colour_group = item
-                if cname == self._current_colour:
-                    item.set_active(True)
-                item.connect("toggled", self._on_colour_changed, cname)
-                self._menu.append(item)
-                self._colour_items[cname] = item
-
-            self._menu.append(Gtk.SeparatorMenuItem())
-
-            brightness_header = Gtk.MenuItem(label="Brightness")
-            brightness_header.set_sensitive(False)
-            self._menu.append(brightness_header)
-
-            bright_group = None
-            for level, label in enumerate(BRIGHTNESS_NAMES):
-                item = Gtk.RadioMenuItem(group=bright_group, label=label)
-                if bright_group is None:
-                    bright_group = item
-                if level == self._current_brightness:
-                    item.set_active(True)
-                item.connect("toggled", self._on_brightness_changed, level)
-                self._menu.append(item)
-                self._brightness_items[level] = item
-
-            self._menu.append(Gtk.SeparatorMenuItem())
-
-        # ── Keyboard idle auto-off section ──
-        self._append_idle_section()
-
-        # ── Settings items ──
-        self._append_settings_items()
-
-        self._menu.append(Gtk.SeparatorMenuItem())
-        self._append_about()
         self._append_quit()
 
     # ────────────────────────────────────────────
     # Section builders
     # ────────────────────────────────────────────
+
+    def _append_keyboard_section(self) -> None:
+        """Add the Keyboard flyout: colour, brightness and idle auto-off."""
+        if self._profile is None or not self._profile.has_rgb:
+            return
+        parent = self._make_submenu("Keyboard")
+        submenu = parent.get_submenu()
+
+        colour_header = Gtk.MenuItem(label="Colour")
+        colour_header.set_sensitive(False)
+        submenu.append(colour_header)
+
+        colour_group = None
+        for cname in self._profile.colour_names:
+            label = cname.replace("_", " ").title()
+            item = Gtk.RadioMenuItem(group=colour_group, label=label)
+            if colour_group is None:
+                colour_group = item
+            if cname == self._current_colour:
+                item.set_active(True)
+            item.connect("toggled", self._on_colour_changed, cname)
+            submenu.append(item)
+            self._colour_items[cname] = item
+
+        submenu.append(Gtk.SeparatorMenuItem())
+
+        brightness_header = Gtk.MenuItem(label="Brightness")
+        brightness_header.set_sensitive(False)
+        submenu.append(brightness_header)
+
+        bright_group = None
+        for level, label in enumerate(BRIGHTNESS_NAMES):
+            item = Gtk.RadioMenuItem(group=bright_group, label=label)
+            if bright_group is None:
+                bright_group = item
+            if level == self._current_brightness:
+                item.set_active(True)
+            item.connect("toggled", self._on_brightness_changed, level)
+            submenu.append(item)
+            self._brightness_items[level] = item
+
+        self._append_idle_section(submenu)
 
     def _append_power_profile_section(self) -> None:
         """Add Power Profile radio group (verified models, experimental after opt-in).
@@ -882,7 +944,7 @@ class GigaMateTrayApp:
         usable = profile_usable(match, self._config)
         experimental = match.experimental
 
-        self._menu.append(Gtk.SeparatorMenuItem())
+        self._add_separator()
         title = "Power Profile"
         if experimental:
             title += " (experimental)" if usable else " (experimental — disabled)"
@@ -942,58 +1004,68 @@ class GigaMateTrayApp:
         if not acpi_ok and not gpu_present:
             return
 
-        self._menu.append(Gtk.SeparatorMenuItem())
+        self._add_separator()
         self._status_items = []
         item = Gtk.MenuItem(label="Status: reading...")
         item.set_sensitive(False)
         self._menu.append(item)
         self._status_items.append(item)
 
-    def _append_settings_items(self) -> None:
-        """Add settings items at the bottom of the menu."""
+    def _append_settings_section(self) -> None:
+        """Add the Settings flyout: startup, maintenance, updates and about."""
+        parent = self._make_submenu("Settings")
+        submenu = parent.get_submenu()
+        self._append_settings_items(submenu)
+        self._append_about(submenu)
+
+    def _append_settings_items(self, menu: Optional[Gtk.Menu] = None) -> None:
+        """Add settings items to the settings flyout."""
+        target = menu if menu is not None else self._menu
         # System power-profile sync only makes sense when a usable model
         # profile exists to map from; without one there is nothing to sync.
         if is_system_power_available() and profile_usable(self._model, self._config):
             self._sync_power_item = Gtk.CheckMenuItem(label="Sync system power profile")
             self._sync_power_item.set_active(self._sync_system_power)
             self._sync_power_item.connect("toggled", self._on_sync_power_toggled)
-            self._menu.append(self._sync_power_item)
+            target.append(self._sync_power_item)
 
         self._startup_item = Gtk.CheckMenuItem(label="Apply on startup")
         self._startup_item.set_active(self._startup_apply)
         self._startup_item.connect("toggled", self._on_startup_toggled)
-        self._menu.append(self._startup_item)
+        target.append(self._startup_item)
 
         reload_item = Gtk.MenuItem(label="Reload profiles")
         reload_item.connect("activate", self._on_reload)
-        self._menu.append(reload_item)
+        target.append(reload_item)
 
         setup_item = Gtk.MenuItem(label="Set up GigaMate…")
         setup_item.connect("activate", self._on_run_setup)
-        self._menu.append(setup_item)
+        target.append(setup_item)
 
         # Offer calibration whenever a keyboard controller was detected but may
         # not yet be mapped (or to re-calibrate an existing model).
         if self._detected_vid is not None:
             calib_item = Gtk.MenuItem(label="Calibrate keyboard...")
             calib_item.connect("activate", self._on_calibrate_rgb)
-            self._menu.append(calib_item)
+            target.append(calib_item)
 
+        target.append(Gtk.SeparatorMenuItem())
         check_item = Gtk.MenuItem(
             label=update_checker.menu_item_label(self._update_available))
         if self._update_available and self._latest_version:
             check_item.connect("activate", self._on_update_clicked)
         else:
             check_item.connect("activate", self._on_check_updates_clicked)
-        self._menu.append(check_item)
+        target.append(check_item)
 
-    def _append_about(self) -> None:
+    def _append_about(self, menu: Optional[Gtk.Menu] = None) -> None:
+        target = menu if menu is not None else self._menu
         about_item = Gtk.MenuItem(label="About")
         about_item.connect("activate", self._on_about)
-        self._menu.append(about_item)
+        target.append(about_item)
 
     def _append_quit(self) -> None:
-        self._menu.append(Gtk.SeparatorMenuItem())
+        self._add_separator()
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", self._on_quit)
         self._menu.append(quit_item)
@@ -1355,6 +1427,7 @@ class GigaMateTrayApp:
                     parts.append(f"Batt: {bat_info.capacity}% ({ac_str} - 100% Top-Up)")
                 else:
                     parts.append(f"Batt: {bat_info.capacity}% ({ac_str})")
+                self._update_battery_label(bat_info)
         except Exception:
             pass
 
@@ -1862,6 +1935,8 @@ class GigaMateTrayApp:
         self._sync_power_item = None
         self._startup_item = None
         self._battery_care_item = None
+        self._battery_parent_item = None
+        self._battery_parent_label = None
 
     def _rebuild_menu(self) -> None:
         """Clear and rebuild the entire menu."""
