@@ -701,8 +701,9 @@ def terminal_repair_snippet() -> str:
     """Privileged repair commands for a terminal when the helper is missing.
 
     Rebuilds + reloads ``gigamate_acpi`` for the running kernel via DKMS,
-    handling the stale-registration case, then loads the module. Requires sudo
-    (prompts in the terminal).
+    handling the stale-registration case, prunes stale DKMS registrations
+    (keeping versions that still cover a live kernel), then loads the module.
+    Requires sudo (prompts in the terminal).
     """
     return (
         'v="$(ls -d /usr/src/gigamate_acpi-* 2>/dev/null | sort -V | tail -1'
@@ -712,6 +713,21 @@ def terminal_repair_snippet() -> str:
         'sudo dkms install -m gigamate_acpi -v "$v" -k "$(uname -r)" --force || '
         'sudo env CC=clang LLVM=1 dkms install -m gigamate_acpi -v "$v" -k "$(uname -r)" --force || '
         '{ echo "DKMS build failed — install kernel headers for $(uname -r)"; exit 1; }; '
+        'for old in $(ls /var/lib/dkms/gigamate_acpi 2>/dev/null | grep -v "^kernel-"); do '
+        '[ "$old" = "$v" ] && continue; '
+        'keep=0; '
+        'for l in /var/lib/dkms/gigamate_acpi/kernel-*; do '
+        '[ -L "$l" ] || continue; '
+        'k="${l##*/}"; k="${k#kernel-}"; k="${k%-*}"; '
+        '[ -d "/lib/modules/$k" ] || continue; '
+        't="$(readlink "$l" 2>/dev/null)"; '
+        't="${t#/var/lib/dkms/gigamate_acpi/}"; '
+        't="${t%%/*}"; '
+        '[ "$t" = "$old" ] && keep=1; '
+        'done; '
+        '[ "$keep" = 1 ] || { sudo dkms remove "gigamate_acpi/$old" --all 2>/dev/null && '
+        'sudo rm -rf "/usr/src/gigamate_acpi-$old" 2>/dev/null; }; '
+        'done; '
         'sudo depmod -a; '
         'sudo modprobe -r gigamate_acpi 2>/dev/null || true; '
         'sudo modprobe gigamate_acpi && echo "GigaMate ACPI driver repaired."'
