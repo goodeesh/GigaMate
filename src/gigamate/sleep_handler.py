@@ -247,6 +247,13 @@ class SleepHandler:
         except Exception as exc:
             logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
 
+        try:
+            from . import dgpu_gate
+
+            dgpu_gate.schedule_resume_reconcile()
+        except Exception as exc:
+            logger.warning(f"Could not schedule dGPU gate resume reconcile: {exc}")
+
         if self._on_resume_hook:
             try:
                 self._on_resume_hook()

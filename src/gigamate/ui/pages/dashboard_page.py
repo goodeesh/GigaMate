@@ -449,6 +449,11 @@ class DashboardPage(QWidget):
                 gpu_lbl.setStyleSheet("color: #718096; font-size: 20px; font-weight: 700;")
                 if gpu_sub:
                     gpu_sub.setText("iGPU Only")
+            elif gpu.gated_off or gpu.status == "gated_off":
+                gpu_lbl.setText("Off (gated)")
+                gpu_lbl.setStyleSheet("color: #38b2ac; font-size: 20px; font-weight: 700;")
+                if gpu_sub:
+                    gpu_sub.setText("Power rail cut (0 W)")
             elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
                 gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")

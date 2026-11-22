@@ -444,3 +444,51 @@ power limit "normal" — matching the same cap seen on the A16 CMH. This is EC/
 BIOS firmware policy; profiles never touch CPU power limits.
 
 See `docs/EXPERIMENTAL_MODELS.md` for the shipped/candidate/blocked registry.
+
+---
+
+## AERO X16 dGPU Power Gate (AI Power Gear III)
+
+Static DSDT/SSDT analysis (`dsdt.dsl` and `ssdt7.dsl` / `Opt2Tabl`) on the
+maintainer's **GIGABYTE AERO X16 1VH** (BIOS `FB0A`, AMD platform, NVIDIA RTX
+5060 Mobile `10de:2d19` + HDA audio `10de:22eb`) established the ACPI topology
+and power-control traps for GiMATE's **AI Power Gear III** on Linux.
+
+### PCI-to-ACPI Topology
+
+| PCI BDF | Function | ACPI Path | Notes |
+|---------|----------|-----------|-------|
+| `0000:00:03.1` | PCIe Root Port | `\_SB_.PCI0.GPP9` | Upstream bridge |
+| `0000:64:00.0` | NVIDIA dGPU | `\_SB_.PCI0.GPP9.PEGP` | Runtime-PM device |
+| `0000:64:00.1` | NVIDIA HDA Audio | `\_SB_.PCI0.GPP9.NHDA` | Audio sibling to remove with GPU |
+| — | PowerResource | `\_SB_.PCI0.GPP9.PG00` | Referenced by `_PR0`/`_PR2`/`_PR3` (`LNXPOWER:07`) |
+
+### Firmware Methods & Traps
+
+- **`PEGP._PS3` is guarded:** `PEGP._PS3` is wrapped in `If ((OMPR == 0x03))`,
+  whereas `OMPR` defaults to `0x02` unless updated by NVIDIA's RTD3 `_DSM`
+  flow. Calling `PEGP._PS3` directly without `_DSM` setup is a no-op.
+- **`PG00._STA`:** Delegates to `GSTA()`, which reads GPIO `REST` rail status
+  (`0x1` while powered).
+- **`PG00._OFF`:** Sets `EC0.DSMD = 1`, runs `DL23(PTOF)`, and executes
+  `POFF()` (`REST=0`, `PWEN=0`, `M023`) to drop the dGPU power rail.
+- **`PG00._ON`:** Guards on `If (\_SB.PCI0.GPP9.WMOF == 1) Return(0)`, then
+  runs `PON()`, `L23D`, waits for `NVID == 0x10DE`, and clears `EC0.DSMD = 0`.
+- **Trap 1 (`PEGP._EJ0`):** Evaluating `_EJ0` sets `WMOF = 1`, permanently
+  blocking `PG00._ON` until reboot.
+- **Trap 2 (`WMBD(0, 0x51, 4)`):** Gigabyte's WMI method `0x51` includes an
+  `Else` branch that attempts to call a nonexistent `PEGP._ON()`.
+
+### Linux Sequence (`remove_before_off`)
+
+To avoid leaving `nvidia`/`snd_hda_intel` bound across a rail cut and to clear
+`TDGC` cleanly, GigaMate targets `\_SB.PCI0.GPP9.PG00` (`method: "_OFF"`) with
+the `remove_before_off` quirk in profile schema v4:
+
+1. **Gate Off:** Verify `runtime_status == suspended` and no connected DRM
+   outputs on the dGPU card; stop `nvidia-powerd.service` if active; remove PCI
+   functions `.1` (`0000:64:00.1`) and `.0` (`0000:64:00.0`) via
+   `/sys/bus/pci/devices/<bdf>/remove`; evaluate `PG00._OFF`.
+2. **Gate On:** Evaluate `PG00._ON` (`WMOF` remains `0`); trigger
+   `/sys/bus/pci/rescan`; wait for device re-enumeration and `nvidia` bind;
+   restore `nvidia-powerd.service` if needed.

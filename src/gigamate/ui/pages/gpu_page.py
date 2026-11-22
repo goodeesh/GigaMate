@@ -31,6 +31,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -40,9 +41,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ... import dgpu_tune
+from ... import dgpu_gate, dgpu_tune
+from ...battery import get_battery_manager
 from ...config import load as load_config
 from ...gpu import get_gpu_state, gpu_status_text
+from ..flow_layout import FlowContainer
 
 
 class _SliderNoWheel(QSlider):
@@ -88,6 +91,14 @@ class GpuPage(QWidget):
         self._holders_timer = QTimer(self)
         self._holders_timer.setInterval(100)
         self._holders_timer.timeout.connect(self._collect_holders)
+        self._gate_supported: Optional[bool] = None
+        self._gate_experimental: bool = False
+        self._gate_buttons: dict[str, QPushButton] = {}
+        self._gate_results: queue.Queue = queue.Queue()
+        self._gate_busy = False
+        self._gate_timer = QTimer(self)
+        self._gate_timer.setInterval(100)
+        self._gate_timer.timeout.connect(self._collect_gate_result)
         self._init_ui()
 
         # Prime the watcher state before the first timer tick so the dGPU-asleep
@@ -111,8 +122,9 @@ class GpuPage(QWidget):
         # first _refresh. This ensures the dGPU-asleep fallback (reading
         # supported/device from the state file rather than from an NVML probe)
         # is available on the very first render.
+        self._gate_supported = None
         self._read_published()
-        self._refresh()
+        self._refresh(recheck_gate=True)
         self._read_published(force_probe=True)
         self._refresh()
 
@@ -198,25 +210,140 @@ class GpuPage(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(20)
         layout.addWidget(self._build_state_card())
+        layout.addWidget(self._build_power_gate_card())
         layout.addWidget(self._build_core_clock_card())
         layout.addWidget(self._build_mem_clock_card())
         layout.addLayout(self._build_apply_bar())
         layout.addStretch()
 
+    def _build_power_gate_card(self) -> QFrame:
+        self.power_gate_card = QFrame()
+        self.power_gate_card.setProperty("class", "Card")
+        box = QVBoxLayout(self.power_gate_card)
+        box.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        title = QLabel("dGPU Power Gate (AI Power Gear III)")
+        title.setProperty("class", "CardTitle")
+        hdr.addWidget(title)
+        self.gate_exp_badge = QLabel("Experimental")
+        self.gate_exp_badge.setProperty("class", "BadgeWarning")
+        self.gate_exp_badge.setVisible(False)
+        hdr.addWidget(self.gate_exp_badge)
+        hdr.addStretch()
+        self.gate_rail_pill = QLabel("")
+        self.gate_rail_pill.setStyleSheet(
+            "background-color: #1c2333; color: #94a3b8; border: 1px solid #2b364c; "
+            "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
+        )
+        hdr.addWidget(self.gate_rail_pill)
+        box.addLayout(hdr)
+
+        desc = QLabel(
+            "Cut the discrete GPU power rail via ACPI and de-enumerate its PCI device "
+            "(~0 W draw; nothing can wake it until restored). Your saved undervolt / "
+            "overclock profile is preserved and re-applied automatically on wake."
+        )
+        desc.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.4;")
+        desc.setWordWrap(True)
+        box.addWidget(desc)
+
+        btn_row = FlowContainer(spacing=10)
+        self.gate_btn_group = QButtonGroup(self)
+        self.gate_btn_group.setExclusive(True)
+        for mode_key, label, tip in (
+            ("optimus", "Optimus", "Default: kernel RTD3 runtime PM manages D3cold"),
+            ("eco", "ECO (dGPU Off)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
+            ("auto", "Auto (Battery)", "Prompt to gate off when AC unplugs; restore automatically on AC"),
+        ):
+            btn = QPushButton(label)
+            btn.setProperty("class", "ProfileButton")
+            btn.setCheckable(True)
+            btn.setMinimumHeight(36)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _checked=False, m=mode_key: self._on_gate_mode_clicked(m))
+            self.gate_btn_group.addButton(btn)
+            btn_row.addWidget(btn)
+            self._gate_buttons[mode_key] = btn
+        box.addWidget(btn_row)
+
+        self.gate_info_lbl = QLabel(
+            "Optimus: runtime D3cold  ·  ECO: rail off (~0 W)  ·  Auto: prompt on unplug, restore on AC"
+        )
+        self.gate_info_lbl.setStyleSheet("color: #718096; font-size: 11px; line-height: 1.35;")
+        self.gate_info_lbl.setWordWrap(True)
+        box.addWidget(self.gate_info_lbl)
+
+        self.gate_status_lbl = QLabel("")
+        self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        self.gate_status_lbl.setWordWrap(True)
+        box.addWidget(self.gate_status_lbl)
+
+        force_row = QHBoxLayout()
+        self.gate_force_close_btn = QPushButton("Close Apps && Power Off")
+        self.gate_force_close_btn.setToolTip(
+            "Open confirmation dialog listing user apps/services currently holding the dGPU"
+        )
+        self.gate_force_close_btn.setStyleSheet(
+            "QPushButton { background-color: #742a2a; color: #fed7d7; border: 1px solid #c53030; "
+            "border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 600; } "
+            "QPushButton:hover { background-color: #9b2c2c; } "
+            "QPushButton:disabled { opacity: 0.5; }"
+        )
+        self.gate_force_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.gate_force_close_btn.setVisible(False)
+        self.gate_force_close_btn.clicked.connect(self._on_gate_force_close_clicked)
+        force_row.addWidget(self.gate_force_close_btn)
+        force_row.addStretch()
+        box.addLayout(force_row)
+
+        note = QLabel(
+            "Note: HDMI/DisplayPort ports wired directly to the dGPU stop working while gated off, "
+            "and audio pauses briefly (~0.5 s) while detaching HDMI audio. Reboot recovers if wake ever fails."
+        )
+        note.setStyleSheet("color: #718096; font-size: 11px;")
+        note.setWordWrap(True)
+        box.addWidget(note)
+
+        self._sync_power_gate_card(recheck_supported=True)
+        return self.power_gate_card
+
     def _build_state_card(self) -> QFrame:
         state_card = QFrame()
         state_card.setProperty("class", "Card")
         sc = QVBoxLayout(state_card)
-        sc.setSpacing(8)
+        sc.setContentsMargins(16, 11, 16, 11)
+        sc.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
         t = QLabel("Discrete GPU")
-        t.setProperty("class", "CardTitle")
-        sc.addWidget(t)
+        t.setStyleSheet(
+            "color: #8896ab; font-size: 11px; font-weight: 700; "
+            "text-transform: uppercase; letter-spacing: 0.5px;"
+        )
+        top.addWidget(t)
+
         self.gpu_state_lbl = QLabel("—")
-        self.gpu_state_lbl.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: 700;")
-        sc.addWidget(self.gpu_state_lbl)
+        self.gpu_state_lbl.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: 700;")
+        top.addWidget(self.gpu_state_lbl)
+        top.addStretch()
+
+        self.gpu_meta_lbl = QLabel("")
+        self.gpu_meta_lbl.setStyleSheet(
+            "background-color: #131926; color: #94a3b8; border: 1px solid #232b3d; "
+            "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
+        )
+        self.gpu_meta_lbl.setVisible(False)
+        top.addWidget(self.gpu_meta_lbl)
+        sc.addLayout(top)
+
         self.gpu_holders_lbl = QLabel("")
-        self.gpu_holders_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self.gpu_holders_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
         self.gpu_holders_lbl.setWordWrap(True)
+        self.gpu_holders_lbl.setVisible(False)
         sc.addWidget(self.gpu_holders_lbl)
         return state_card
 
@@ -417,8 +544,14 @@ class GpuPage(QWidget):
         else:
             self.mem_val.setText("+0 MHz (stock)")
 
-    def _update_apply_hint(self) -> None:
+    def _update_apply_hint(self, gated: bool = False) -> None:
         """Tell the user when the sliders no longer match what is configured."""
+        if gated:
+            self.apply_hint_lbl.setText(
+                "Tuning controls are read-only while dGPU is powered off (gated). "
+                "Switch to Optimus to edit or apply."
+            )
+            return
         staged = []
         if self._uv_cfg_key is not None and self.uv_slider.value() != self._uv_cfg_key[1]:
             staged.append("undervolt")
@@ -506,9 +639,11 @@ class GpuPage(QWidget):
             self._holders = []
             self._holders_checked_at = None
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
             return
         self.gpu_holders_lbl.setText(
             "Awake held by: " + ", ".join(self._holders) if self._holders else "")
+        self.gpu_holders_lbl.setVisible(bool(self._holders))
         now = time.monotonic()
         if self._holders_busy or (
             self._holders_checked_at is not None
@@ -545,75 +680,384 @@ class GpuPage(QWidget):
             self._holders_checked_at = time.monotonic()
             self.gpu_holders_lbl.setText(
                 "Awake held by: " + ", ".join(holders) if holders else "")
+            self.gpu_holders_lbl.setVisible(bool(holders))
         else:
             self._holders = []
             self._holders_checked_at = None
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+
+    def _on_gate_mode_clicked(self, mode: str) -> None:
+        if self._gate_busy:
+            return
+        needs_confirm = False
+        try:
+            if not dgpu_gate.is_gated_off():
+                if mode == dgpu_gate.MODE_ECO:
+                    needs_confirm = True
+                elif mode == dgpu_gate.MODE_AUTO:
+                    try:
+                        ac_online = bool(get_battery_manager().is_ac_online())
+                    except Exception:  # noqa: BLE001
+                        ac_online = True
+                    needs_confirm = not ac_online
+        except Exception:  # noqa: BLE001
+            needs_confirm = False
+
+        if needs_confirm:
+            from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+            try:
+                prev_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+            except Exception:
+                prev_mode = dgpu_gate.MODE_OPTIMUS
+            dlg = DgpuGateConfirmDialog(
+                trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+                target_mode=mode,
+                prev_mode=prev_mode,
+                parent=self,
+            )
+            dlg.exec()
+            self._refresh(recheck_gate=False)
+            return
+
+        self._gate_busy = True
+        for btn in self._gate_buttons.values():
+            btn.setEnabled(False)
+        if hasattr(self, "gate_force_close_btn"):
+            self.gate_force_close_btn.setEnabled(False)
+        self.gate_status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 500;")
+        self.gate_status_lbl.setText(f"Switching dGPU power mode to {mode}…")
+
+        def _worker() -> None:
+            closable = []
+            try:
+                res = dgpu_gate.set_mode(mode)
+                if not res.get("ok") and res.get("reason") == "gpu_active":
+                    closable = dgpu_gate.closable_gpu_holders()
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            self._gate_results.put((mode, res, closable, True))
+
+        threading.Thread(target=_worker, name="gigamate-gui-dgpu-gate", daemon=True).start()
+        self._gate_timer.start()
+
+    def _on_gate_force_close_clicked(self) -> None:
+        if self._gate_busy:
+            return
+        from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+        try:
+            cfg = load_config()
+            mode = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_ECO)).lower()
+            if mode not in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO):
+                mode = dgpu_gate.MODE_ECO
+        except Exception:
+            mode = dgpu_gate.MODE_ECO
+
+        dlg = DgpuGateConfirmDialog(
+            trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+            target_mode=mode,
+            prev_mode=mode,
+            parent=self,
+        )
+        dlg.exec()
+        self._refresh(recheck_gate=False)
+
+    def _collect_gate_result(self) -> None:
+        try:
+            item = self._gate_results.get_nowait()
+        except queue.Empty:
+            return
+        if len(item) == 4:
+            mode, res, closable, prompt_allowed = item
+        else:
+            mode, res = item
+            closable, prompt_allowed = [], False
+        self._gate_busy = False
+        self._gate_timer.stop()
+        for btn in self._gate_buttons.values():
+            btn.setEnabled(True)
+        if hasattr(self, "gate_force_close_btn"):
+            self.gate_force_close_btn.setEnabled(True)
+        self._sync_power_gate_card(recheck_supported=False, override_result=(mode, res))
+        self._refresh(recheck_gate=False)
+
+        if (
+            prompt_allowed
+            and mode in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO)
+            and not res.get("ok")
+            and res.get("reason") == "gpu_active"
+            and closable
+        ):
+            from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+            dlg = DgpuGateConfirmDialog(
+                trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+                target_mode=mode,
+                prev_mode=mode,
+                parent=self,
+            )
+            dlg.exec()
+            self._refresh(recheck_gate=False)
+
+    def _sync_power_gate_card(
+        self,
+        recheck_supported: bool = False,
+        override_result: Optional[tuple] = None,
+    ) -> None:
+        if not hasattr(self, "power_gate_card"):
+            return
+        if recheck_supported or self._gate_supported is None:
+            try:
+                self._gate_supported = bool(dgpu_gate.is_supported())
+                if self._gate_supported:
+                    cfg_res = dgpu_gate.get_gate_config()
+                    self._gate_experimental = bool(cfg_res and cfg_res[1].experimental)
+                else:
+                    self._gate_experimental = False
+            except Exception:
+                self._gate_supported = False
+                self._gate_experimental = False
+
+        self.power_gate_card.setVisible(bool(self._gate_supported))
+        if not self._gate_supported:
+            return
+
+        self.gate_exp_badge.setVisible(self._gate_experimental)
+        try:
+            cfg = load_config()
+            mode = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+            if mode not in dgpu_gate.VALID_MODES:
+                mode = dgpu_gate.MODE_OPTIMUS
+        except Exception:
+            mode = dgpu_gate.MODE_OPTIMUS
+
+        if not self._gate_busy:
+            for key, btn in self._gate_buttons.items():
+                btn.blockSignals(True)
+                btn.setChecked(key == mode)
+                btn.blockSignals(False)
+
+        if self._gate_busy:
+            return
+
+        gpu = get_gpu_state()
+        gated = bool(gpu.gated_off or gpu.status == "gated_off")
+        wedged = False
+        if not gated:
+            try:
+                wedged = dgpu_gate.is_gpu_wedged()
+            except Exception:  # noqa: BLE001
+                wedged = False
+        policy = {}
+        try:
+            policy = dgpu_gate.read_policy_state()
+        except Exception:
+            policy = {}
+
+        try:
+            ac_online = bool(get_battery_manager().is_ac_online())
+        except Exception:  # noqa: BLE001
+            ac_online = True
+        pwr_txt = "AC" if ac_online else "Battery"
+        if gated:
+            self.gate_rail_pill.setStyleSheet(
+                "background-color: #132c2d; color: #38b2ac; border: 1px solid #2c7a7b; "
+                "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 700;"
+            )
+            self.gate_rail_pill.setText(f"Rail: OFF (~0 W) · {pwr_txt}")
+        else:
+            self.gate_rail_pill.setStyleSheet(
+                "background-color: #1c2333; color: #cbd5e0; border: 1px solid #2b364c; "
+                "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
+            )
+            self.gate_rail_pill.setText(f"Rail: ON · {pwr_txt}")
+
+        try:
+            cfg_res = dgpu_gate.get_gate_config()
+            eval_be = dgpu_gate.acpi_eval_backend()
+            if cfg_res is not None:
+                gc, _m = cfg_res
+                self.gate_info_lbl.setText(
+                    f"Target: {gc.path}.{gc.method} (via {eval_be})  ·  "
+                    "Optimus: runtime D3cold  ·  ECO: rail off  ·  Auto: prompt on unplug, restore on AC"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        if override_result is not None:
+            _m, res = override_result
+            if not res.get("ok"):
+                color = "#ed8936" if res.get("reason") == "gpu_active" else "#fc8181"
+                self.gate_status_lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 500;")
+                self.gate_status_lbl.setText(str(res.get("error") or "Mode transition failed."))
+                if hasattr(self, "gate_force_close_btn"):
+                    self.gate_force_close_btn.setVisible(
+                        res.get("reason") == "gpu_active" and not gated and mode in ("eco", "auto")
+                    )
+                return
+
+        if hasattr(self, "gate_force_close_btn"):
+            show_force = (
+                not gated
+                and mode in ("eco", "auto")
+                and bool(policy.get("pending_off"))
+                and policy.get("last_reason") in ("gpu_active", "awaiting_confirmation")
+            )
+            self.gate_force_close_btn.setVisible(show_force)
+
+        if gated:
+            self.gate_status_lbl.setStyleSheet("color: #38b2ac; font-size: 12px; font-weight: 600;")
+            self.gate_status_lbl.setText("Off (gated) — dGPU power rail cut (~0 W).")
+        elif wedged:
+            self.gate_status_lbl.setStyleSheet("color: #fc8181; font-size: 12px; font-weight: 700;")
+            self.gate_status_lbl.setText(
+                "GPU needs a reboot — NVIDIA driver reset required; dGPU power gating paused."
+            )
+        elif policy.get("pending_off") and mode in ("eco", "auto"):
+            self.gate_status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 500;")
+            msg = policy.get("last_error") or "Waiting for dGPU to suspend before cutting power."
+            self.gate_status_lbl.setText(f"Pending ({mode}): {msg}")
+        elif mode == "optimus":
+            self.gate_status_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setText("Optimus active — kernel runtime PM manages D3cold.")
+        elif mode == "auto":
+            self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setText("Auto active — AC connected; will prompt to power off on battery.")
+        else:
+            self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setText("ECO active.")
 
     # ── refresh ──
-    def _refresh(self) -> None:
+    def _refresh(self, recheck_gate: bool = False) -> None:
         gpu = get_gpu_state()
+        self._sync_power_gate_card(recheck_supported=recheck_gate)
+        gated = bool(gpu.gated_off or gpu.status == "gated_off")
+        wedged = False
+        if not gated:
+            try:
+                wedged = dgpu_gate.is_gpu_wedged()
+            except Exception:  # noqa: BLE001
+                wedged = False
         # Free sysfs read; every NVML decision on this page keys off it.
-        self._gpu_awake = bool(gpu.present and gpu.status == "active")
+        self._gpu_awake = bool(gpu.present and not gated and gpu.status == "active")
         if not gpu.present:
             self.gpu_state_lbl.setText("Not present (iGPU only)")
+            self.gpu_state_lbl.setStyleSheet("color: #94a3b8; font-size: 15px; font-weight: 700;")
+            self.gpu_meta_lbl.setVisible(False)
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+        elif gated:
+            self.gpu_state_lbl.setText("Off (gated)")
+            self.gpu_state_lbl.setStyleSheet("color: #38b2ac; font-size: 15px; font-weight: 700;")
+            vendor_name = (gpu.vendor or "NVIDIA").upper()
+            bdf = ""
+            try:
+                bdf = str(dgpu_gate.read_gate_state().get("bdf") or "")
+            except Exception:
+                bdf = ""
+            meta = f"{vendor_name} · {bdf} removed (~0 W)" if bdf else f"{vendor_name} · PCI removed (~0 W)"
+            self.gpu_meta_lbl.setText(meta)
+            self.gpu_meta_lbl.setVisible(True)
+            self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+        elif wedged:
+            self.gpu_state_lbl.setText("Needs reboot (wedged)")
+            self.gpu_state_lbl.setStyleSheet("color: #fc8181; font-size: 15px; font-weight: 700;")
+            vendor_name = (gpu.vendor or "NVIDIA").upper()
+            bdf = str(self._hw.get("device") or "")
+            meta = (
+                f"{vendor_name} · {bdf} — driver reset required"
+                if bdf
+                else f"{vendor_name} — driver reset required"
+            )
+            self.gpu_meta_lbl.setText(meta)
+            self.gpu_meta_lbl.setVisible(True)
+            self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
         else:
             self.gpu_state_lbl.setText(gpu_status_text(gpu))
+            if gpu.status == "suspended":
+                color = "#48bb78"
+            elif gpu.status == "active":
+                color = "#ed8936"
+            else:
+                color = "#e2e8f0"
+            self.gpu_state_lbl.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+            vendor_name = (gpu.vendor or "Discrete").upper()
+            bdf = str(self._hw.get("device") or "")
+            self.gpu_meta_lbl.setText(f"{vendor_name} · {bdf}" if bdf else f"{vendor_name} GPU")
+            self.gpu_meta_lbl.setVisible(True)
             self._refresh_holders(gpu)
 
         supported = False
-        # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
-        probed = self._probed
-        try:
-            probed = dgpu_tune.probe_if_awake() or probed
-        except Exception:
-            pass
-        if probed:
-            self._probed = probed
-
-        # When the probe cache is cold (first open while dGPU is asleep), fall
-        # back to the watcher's state file which already knows if tuning is
-        # supported. This lets the UI show and edit the configured values without
-        # touching NVML (which would wake the dGPU).
-        if not probed:
-            hw_supported = bool(self._hw.get("supported"))
-            hw_device = self._hw.get("device", "NVIDIA GPU")
-            supported = hw_supported and gpu.vendor == "nvidia"
-            probed_for_display = {"supported": hw_supported, "device": hw_device}
-        else:
-            supported = bool(probed.get("supported"))
-            probed_for_display = probed
-
-        if gpu.vendor != "nvidia":
-            self.uv_support_lbl.setText("Tuning is only available for NVIDIA dGPUs.")
-            supported = False
-        elif supported:
-            device_name = probed_for_display.get("device") or "NVIDIA GPU"
-            asleep_suffix = " — asleep (D3cold)" if not self._gpu_awake else ""
-            self.uv_support_lbl.setText(f"Supported on {device_name}.{asleep_suffix}")
-        else:
+        show_saved = False
+        if gated:
+            probed_for_display = self._probed or self._hw or {}
+            show_saved = (gpu.vendor in (None, "nvidia"))
+            self.uv_support_lbl.setStyleSheet("color: #38b2ac; font-size: 11px; font-weight: 500;")
             self.uv_support_lbl.setText(
-                "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
+                "dGPU is powered off (gated) — your saved tuning profile is shown below and will "
+                "automatically re-apply when the dGPU powers back on."
             )
-
-        self.uv_slider.setEnabled(supported)
-        self.uv_reset_btn.setEnabled(supported)
-        self.max_slider.setEnabled(supported)
-        self.max_reset_btn.setEnabled(supported)
-
-        if supported:
-            self._sync_uv_controls()
-            self._sync_max_controls()
-            self._sync_mem_controls(probed_for_display)
         else:
+            self.uv_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+            # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
+            probed = self._probed
+            try:
+                probed = dgpu_tune.probe_if_awake() or probed
+            except Exception:
+                pass
+            if probed:
+                self._probed = probed
+
+            # When the probe cache is cold (first open while dGPU is asleep), fall
+            # back to the watcher's state file which already knows if tuning is
+            # supported. This lets the UI show and edit the configured values without
+            # touching NVML (which would wake the dGPU).
+            if not probed:
+                hw_supported = bool(self._hw.get("supported"))
+                hw_device = self._hw.get("device", "NVIDIA GPU")
+                supported = hw_supported and gpu.vendor == "nvidia"
+                probed_for_display = {"supported": hw_supported, "device": hw_device}
+            else:
+                supported = bool(probed.get("supported"))
+                probed_for_display = probed
+
+            if gpu.vendor != "nvidia":
+                self.uv_support_lbl.setText("Tuning is only available for NVIDIA dGPUs.")
+                supported = False
+            elif supported:
+                device_name = probed_for_display.get("device") or "NVIDIA GPU"
+                asleep_suffix = " — asleep (D3cold)" if not self._gpu_awake else ""
+                self.uv_support_lbl.setText(f"Supported on {device_name}.{asleep_suffix}")
+            else:
+                self.uv_support_lbl.setText(
+                    "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
+                )
+            show_saved = supported
+
+        controls_enabled = supported and not gated and not wedged
+        self.uv_slider.setEnabled(controls_enabled)
+        self.uv_reset_btn.setEnabled(controls_enabled)
+        self.max_slider.setEnabled(controls_enabled)
+        self.max_reset_btn.setEnabled(controls_enabled)
+
+        if show_saved:
+            self._sync_uv_controls(gated=gated)
+            self._sync_max_controls(gated=gated)
+            self._sync_mem_controls(probed_for_display, gated=gated)
+        else:
+            self.mem_slider.setEnabled(False)
+            self.mem_reset_btn.setEnabled(False)
             self.uv_status_lbl.setText("")
             self.max_status_lbl.setText("")
             self.mem_status_lbl.setText("")
-        self.apply_btn.setEnabled(supported)
-        self._update_apply_hint()
+        self.apply_btn.setEnabled(controls_enabled)
+        self._update_apply_hint(gated=gated)
 
-    def _sync_uv_controls(self) -> None:
+    def _sync_uv_controls(self, gated: bool = False) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_undervolt_enabled", False))
         offset = int(cfg.get("dgpu_undervolt_offset_mhz", 0) or 0)
@@ -630,8 +1074,16 @@ class GpuPage(QWidget):
 
         st = self._hw or {}
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
-        if enabled and offset > 0 and hw_off == offset:
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
+        if gated:
+            if enabled and offset > 0:
+                if auto:
+                    state = f"Saved: +{offset} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: +{offset} MHz (auto-apply off)"
+            else:
+                state = "Off (stock)"
+        elif enabled and offset > 0 and hw_off == offset:
             state = f"Applied: +{offset} MHz"
         elif enabled and offset > 0 and not self._gpu_awake:
             # The hardware reads 0 while the dGPU is asleep (D3cold wiped it), so
@@ -650,19 +1102,19 @@ class GpuPage(QWidget):
             state = "Off (stock)"
         self.uv_status_lbl.setText(state)
 
-    def _sync_max_controls(self) -> None:
+    def _sync_max_controls(self, gated: bool = False) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_max_clock_enabled", False))
         wanted = int(cfg.get("dgpu_max_clock_mhz", 0) or 0)
         st = self._hw or {}
         applied_max = st.get("applied_max") or 0
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
 
         if enabled and wanted > 0:
-            # Widen the low end if a smaller cap was set out-of-band (e.g. CLI).
+            # Widen the low end or upper end if a saved cap sits outside the probe range.
             eff_min = max(300, min(self._normal_min, wanted))
-            eff_max = self._normal_max
+            eff_max = max(self._normal_max, wanted)
             pos = max(eff_min, min(eff_max, wanted))
         else:
             eff_min = self._normal_min
@@ -677,9 +1129,20 @@ class GpuPage(QWidget):
                 self.max_slider.setValue(pos)
                 self.max_slider.blockSignals(False)
                 self._max_cfg_key = (enabled, wanted)
-            self._update_max_readout(self.max_slider.value())
+            if enabled and wanted > 0 and self._observed_ceiling <= wanted:
+                self.max_val.setText(f"Cap {wanted} MHz")
+            else:
+                self._update_max_readout(self.max_slider.value())
 
-        if enabled and wanted > 0 and applied_max == wanted:
+        if gated:
+            if enabled and wanted > 0:
+                if auto:
+                    state = f"Saved: cap {wanted} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: cap {wanted} MHz (auto-apply off)"
+            else:
+                state = "Off (unlocked)"
+        elif enabled and wanted > 0 and applied_max == wanted:
             state = f"Applied: cap {wanted} MHz"
         elif enabled and wanted > 0 and not self._gpu_awake:
             state = f"Configured: cap {wanted} MHz — applies when the dGPU wakes"
@@ -696,14 +1159,18 @@ class GpuPage(QWidget):
             state = "Off (unlocked)"
         self.max_status_lbl.setText(state)
 
-    def _sync_mem_controls(self, probed_for_display: Optional[dict] = None) -> None:
+    def _sync_mem_controls(
+        self,
+        probed_for_display: Optional[dict] = None,
+        gated: bool = False,
+    ) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_mem_offset_enabled", False))
         wanted = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0)
         st = self._hw or {}
         applied = st.get("applied_mem") or 0
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
         # Read the helper version from the probe cache: asking for it must never
         # open NVML on a card the kernel has powered down. An unknown version is
         # not treated as stale — we simply have nothing to say.
@@ -718,12 +1185,16 @@ class GpuPage(QWidget):
         # back to the watcher state file which carries mem_offset_api from the
         # last time the GPU was awake.
         effective_probed = probed_for_display if probed_for_display is not None else self._probed
-        offset_api = bool(effective_probed.get("mem_offset_api"))
+        offset_api = (
+            bool(effective_probed.get("mem_offset_api"))
+            or bool(st.get("mem_offset_api"))
+        )
         # If neither probe nor state file have it yet, assume supported when the
-        # watcher state explicitly says the GPU is supported (avoids hiding the
-        # mem section on every cold open while asleep).
-        if not offset_api and bool(st.get("supported")) and not self._gpu_awake:
-            # Optimistic: we've seen this GPU supported before; re-check when awake.
+        # watcher state explicitly says the GPU is supported (or when gated off with saved config).
+        if not offset_api and (
+            (bool(st.get("supported")) and (gated or not self._gpu_awake))
+            or (gated and enabled and wanted != 0)
+        ):
             offset_api = True
 
         mem_supported = offset_api and not stale_helper
@@ -740,8 +1211,8 @@ class GpuPage(QWidget):
                 f"{dgpu_tune.MEM_OFFSET_MAX_MHZ:+d} MHz "
                 "(+ overclocks, − underclocks, 0 = stock).")
 
-        self.mem_slider.setEnabled(mem_supported)
-        self.mem_reset_btn.setEnabled(mem_supported)
+        self.mem_slider.setEnabled(mem_supported and not gated)
+        self.mem_reset_btn.setEnabled(mem_supported and not gated)
 
         # Mirror the configured offset into the slider.
         target = wanted if enabled else 0
@@ -753,10 +1224,18 @@ class GpuPage(QWidget):
                 self._update_mem_readout()
             self._mem_offset_cfg_key = target
 
-        if not mem_supported:
+        if not mem_supported and not (gated and enabled and wanted != 0):
             self.mem_status_lbl.setText("")
             return
-        if enabled and wanted != 0 and applied == wanted:
+        if gated:
+            if enabled and wanted != 0:
+                if auto:
+                    state = f"Saved: {wanted:+d} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: {wanted:+d} MHz (auto-apply off)"
+            else:
+                state = "Off (stock)"
+        elif enabled and wanted != 0 and applied == wanted:
             state = f"Applied: {wanted:+d} MHz"
         elif enabled and wanted != 0 and not self._gpu_awake:
             state = f"Configured: {wanted:+d} MHz — applies when the dGPU wakes"

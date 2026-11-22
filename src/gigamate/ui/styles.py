@@ -16,9 +16,78 @@ QMainWindow, QWidget#CentralWidget {
     font-size: 13px;
 }
 
+QStackedWidget#ContentStack {
+    background-color: #0f1218;
+}
+
 QScrollArea {
     background-color: transparent;
     border: none;
+}
+
+/* Scroll areas and the pages inside them must not paint the desktop palette's
+ * base colour. Under a light palette (e.g. GNOME with a light GTK theme) an
+ * unstyled viewport renders white behind every card, so pin the colours here
+ * instead of trusting the system palette. */
+QScrollArea > QWidget#qt_scrollarea_viewport {
+    background-color: #0f1218;
+}
+
+QScrollArea > QWidget > QWidget {
+    background-color: transparent;
+}
+
+/* ────────────────────────────────────────────
+ * Scrollbars (GNOME-style: thin, no arrow buttons)
+ * ──────────────────────────────────────────── */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+    border: none;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #2b364c;
+    min-height: 32px;
+    margin: 2px;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:vertical:hover,
+QScrollBar::handle:vertical:pressed {
+    background-color: #465873;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0;
+    border: none;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: #2b364c;
+    min-width: 32px;
+    margin: 2px;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:horizontal:hover,
+QScrollBar::handle:horizontal:pressed {
+    background-color: #465873;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: transparent;
 }
 
 /* ────────────────────────────────────────────
@@ -451,3 +520,81 @@ DARK_THEME = DARK_THEME.replace(
     "__CHECKBOX_ICON_URL__",
     resolve_icon("checkbox-checked").replace("\\", "/")
 )
+
+
+def build_dark_palette():
+    """Return the dark :class:`QPalette` that backs the stylesheet.
+
+    The stylesheet only paints the widgets it names. Everything else — scroll
+    area viewports, scrollbars, menus, tooltips, the setup wizard — is drawn
+    from the application palette, which Qt takes from the desktop (GTK theme
+    on GNOME). A light desktop palette therefore leaked white panels into a
+    dark app when moving from KDE to GNOME, so the palette is pinned here.
+    """
+    from PyQt6.QtGui import QColor, QPalette
+
+    bg = QColor("#0f1218")
+    surface = QColor("#171b26")
+    text = QColor("#e2e8f0")
+    muted = QColor("#64748b")
+
+    palette = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: bg,
+        QPalette.ColorRole.WindowText: text,
+        QPalette.ColorRole.Base: QColor("#121620"),
+        QPalette.ColorRole.AlternateBase: surface,
+        QPalette.ColorRole.Text: text,
+        QPalette.ColorRole.Button: QColor("#202736"),
+        QPalette.ColorRole.ButtonText: QColor("#f7fafc"),
+        QPalette.ColorRole.BrightText: QColor("#ff6b35"),
+        QPalette.ColorRole.Link: QColor("#ff8c42"),
+        QPalette.ColorRole.Highlight: QColor("#ff6b35"),
+        QPalette.ColorRole.HighlightedText: QColor("#ffffff"),
+        QPalette.ColorRole.ToolTipBase: QColor("#1b212d"),
+        QPalette.ColorRole.ToolTipText: text,
+        QPalette.ColorRole.PlaceholderText: muted,
+        QPalette.ColorRole.Light: QColor("#2a3345"),
+        QPalette.ColorRole.Midlight: QColor("#232c3d"),
+        QPalette.ColorRole.Mid: QColor("#1e2636"),
+        QPalette.ColorRole.Dark: surface,
+        QPalette.ColorRole.Shadow: QColor("#10141d"),
+    }
+    for role, color in roles.items():
+        palette.setColor(QPalette.ColorGroup.Normal, role, color)
+        # Keep inactive identical (no washed-out text on unfocused windows).
+        palette.setColor(QPalette.ColorGroup.Inactive, role, color)
+
+    # Disabled controls: dimmed but readable.
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                 QPalette.ColorRole.ButtonText):
+        palette.setColor(QPalette.ColorGroup.Disabled, role, muted)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Base, bg)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Button, surface)
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight,
+                     QColor("#2b364c"))
+    return palette
+
+
+def apply_theme(app) -> None:
+    """Apply GigaMate's dark theme independently of the desktop's settings.
+
+    Must run before any window is created. Forcing the Fusion style keeps
+    widget metrics identical on KDE, GNOME and Hyprland, and declaring a dark
+    colour scheme asks the platform theme (window decorations, native file
+    dialogs) to follow the app instead of a desktop that reports light mode.
+    """
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QStyleFactory
+
+    style = QStyleFactory.create("Fusion")
+    if style is not None:
+        app.setStyle(style)
+
+    hints = app.styleHints()
+    set_color_scheme = getattr(hints, "setColorScheme", None)  # Qt 6.8+
+    if set_color_scheme is not None:
+        set_color_scheme(Qt.ColorScheme.Dark)
+
+    app.setPalette(build_dark_palette())
+    app.setStyleSheet(DARK_THEME)

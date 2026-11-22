@@ -70,6 +70,7 @@ from .battery import (
 )
 from .sleep_handler import get_sleep_handler
 from .hardware import apply_hardware_settings
+from . import dgpu_gate
 from . import updates as update_checker
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,15 @@ class GigaMateTrayApp:
         self._battery_parent_label: Optional[str] = None
         self._battery_dirty = False
         self._last_topup_active = False
+
+        # dGPU Power Gate state
+        self._dgpu_power_mode = self._config.get("dgpu_power_mode", "optimus")
+        self._dgpu_power_items: Dict[str, Gtk.RadioMenuItem] = {}
+        self._dgpu_power_parent_item: Optional[Gtk.MenuItem] = None
+        self._dgpu_power_parent_label: Optional[str] = None
+        self._dgpu_power_status_item: Optional[Gtk.MenuItem] = None
+        self._dgpu_power_status_label: Optional[str] = None
+        self._dgpu_power_busy = False
 
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
@@ -316,6 +326,7 @@ class GigaMateTrayApp:
         new_sync_power = new_cfg.get("sync_system_power", False)
         new_limit = new_cfg.get("charge_limit", 80)
         new_limit_enabled = new_cfg.get("charge_limit_enabled", False)
+        new_dgpu_mode = new_cfg.get("dgpu_power_mode", "optimus")
 
         old_building = self._building
         self._building = True
@@ -358,6 +369,12 @@ class GigaMateTrayApp:
                 self._battery_care_item.set_label(f"Battery Care (Cap at {new_limit}%)")
                 self._battery_care_item.set_active(new_limit_enabled and 40 <= new_limit < 100)
             self._battery_cap_limit = new_limit
+
+            dgpu_items = getattr(self, "_dgpu_power_items", {})
+            if new_dgpu_mode != getattr(self, "_dgpu_power_mode", "optimus"):
+                self._dgpu_power_mode = new_dgpu_mode
+                if new_dgpu_mode in dgpu_items:
+                    dgpu_items[new_dgpu_mode].set_active(True)
         finally:
             self._building = old_building
 
@@ -822,6 +839,7 @@ class GigaMateTrayApp:
         self._append_power_profile_section()
         self._add_separator()
         self._append_battery_section()
+        self._append_dgpu_power_section()
         self._add_separator()
         self._append_settings_section()
         self._append_quit()
@@ -870,10 +888,11 @@ class GigaMateTrayApp:
         # ── Power Profile section (ACPI) — primary action, one click away ──
         self._append_power_profile_section()
 
-        # ── Grouped flyouts: Keyboard (RGB + idle), Battery, Settings ──
+        # ── Grouped flyouts: Keyboard (RGB + idle), Battery, dGPU Power, Settings ──
         self._add_separator()
         self._append_keyboard_section()
         self._append_battery_section()
+        self._append_dgpu_power_section()
         self._append_settings_section()
 
         self._append_quit()
@@ -881,6 +900,295 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
     # Section builders
     # ────────────────────────────────────────────
+
+    def _dgpu_power_labels(self, gst=None):
+        """Return (parent_label, status_label) for the dGPU Power Gate flyout."""
+        if gst is None:
+            try:
+                gst = dgpu_gate.get_status(check_helper=False)
+            except Exception:
+                gst = {}
+        mode = gst.get("mode") or getattr(self, "_dgpu_power_mode", "optimus")
+        gated = bool(gst.get("gated"))
+        wedged = bool(gst.get("wedged"))
+        pending = bool(gst.get("pending_off"))
+        ac = bool(gst.get("ac_online", True))
+        if getattr(self, "_dgpu_power_busy", False):
+            parent_label = "dGPU Power: Switching…"
+        elif mode == "optimus":
+            parent_label = "dGPU Power: Optimus (Off)" if gated else "dGPU Power: Optimus"
+        elif mode == "eco":
+            if gated:
+                parent_label = "dGPU Power: ECO (Off)"
+            elif pending:
+                parent_label = "dGPU Power: ECO (Pending)"
+            else:
+                parent_label = "dGPU Power: ECO"
+        else:
+            if gated:
+                parent_label = "dGPU Power: Auto (Battery — Off)"
+            elif ac:
+                parent_label = "dGPU Power: Auto (AC)"
+            elif pending:
+                parent_label = "dGPU Power: Auto (Battery — Pending)"
+            else:
+                parent_label = "dGPU Power: Auto (Battery)"
+
+        if gated:
+            status_label = "State: Off (gated)"
+        elif wedged:
+            status_label = "State: Wedged — GPU needs a reboot"
+        elif pending:
+            reason = gst.get("last_reason")
+            holders = gst.get("holders") or []
+            displays = gst.get("displays") or []
+            if reason == "display_connected" and displays:
+                status_label = f"Blocked: display on {', '.join(displays)}"
+            elif holders:
+                status_label = f"Pending off: held by {', '.join(holders)}"
+            elif reason == "boot_settle":
+                status_label = f"Pending off: {gst.get('last_error') or 'boot settle'}"
+            else:
+                status_label = "Pending off: waiting for dGPU suspend"
+        else:
+            rstatus = gst.get("runtime_status")
+            if rstatus == "suspended":
+                status_label = "State: Asleep (runtime PM)"
+            elif rstatus == "active":
+                status_label = "State: Awake (D0)"
+            else:
+                status_label = f"State: {rstatus or 'Active'}"
+        return parent_label, status_label
+
+    def _update_dgpu_power_labels(self, gst=None) -> None:
+        parent = getattr(self, "_dgpu_power_parent_item", None)
+        status_item = getattr(self, "_dgpu_power_status_item", None)
+        if parent is None and status_item is None:
+            return
+        parent_label, status_label = self._dgpu_power_labels(gst)
+        if parent is not None and parent_label != getattr(self, "_dgpu_power_parent_label", None):
+            self._dgpu_power_parent_label = parent_label
+            try:
+                parent.set_label(parent_label)
+            except Exception:
+                pass
+        if status_item is not None and status_label != getattr(self, "_dgpu_power_status_label", None):
+            self._dgpu_power_status_label = status_label
+            try:
+                status_item.set_label(status_label)
+            except Exception:
+                pass
+
+    def _append_dgpu_power_section(self) -> Optional[Gtk.MenuItem]:
+        """Add a dGPU Power Gate flyout (Optimus / ECO / Auto) when supported."""
+        self._dgpu_power_items = {}
+        self._dgpu_power_parent_item = None
+        self._dgpu_power_parent_label = None
+        self._dgpu_power_status_item = None
+        self._dgpu_power_status_label = None
+        try:
+            if not dgpu_gate.is_supported():
+                return None
+            gst = dgpu_gate.get_status(check_helper=False)
+        except Exception:
+            return None
+
+        mode = gst.get("mode") or self._config.get("dgpu_power_mode", "optimus")
+        self._dgpu_power_mode = mode
+        parent_label, status_label = self._dgpu_power_labels(gst)
+
+        parent = self._make_submenu(parent_label)
+        self._dgpu_power_parent_item = parent
+        self._dgpu_power_parent_label = parent_label
+        submenu = parent.get_submenu()
+
+        group = None
+        for key, label in (
+            ("optimus", "Optimus (Default)"),
+            ("eco", "ECO (dGPU Off)"),
+            ("auto", "Auto (Off on Battery)"),
+        ):
+            item = Gtk.RadioMenuItem(group=group, label=label)
+            if group is None:
+                group = item
+            if key == mode:
+                item.set_active(True)
+            item.connect("toggled", self._on_dgpu_power_mode_changed, key)
+            submenu.append(item)
+            self._dgpu_power_items[key] = item
+
+        submenu.append(Gtk.SeparatorMenuItem())
+        status_item = Gtk.MenuItem(label=status_label)
+        status_item.set_sensitive(False)
+        submenu.append(status_item)
+        self._dgpu_power_status_item = status_item
+        self._dgpu_power_status_label = status_label
+
+        note_item = Gtk.MenuItem(label="HDMI/DP on dGPU off when gated")
+        note_item.set_sensitive(False)
+        submenu.append(note_item)
+        return parent
+
+    def _on_dgpu_power_mode_changed(self, item: Gtk.RadioMenuItem, mode: str) -> None:
+        if not item.get_active() or self._building:
+            return
+        if getattr(self, "_dgpu_power_busy", False):
+            return
+        prev_mode = getattr(self, "_dgpu_power_mode", "optimus")
+        self._dgpu_power_mode = mode
+        self._dgpu_power_busy = True
+        self._update_dgpu_power_labels()
+
+        needs_confirm = False
+        try:
+            if not dgpu_gate.is_gated_off():
+                if mode == dgpu_gate.MODE_ECO:
+                    needs_confirm = True
+                elif mode == dgpu_gate.MODE_AUTO:
+                    try:
+                        ac_online = bool(get_battery_manager().is_ac_online())
+                    except Exception:  # noqa: BLE001
+                        ac_online = True
+                    needs_confirm = not ac_online
+        except Exception:  # noqa: BLE001
+            needs_confirm = False
+
+        if needs_confirm:
+            trigger = "eco" if mode == dgpu_gate.MODE_ECO else "auto"
+            proc = dgpu_gate._spawn_confirm_dialog(
+                trigger=trigger,
+                target_mode=mode,
+                prev_mode=prev_mode,
+            )
+            if proc is not None:
+                def _wait_dialog() -> None:
+                    try:
+                        proc.wait()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        GLib.idle_add(self._on_dgpu_power_dialog_finished, mode)
+                    except Exception:
+                        pass
+
+                threading.Thread(
+                    target=_wait_dialog,
+                    name="gigamate-tray-dgpu-dialog",
+                    daemon=True,
+                ).start()
+                return
+
+        def _worker() -> None:
+            closable = []
+            try:
+                res = dgpu_gate.set_mode(mode)
+                if not res.get("ok") and res.get("reason") == "gpu_active":
+                    closable = dgpu_gate.closable_gpu_holders()
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            try:
+                GLib.idle_add(self._on_dgpu_power_mode_done, mode, res, closable, True)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, name="gigamate-tray-dgpu-gate", daemon=True).start()
+
+    def _on_dgpu_power_dialog_finished(self, fallback_mode: str) -> bool:
+        self._dgpu_power_busy = False
+        real_mode = fallback_mode
+        try:
+            self._config = load_config()
+            self._last_config_mtime = self._get_config_mtime()
+            real_mode = str(self._config.get("dgpu_power_mode", fallback_mode)).lower()
+        except Exception:
+            pass
+        self._dgpu_power_mode = real_mode
+        old_building = self._building
+        self._building = True
+        try:
+            items = getattr(self, "_dgpu_power_items", {})
+            if real_mode in items:
+                items[real_mode].set_active(True)
+        finally:
+            self._building = old_building
+        self._update_status()
+        return False
+
+    def _on_dgpu_power_mode_done(
+        self,
+        mode: str,
+        res: dict,
+        closable: Optional[list] = None,
+        prompt_allowed: bool = False,
+    ) -> bool:
+        self._dgpu_power_busy = False
+        try:
+            self._config = load_config()
+            self._last_config_mtime = self._get_config_mtime()
+            self._dgpu_power_mode = self._config.get("dgpu_power_mode", mode)
+        except Exception:
+            pass
+        self._update_status()
+        if (
+            prompt_allowed
+            and mode in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO)
+            and not res.get("ok")
+            and res.get("reason") == "gpu_active"
+            and closable
+        ):
+            app_list = "\n".join(f"  • {h.label}" for h in closable)
+            dlg = Gtk.MessageDialog(
+                transient_for=None,
+                flags=0,
+                message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.NONE,
+                text="Close Apps Holding Discrete GPU?",
+            )
+            dlg.format_secondary_text(
+                "The discrete GPU is currently in use by:\n"
+                f"{app_list}\n\n"
+                "Warning: Force-closing them may cause unsaved work to be lost.\n"
+                "Close them now to power off the dGPU immediately, or keep waiting in Pending mode?"
+            )
+            dlg.add_button("Keep Waiting (Pending)", Gtk.ResponseType.CANCEL)
+            dlg.add_button("Close Apps & Power Off", Gtk.ResponseType.OK)
+            dlg.set_default_response(Gtk.ResponseType.CANCEL)
+            resp = dlg.run()
+            dlg.destroy()
+            if resp == Gtk.ResponseType.OK:
+                self._dgpu_power_busy = True
+                self._update_dgpu_power_labels()
+
+                def _force_worker() -> None:
+                    try:
+                        fres = dgpu_gate.force_close_and_gate_off(mode=mode)
+                    except Exception as exc:  # noqa: BLE001
+                        fres = {"ok": False, "error": str(exc)}
+                    try:
+                        GLib.idle_add(self._on_dgpu_power_mode_done, mode, fres, [], False)
+                    except Exception:
+                        pass
+
+                threading.Thread(
+                    target=_force_worker,
+                    name="gigamate-tray-dgpu-force-close",
+                    daemon=True,
+                ).start()
+            return False
+
+        if not res.get("ok") and res.get("reason") != "gpu_active":
+            err = res.get("error") or "Failed to switch dGPU power mode."
+            dlg = Gtk.MessageDialog(
+                transient_for=None,
+                flags=0,
+                message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK,
+                text="dGPU Power Gate",
+            )
+            dlg.format_secondary_text(err)
+            dlg.run()
+            dlg.destroy()
+        return False
 
     def _append_keyboard_section(self) -> None:
         """Add the Keyboard flyout: colour, brightness and idle auto-off."""
@@ -1410,6 +1718,8 @@ class GigaMateTrayApp:
         # Discrete GPU state (reuse the value fetched for the icon).
         if gpu.present:
             parts.append(f"dGPU: {gpu_short_status_text(gpu)}")
+        if getattr(self, "_dgpu_power_parent_item", None) is not None:
+            self._update_dgpu_power_labels()
 
 
         # Battery status
@@ -1937,6 +2247,11 @@ class GigaMateTrayApp:
         self._battery_care_item = None
         self._battery_parent_item = None
         self._battery_parent_label = None
+        self._dgpu_power_items = {}
+        self._dgpu_power_parent_item = None
+        self._dgpu_power_parent_label = None
+        self._dgpu_power_status_item = None
+        self._dgpu_power_status_label = None
 
     def _rebuild_menu(self) -> None:
         """Clear and rebuild the entire menu."""

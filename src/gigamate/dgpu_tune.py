@@ -221,12 +221,24 @@ def nvml_allowed() -> bool:
     reason the state can be read from sysfs instead. ``runtime_status`` is a free
     kernel read that does not wake anything, so this gate is free to call.
 
+    A driver-wedged GPU (reset required) is also off limits: NVML calls only
+    hammer a dead device and rewrite error state every refresh.
+
     The watcher deliberately does **not** use this: sampling and applying while
     the dGPU is awake is its job. It exists for the UI, which must never be the
     component that keeps a sleeping dGPU awake.
     """
     bdf = find_nvidia_bdf()
-    return bdf is not None and runtime_status(bdf) == "active"
+    if bdf is None or runtime_status(bdf) != "active":
+        return False
+    try:
+        from . import dgpu_gate
+
+        if dgpu_gate.is_transition_in_progress():
+            return False
+        return not dgpu_gate.is_gpu_wedged(bdf=bdf, vendor="nvidia")
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def probe(force: bool = False) -> Dict:
@@ -414,12 +426,14 @@ class DgpuWatcher:
         self._applied_mem = 0
         self._idle_cleared = False
         self._idle_since: Optional[float] = None
+        self._was_gated = False
         self._last_poll = 0.0
         self._last_apply_fail = 0.0
         self._last_state_json: Optional[str] = None
 
         self._status: Dict = {
             "supported": None,
+            "mem_offset_api": None,
             "device": None,
             "runtime": None,
             "power_state": None,
@@ -493,26 +507,88 @@ class DgpuWatcher:
         now = time.monotonic() if now is None else now
         bdf = find_nvidia_bdf()
         if bdf is None:
+            gated_state = None
+            try:
+                from . import dgpu_gate
+
+                if dgpu_gate.is_gated_off():
+                    gated_state = dgpu_gate.read_gate_state()
+            except Exception:  # noqa: BLE001
+                gated_state = None
+
+            if gated_state is not None:
+                self._was_gated = True
+                self._set_applied(0, 0, 0)
+                self._idle_cleared = False
+                self._idle_since = None
+                with self._lock:
+                    self._status.update({
+                        "device": gated_state.get("bdf") or self._status.get("device"),
+                        "runtime": "gated_off",
+                        "power_state": "OFF",
+                        "last_error": None,
+                    })
+                self._sync_status()
+                return
+
             with self._lock:
                 self._status.update({"supported": False, "device": None, "runtime": None})
             self._sync_status()
             return
 
+        if self._was_gated:
+            # GPU just re-enumerated after being power-gated off: reload config and
+            # drop retry/idle latches so the full OC/UV profile re-applies immediately.
+            self._was_gated = False
+            self._last_apply_fail = 0.0
+            self._idle_cleared = False
+            self._idle_since = None
+            self.load_desired_from_config()
+
+        try:
+            from . import dgpu_gate
+
+            if dgpu_gate.is_transition_in_progress():
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
         rstatus = runtime_status(bdf)
         pstate = power_state(bdf)
         asleep = (rstatus == "suspended") or (pstate in ("D3hot", "D3cold"))
+
+        if not asleep and rstatus == "active":
+            # Driver-wedged GPU (reset required): probing or applying here only
+            # hammers a dead device and rewrites last_error on every tick.
+            try:
+                from . import dgpu_gate
+
+                if dgpu_gate.is_gpu_wedged(bdf=bdf, vendor="nvidia", rstatus=rstatus):
+                    with self._lock:
+                        self._status.update({
+                            "runtime": "needs_reboot",
+                            "power_state": pstate,
+                            "last_error": "GPU requires reset — reboot to recover. Tuning paused.",
+                        })
+                    self._sync_status()
+                    return
+            except Exception:  # noqa: BLE001
+                pass
 
         # Probe only if awake or already cached; never wake a sleeping dGPU during tick().
         probed = probe_if_awake() if not asleep else (dict(_probe_cache) if _probe_cache else {})
         supp = bool(probed.get("supported")) if probed else None
 
         with self._lock:
-            self._status.update({
+            upd = {
                 "device": bdf,
                 "runtime": rstatus,
                 "power_state": pstate,
                 "supported": supp if supp is not None else self._status.get("supported"),
-            })
+            }
+            if probed and "mem_offset_api" in probed:
+                upd["mem_offset_api"] = bool(probed.get("mem_offset_api"))
+            self._status.update(upd)
 
         if asleep:
             if self._applied_offset or self._applied_max or self._applied_mem:
@@ -783,6 +859,10 @@ def human_status() -> str:
         return f"unsupported ({err})"
     if not st.get("runtime"):
         return "no dGPU"
+    if st.get("runtime") == "gated_off":
+        return "off (gated)"
+    if st.get("runtime") == "needs_reboot":
+        return "needs reboot (GPU wedged)"
     if st.get("runtime") == "suspended":
         return "asleep (cleared)"
     if not st.get("enabled"):
@@ -842,6 +922,12 @@ def run_watcher() -> None:
     watcher.write_state()
     last_mtime = _mtime()
     while not stopping["flag"]:
+        try:
+            from . import dgpu_gate
+
+            dgpu_gate.watcher_tick()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("dGPU gate watcher tick failed: %s", exc)
         try:
             m = _mtime()
             if m != last_mtime:

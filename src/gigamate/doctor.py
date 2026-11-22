@@ -303,6 +303,26 @@ def run_doctor() -> int:
     print(f"  {status.hint}")
     print()
 
+    try:
+        from . import dgpu_gate
+
+        gst = dgpu_gate.get_status(check_helper=False)
+        if gst.get("bdf") or gst.get("gated"):
+            print("dGPU Power Gate")
+            print(f"  mode         {gst['mode']}")
+            print(f"  state        {'Off (gated)' if gst['gated'] else (gst.get('runtime_status') or 'present')}")
+            print(f"  eval backend {gst['eval_backend']}")
+            print(f"  helper       {'installed' if gst['helper_installed'] else 'missing (/usr/lib/gigamate/gigamate-dgpu-gate)'}")
+            print(f"  ac udev rule {'present' if Path('/etc/udev/rules.d/99-gigamate-dgpu-ac.rules').exists() else 'missing'}")
+            gcfg = gst.get("gate_config")
+            if gcfg:
+                print(f"  gate target  {gcfg['path']}.{gcfg['method']} ({gcfg.get('confidence', 'experimental')})")
+            else:
+                print("  gate target  none (run 'gigamate calibrate acpi')")
+            print()
+    except Exception:
+        pass
+
     if failed_node is not None:
         print("Keyboard access failed:")
         for line in permission_lines(failed_node):

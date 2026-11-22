@@ -116,6 +116,31 @@ if [ -f /etc/udev/rules.d/99-gigamate-smartshift.rules ]; then
     info "Removed SmartShift udev rule."
 fi
 
+if [ -f /etc/udev/rules.d/99-gigamate-dgpu-ac.rules ]; then
+    sudo rm -f /etc/udev/rules.d/99-gigamate-dgpu-ac.rules
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    info "Removed dGPU AC event udev rule."
+fi
+
+# --- Remove dGPU power-gate helper + polkit policy ---
+if [ -f /run/gigamate-dgpu-gate.json ] && grep -q '"gated": *true' /run/gigamate-dgpu-gate.json 2>/dev/null; then
+    warn "dGPU appears currently gated off — switch to Optimus ('gigamate gpu power optimus') or reboot after uninstall."
+fi
+if [ -x /usr/lib/gigamate/gigamate-dgpu-gate ]; then
+    info "Removing dGPU power-gate helper (needs sudo)..."
+    sudo rm -f /usr/lib/gigamate/gigamate-dgpu-gate
+    sudo rmdir /usr/lib/gigamate 2>/dev/null || true
+    info "dGPU power-gate helper removed."
+fi
+if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu-gate.rules ]; then
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-dgpu-gate.rules
+    info "dGPU power-gate polkit rule removed."
+fi
+if [ -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy
+    info "dGPU power-gate polkit action removed."
+fi
+
 # --- Remove polkit rule ---
 if [ -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules ]; then
     info "Removing polkit rule (needs sudo)..."

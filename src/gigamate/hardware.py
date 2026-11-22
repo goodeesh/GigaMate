@@ -190,6 +190,16 @@ def _apply_hardware_settings_locked(
             logger.warning(f"Hardware sync failed for keyboard lighting: {exc}")
 
     # ─────────────────────────────────────────────────────────────
+    # 3b. Discrete GPU Power Gate (ECO / Auto)
+    # ─────────────────────────────────────────────────────────────
+    try:
+        from . import dgpu_gate
+
+        dgpu_gate.sync_policy(reason="hardware_sync")
+    except Exception as exc:
+        logger.warning(f"Hardware sync failed for dGPU power gate: {exc}")
+
+    # ─────────────────────────────────────────────────────────────
     # 4. Discrete GPU tuning (sleep-aware; applies only if awake)
     # ─────────────────────────────────────────────────────────────
     try:

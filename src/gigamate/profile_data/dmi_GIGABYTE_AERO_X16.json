@@ -1,6 +1,6 @@
 {
   "name": "Gigabyte AERO X16 (family)",
-  "version": 3,
+  "version": 4,
   "dmi": {
     "product_name_prefixes": ["GIGABYTE AERO X16"]
   },
@@ -24,6 +24,12 @@
       "2": {"name": "Performance", "desc": "High performance, more fan noise"},
       "3": {"name": "Gaming", "desc": "Maximum GPU power"}
     },
-    "backend": "module"
+    "backend": "module",
+    "dgpu_gate": {
+      "path": "\\_SB.PCI0.GPP9.PG00",
+      "method": "_OFF",
+      "quirks": ["remove_before_off"],
+      "confidence": "experimental"
+    }
   }
 }

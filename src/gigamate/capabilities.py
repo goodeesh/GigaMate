@@ -78,6 +78,7 @@ class HardwareCapabilities:
     # GPU
     has_dgpu: bool
     gpu_name: str
+    dgpu_gate_supported: bool = False
 
 
 def detect_system_capabilities(refresh: bool = False) -> HardwareCapabilities:
@@ -169,6 +170,12 @@ def _probe_system_capabilities() -> HardwareCapabilities:
     has_dgpu = gpu_state.present
     gpu_vendor = (gpu_state.vendor or "Discrete").upper()
     gpu_name = f"{gpu_vendor} GPU" if has_dgpu else "Integrated Only"
+    try:
+        from . import dgpu_gate
+
+        dgpu_gate_supported = bool(dgpu_gate.is_supported())
+    except Exception:  # noqa: BLE001
+        dgpu_gate_supported = False
 
     return HardwareCapabilities(
         product_name=product_name,
@@ -192,4 +199,5 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         keyboard_vid_pid=detected_kbd,
         has_dgpu=has_dgpu,
         gpu_name=gpu_name,
+        dgpu_gate_supported=dgpu_gate_supported,
     )

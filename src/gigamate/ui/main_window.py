@@ -30,7 +30,7 @@ from .pages.dashboard_page import DashboardPage
 from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
-from .styles import DARK_THEME
+from .styles import apply_theme
 from ..capabilities import detect_system_capabilities, invalidate_capabilities
 from ..config import CONFIG_FILE, load as load_config
 from ..paths import ICON_PATHS, get_runtime_ipc_paths
@@ -516,7 +516,7 @@ def run_gui() -> None:
     app.setApplicationDisplayName("GigaMate Center")
     app.setDesktopFileName("gigamate-center.desktop")
 
-    app.setStyleSheet(DARK_THEME)
+    apply_theme(app)
     window = MainWindow()
     server = SingleInstanceServer(window, IPC_SOCKET_PATH, app)
     window._ipc_server = server  # Prevent GC

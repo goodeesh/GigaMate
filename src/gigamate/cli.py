@@ -8,6 +8,7 @@ Usage:
     gigamate rgb calibrate                     Interactive RGB calibration
     gigamate status                            Show hardware status
     gigamate gpu status                        Show discrete GPU power state
+    gigamate gpu power <mode|off|on|probe>     dGPU power gate (Optimus / ECO / Auto)
     gigamate gpu memoffset 300               Memory-clock V/F offset (MHz; + = overclock)
     gigamate profile [name]                    Show/set power profile
     gigamate profile contribute                Pull Request instructions
@@ -398,6 +399,15 @@ def cmd_status(args) -> None:
     if gpu.present:
         print("  ── Discrete GPU ──")
         print(f"     dGPU state:   {gpu_status_text(gpu)}")
+        try:
+            from . import dgpu_gate
+
+            gst = dgpu_gate.get_status(check_helper=False)
+            if gst.get("supported") or gst.get("gated"):
+                pending = " (pending off)" if gst.get("pending_off") else ""
+                print(f"     Power gate:   {gst['mode']}{pending}")
+        except Exception:
+            pass
         if gpu.dynamic_boost_supported:
             boost_state = "Active" if gpu.dynamic_boost_active else "Inactive"
             print(f"     Dynamic Boost: {boost_state}")
@@ -424,6 +434,15 @@ def cmd_gpu_status(args) -> None:
     print(f"  dGPU state:   {gpu_status_text(gpu)}")
     print(f"  Runtime PM:   {gpu.status or 'unknown'}")
     print(f"  Power state:  {gpu.power_state or 'unknown'}")
+    try:
+        from . import dgpu_gate
+
+        gst = dgpu_gate.get_status(check_helper=False)
+        if gst.get("supported") or gst.get("gated"):
+            pending = " (pending off)" if gst.get("pending_off") else ""
+            print(f"  Power gate:   {gst['mode']}{pending}")
+    except Exception:
+        pass
     if gpu.dynamic_boost_supported:
         if gpu.dynamic_boost_active:
             print("  Dynamic Boost: Active (nvidia-powerd)")
@@ -659,6 +678,194 @@ def cmd_gpu_auto(args) -> None:
         return
 
     print("Invalid value: use 'on', 'off', or 'status'")
+    sys.exit(2)
+
+
+def cmd_gpu_power(args) -> None:
+    """Manage true ACPI + PCI discrete GPU power gating (AI Power Gear III)."""
+    from . import dgpu_gate
+
+    action = (getattr(args, "action", None) or "status").lower()
+
+    if action == "confirm-dialog":
+        from .ui.dgpu_gate_dialog import main as dialog_main
+
+        d_args = [
+            "--trigger",
+            str(getattr(args, "trigger", "eco") or "eco"),
+            "--target-mode",
+            str(getattr(args, "target_mode", "eco") or "eco"),
+        ]
+        if getattr(args, "prev_mode", None):
+            d_args.extend(["--prev-mode", str(args.prev_mode)])
+        sys.exit(dialog_main(d_args))
+
+    if action == "status":
+        st = dgpu_gate.get_status(check_helper=True)
+        gpu = get_gpu_state()
+        print("GigaMate — dGPU Power Gate")
+        print()
+        print(f"  Supported:    {'yes' if st['supported'] else 'no'}")
+        if not st["supported"] and st.get("unsupported_reason"):
+            print(f"  Reason:       {dgpu_gate.availability_message(st.get('unsupported_reason'))}")
+        print(f"  Mode:         {st['mode']}")
+        print(f"  Power source: {'AC' if st['ac_online'] else 'Battery'}")
+        print(f"  dGPU state:   {gpu_status_text(gpu)}")
+        if st.get("wedged"):
+            print("  Wedged:       GPU requires reset — reboot to recover (power gating paused)")
+        if st.get("bdf"):
+            print(f"  PCI device:   {st['bdf']} (bridge: {st.get('bridge_bdf') or '-'})")
+        if st.get("acpi_path"):
+            print(f"  ACPI node:    {st['acpi_path']}")
+        print(f"  Eval backend: {st['eval_backend']}")
+        gcfg = st.get("gate_config")
+        if gcfg:
+            conf = gcfg.get("confidence", "experimental")
+            quirks = ", ".join(gcfg.get("quirks") or []) or "none"
+            print(f"  Gate method:  {gcfg['path']}.{gcfg['method']} ({conf}; quirks: {quirks})")
+            if st.get("acpi_sta") is not None:
+                print(f"  ACPI status:  {st['acpi_sta']}")
+        else:
+            print("  Gate method:  none configured (run 'gigamate gpu power probe' or 'gigamate calibrate acpi')")
+        if st.get("displays"):
+            print(f"  Attached:     {', '.join(st['displays'])} (blocks power-off)")
+        if st.get("pending_off"):
+            print(f"  Pending off:  yes ({st.get('last_error') or st.get('last_reason') or 'waiting'})")
+        elif st.get("last_error"):
+            print(f"  Last note:    {st['last_error']}")
+        print()
+        print("  Note: HDMI/DisplayPort outputs wired to the dGPU do not work while gated off.")
+        return
+
+    if action == "probe":
+        live = bool(getattr(args, "live_test", False))
+        res = dgpu_gate.probe_dgpu_gate(live_test=live)
+        topo = res["topology"]
+        print("GigaMate — dGPU Power Gate Probe")
+        print()
+        print(f"  Eval backend:    {res['eval_backend']}")
+        print(f"  PCI dGPU:        {topo.get('bdf') or 'not present'} (audio: {topo.get('audio_bdf') or '-'}, bridge: {topo.get('bridge_bdf') or '-'})")
+        print(f"  ACPI node:       {topo.get('acpi_path') or '-'}")
+        print(f"  PowerResources:  {', '.join(topo.get('power_resources') or []) or 'none'}")
+        print()
+        if res["candidates"]:
+            print("  Candidates:")
+            for c in res["candidates"]:
+                sta = c.get("sta_result") if c.get("sta_ok") else "unprobed/failed"
+                print(f"    - {c['path']}.{c['method']} (via {c['source']}, {c['sta_method']}={sta})")
+        else:
+            print("  No candidate power-gate ACPI paths discovered.")
+        if res["recommended"]:
+            import json as _json
+
+            print()
+            print("  Recommended schema v4 block (acpi.dgpu_gate):")
+            print("  " + _json.dumps(res["recommended"], indent=2).replace("\n", "\n  "))
+        if live:
+            lt = res.get("live_test") or {}
+            print()
+            if lt.get("ok"):
+                print("  Live off -> on -> rescan test: PASSED")
+            else:
+                print(f"  Live off -> on -> rescan test: FAILED ({lt.get('error')})")
+                sys.exit(1)
+        return
+
+    if action == "off":
+        supported, unsup_reason = dgpu_gate.get_availability()
+        if not supported:
+            print(dgpu_gate.availability_message(unsup_reason), file=sys.stderr)
+            sys.exit(1)
+        force_close = bool(getattr(args, "force_close", False))
+        if force_close:
+            closable = dgpu_gate.closable_gpu_holders()
+            if closable:
+                print("Closing apps/services holding dGPU:")
+                for h in closable:
+                    print(f"  - {h.label}")
+            res = dgpu_gate.force_close_and_gate_off()
+        else:
+            res = dgpu_gate.gate_off()
+        if res.get("ok"):
+            if res.get("already_gated"):
+                print("dGPU is already gated off.")
+            else:
+                print("dGPU gated off (power rail cut). HDMI/DP ports wired to the dGPU are inactive until restored.")
+            return
+        print(f"Could not gate off dGPU: {res.get('error')}", file=sys.stderr)
+        if res.get("reboot_recommended"):
+            print("Reboot the laptop to recover the GPU.", file=sys.stderr)
+        if not force_close and res.get("reason") == "gpu_active":
+            print("Tip: re-run with --force-close to close user apps holding the dGPU and power off immediately.", file=sys.stderr)
+        sys.exit(1)
+
+    if action == "on":
+        res = dgpu_gate.gate_on()
+        if res.get("ok"):
+            switched = f" Switched mode to {res['switched_mode']}." if res.get("switched_mode") else ""
+            if res.get("already_on"):
+                print(f"dGPU is already active on PCI ({res.get('bdf')}).{switched}")
+            else:
+                print(
+                    f"dGPU restored ({res.get('bdf')}, driver={res.get('driver') or 'binding'}, "
+                    f"runtime={res.get('runtime_status') or 'unknown'}).{switched}"
+                )
+            return
+        print(f"Could not restore dGPU: {res.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    if action in ("optimus", "eco", "auto"):
+        if action in ("eco", "auto"):
+            supported, unsup_reason = dgpu_gate.get_availability()
+            if not supported:
+                print(dgpu_gate.availability_message(unsup_reason), file=sys.stderr)
+                sys.exit(1)
+        force_close = bool(getattr(args, "force_close", False))
+        try:
+            if force_close and action in ("eco", "auto"):
+                closable = dgpu_gate.closable_gpu_holders()
+                if closable:
+                    print("Closing apps/services holding dGPU:")
+                    for h in closable:
+                        print(f"  - {h.label}")
+                res = dgpu_gate.force_close_and_gate_off(mode=action)
+            else:
+                res = dgpu_gate.set_mode(action)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
+        if res.get("ok"):
+            state_desc = "Off (gated)" if res.get("gated") else "Active / Runtime PM"
+            print(f"dGPU power mode set to: {action} (state: {state_desc})")
+            return
+        if res.get("reason") == "gpu_active":
+            print(f"dGPU power mode saved: {action}")
+            print(f"  Pending: {res.get('error')}")
+            print("  GigaMate will gate off the dGPU automatically once it suspends.")
+            if not force_close:
+                print("  Tip: re-run with --force-close to close user apps holding the dGPU immediately.")
+            return
+        if res.get("reason") == "boot_settle":
+            print(f"dGPU power mode saved: {action}")
+            print(f"  {res.get('error')}")
+            return
+        print(f"Mode saved ({action}), but action failed: {res.get('error')}", file=sys.stderr)
+        if res.get("reboot_recommended"):
+            print("Reboot the laptop to recover the GPU.", file=sys.stderr)
+        sys.exit(1)
+
+    if action == "sync":
+        res = dgpu_gate.sync_policy(reason="cli_sync")
+        if res.get("ok"):
+            print(f"dGPU power gate synced (mode={res.get('mode')}, action={res.get('action')})")
+            return
+        if res.get("reason") == "gpu_active":
+            print(f"Sync pending (mode={res.get('mode')}): {res.get('error')}")
+            return
+        print(f"Sync failed: {res.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    print("Unknown action; use: status, off, on, eco, auto, optimus, probe, sync", file=sys.stderr)
     sys.exit(2)
 
 
@@ -907,6 +1114,25 @@ def cmd_profile_report(args) -> None:
         print(f"  Profiles:           {names or '-'}")
     print(f"  Experimental opt-in: {bool(cfg.get('experimental_profiles_enabled', False))}")
     print(f"  Selected profile:    {cfg.get('acpi_profile')}")
+    try:
+        from . import dgpu_gate
+
+        gst = dgpu_gate.get_status(check_helper=False)
+        gcfg = gst.get("gate_config")
+        if gcfg:
+            print(
+                f"  dGPU power gate:     {gcfg['path']}.{gcfg['method']} "
+                f"({gcfg.get('confidence', 'experimental')}; quirks={gcfg.get('quirks') or []})"
+            )
+        else:
+            print("  dGPU power gate:     none")
+        print(
+            f"  dGPU gate runtime:   mode={gst['mode']} gated={gst['gated']} "
+            f"eval={gst['eval_backend']} bdf={gst.get('bdf') or '-'} "
+            f"acpi_node={gst.get('acpi_path') or '-'}"
+        )
+    except Exception:
+        pass
     if caps is not None and ctrl.available:
         try:
             state = ctrl.read_state()
@@ -1363,6 +1589,26 @@ def cmd_calibrate_acpi(args) -> None:
     else:
         confidence = "experimental"
 
+    dgpu_gate_cfg = existing_acpi.dgpu_gate if existing_acpi is not None else None
+    try:
+        from . import dgpu_gate
+        from .profiles import DgpuGateConfig
+
+        probe_res = dgpu_gate.probe_dgpu_gate(live_test=False)
+        rec = probe_res.get("recommended")
+        if probe_res.get("supported") and rec is not None:
+            print()
+            print("Discrete GPU Power Gate discovery:")
+            print(f"  Candidate: {rec['path']}.{rec['method']} (quirks: {rec.get('quirks') or []})")
+            print("  ⚠️  This configuration is experimental. HDMI/DP ports wired to the dGPU")
+            print("     do not work while the dGPU is gated off.")
+            ans_gate = input("Include experimental dGPU power-gate config in this profile? [y/N] ").strip().lower()
+            if ans_gate in ("y", "yes"):
+                dgpu_gate_cfg = DgpuGateConfig.from_dict(rec)
+                profile.version = max(profile.version, 4)
+    except (EOFError, Exception):
+        pass
+
     profile.acpi = AcpiConfig(
         has_fan_control=caps.has_fan_rpm or caps.has_fan_duty,
         has_temperature=caps.has_temperature,
@@ -1373,6 +1619,7 @@ def cmd_calibrate_acpi(args) -> None:
         profiles=profiles_map,
         backend=caps.backend,
         confidence=confidence,
+        dgpu_gate=dgpu_gate_cfg,
     )
 
     path = save_user_profile(profile)
@@ -1937,6 +2184,27 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     gpu_auto_parser = gpu_sub.add_parser("auto", help="Auto-apply dGPU tuning on boot/wake")
     gpu_auto_parser.add_argument("value", nargs="?", default="status",
                                  help="'on', 'off', or 'status' (default)")
+    gpu_power_parser = gpu_sub.add_parser(
+        "power", help="Discrete GPU power gate (Optimus / ECO / Auto / manual off & on)")
+    gpu_power_parser.add_argument(
+        "action", nargs="?", default="status",
+        choices=["status", "off", "on", "eco", "auto", "optimus", "probe", "sync", "confirm-dialog"],
+        help="Power-gate action or mode (default: status)")
+    gpu_power_parser.add_argument(
+        "--live-test", action="store_true",
+        help="With 'probe', run a live off -> on -> rescan test (idle GPU, no displays)")
+    gpu_power_parser.add_argument(
+        "--force-close", action="store_true",
+        help="With 'off', 'eco', or 'auto', close user apps/services holding the dGPU and wait briefly for suspend before gating off")
+    gpu_power_parser.add_argument(
+        "--trigger", default="eco", choices=["eco", "auto", "auto_ac_unplug"],
+        help="With 'confirm-dialog', origin trigger label")
+    gpu_power_parser.add_argument(
+        "--target-mode", default="eco", choices=["eco", "auto"],
+        help="With 'confirm-dialog', requested target power mode")
+    gpu_power_parser.add_argument(
+        "--prev-mode", default=None,
+        help="With 'confirm-dialog', previous mode before prompt")
 
     # --- hotkeys subcommand ---
     hotkeys_parser = sub.add_parser("hotkeys", help="Hardware hotkey mappings and capture")
@@ -2022,9 +2290,11 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
             cmd_gpu_memoffset(args)
         elif args.gpu_action == "auto":
             cmd_gpu_auto(args)
+        elif args.gpu_action == "power":
+            cmd_gpu_power(args)
         else:
-            print("GPU actions: status, undervolt, maxclock, memoffset, auto")
-            print("Examples: gigamate gpu status | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100 | gigamate gpu memoffset 300")
+            print("GPU actions: status, power, undervolt, maxclock, memoffset, auto")
+            print("Examples: gigamate gpu status | gigamate gpu power eco | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100")
             sys.exit(1)
     elif args.command == "hotkeys":
         _dispatch_hotkeys(args)

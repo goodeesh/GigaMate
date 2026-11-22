@@ -72,6 +72,8 @@ DEFAULT_CONFIG = {
     # memory clock, negative underclocks it. Applied only while the dGPU is awake.
     "dgpu_mem_offset_enabled": False,
     "dgpu_mem_offset_mhz": 0,
+    # Discrete GPU power-gate policy ("optimus" | "eco" | "auto").
+    "dgpu_power_mode": "optimus",
     "sync_system_power": False,
     # Opt-in consent for experimental (community-evidenced, unconfirmed) model
     # profiles. Unconsented experimental profiles are shown but disabled.
@@ -271,6 +273,8 @@ def load():
             data["dgpu_mem_offset_enabled"] = bool(data["dgpu_mem_offset_enabled"])
         if "dgpu_mem_offset_mhz" in data:
             data["dgpu_mem_offset_mhz"] = _coerce_dgpu_mem_offset(data["dgpu_mem_offset_mhz"])
+        if "dgpu_power_mode" in data:
+            data["dgpu_power_mode"] = _coerce_dgpu_power_mode(data["dgpu_power_mode"])
         if "acpi_profile" in data:
             try:
                 prof = int(data["acpi_profile"])
@@ -359,6 +363,15 @@ def _coerce_dgpu_mem_offset(value) -> int:
     except (ValueError, TypeError):
         return DEFAULT_CONFIG["dgpu_mem_offset_mhz"]
     return v if -1000 <= v <= 2000 else DEFAULT_CONFIG["dgpu_mem_offset_mhz"]
+
+
+def _coerce_dgpu_power_mode(value) -> str:
+    """Return a valid dGPU power-gate mode ('optimus', 'eco', 'auto'), else default."""
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("optimus", "eco", "auto"):
+            return v
+    return DEFAULT_CONFIG["dgpu_power_mode"]
 
 
 def _open_config_lock():
@@ -460,6 +473,8 @@ def _write_config(config):
         "dgpu_mem_offset_enabled": bool(config.get("dgpu_mem_offset_enabled", DEFAULT_CONFIG["dgpu_mem_offset_enabled"])),
         "dgpu_mem_offset_mhz": _coerce_dgpu_mem_offset(
             config.get("dgpu_mem_offset_mhz", DEFAULT_CONFIG["dgpu_mem_offset_mhz"])),
+        "dgpu_power_mode": _coerce_dgpu_power_mode(
+            config.get("dgpu_power_mode", DEFAULT_CONFIG["dgpu_power_mode"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "experimental_profiles_enabled": bool(config.get(
             "experimental_profiles_enabled", DEFAULT_CONFIG["experimental_profiles_enabled"])),

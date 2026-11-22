@@ -422,8 +422,8 @@ build_kernel_module() {
         for kver in $ordered_kernels; do
             [ -d "/lib/modules/$kver/build" ] || continue
             info "Building gigamate_acpi for kernel $kver..."
-            if sudo dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null ||
-               sudo env CC=clang LLVM=1 dkms build -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null; then
+            if sudo dkms build --force -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null ||
+               sudo env CC=clang LLVM=1 dkms build --force -m gigamate_acpi -v "$mod_version" -k "$kver" 2>/dev/null; then
                 info "DKMS build succeeded for $kver"
                 if sudo dkms install -m gigamate_acpi -v "$mod_version" -k "$kver" --force 2>/dev/null; then
                     info "DKMS install succeeded for $kver"
@@ -711,10 +711,14 @@ configure_gpu_power() {
     local ss_src="$script_dir/data/99-gigamate-smartshift.rules"
     local ss_dst="/etc/udev/rules.d/99-gigamate-smartshift.rules"
     if [ -f "$ss_src" ]; then
-        sudo cp "$ss_src" "$ss_dst" 2>/dev/null || true
-        sudo udevadm control --reload-rules 2>/dev/null || true
-        sudo udevadm trigger --subsystem-match=pci 2>/dev/null || true
-        info "Installed SmartShift udev rule: $ss_dst"
+        if [ -f "$ss_dst" ] && cmp -s "$ss_src" "$ss_dst"; then
+            info "SmartShift udev rule up to date: $ss_dst"
+        else
+            sudo cp "$ss_src" "$ss_dst" 2>/dev/null || true
+            sudo udevadm control --reload-rules 2>/dev/null || true
+            sudo udevadm trigger --subsystem-match=pci 2>/dev/null || true
+            info "Installed SmartShift udev rule: $ss_dst"
+        fi
     fi
 
     # Install polkit rule for nvidia-powerd if polkit rules dir exists
@@ -754,9 +758,11 @@ install_dgpu_helper() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    # Only on machines with a discrete NVIDIA GPU.
+    # Only on machines with a discrete NVIDIA GPU (including while gated off).
     local has_nvidia=false
-    if [ -d /sys/bus/pci/devices ]; then
+    if [ -f /run/gigamate-dgpu-gate.json ]; then
+        has_nvidia=true
+    elif [ -d /sys/bus/pci/devices ]; then
         for v in /sys/bus/pci/devices/*/vendor; do
             if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
                 has_nvidia=true
@@ -792,6 +798,73 @@ install_dgpu_helper() {
     if [ -d "$rule_dir" ] && [ -f "$rule_src" ]; then
         sudo install -m 644 -o root -g root "$rule_src" "$rule_dir/50-gigamate-dgpu.rules"
         info "Installed polkit rule: $rule_dir/50-gigamate-dgpu.rules"
+    fi
+}
+
+# --- Install privileged dGPU power-gate helper, polkit policy & AC udev rule ---
+install_dgpu_gate_helper() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    local has_dgpu=false
+    if [ -f /run/gigamate-dgpu-gate.json ]; then
+        has_dgpu=true
+    elif [ -d /sys/bus/pci/devices ]; then
+        for d in /sys/bus/pci/devices/*; do
+            [ -f "$d/vendor" ] && [ -f "$d/class" ] || continue
+            local v c
+            v="$(tr '[:upper:]' '[:lower:]' < "$d/vendor" 2>/dev/null || true)"
+            c="$(tr '[:upper:]' '[:lower:]' < "$d/class" 2>/dev/null || true)"
+            if [ "$v" = "0x10de" ] && [[ "$c" == 0x0300* || "$c" == 0x0302* ]]; then
+                has_dgpu=true
+                break
+            fi
+            if [ "$v" = "0x1002" ] && [[ "$c" == 0x0302* ]] && [ ! -d "$d/uma" ]; then
+                has_dgpu=true
+                break
+            fi
+        done
+    fi
+    if [ "$has_dgpu" != true ]; then
+        info "No discrete GPU detected; skipping dGPU power-gate helper."
+        return
+    fi
+
+    header "Installing dGPU power-gate helper"
+
+    local helper_src="$script_dir/data/gigamate-dgpu-gate"
+    local helper_dir="/usr/lib/gigamate"
+    local helper_dst="$helper_dir/gigamate-dgpu-gate"
+    if [ -f "$helper_src" ]; then
+        sudo install -d -m 755 "$helper_dir"
+        sudo install -m 755 -o root -g root "$helper_src" "$helper_dst"
+        info "Installed helper: $helper_dst"
+    fi
+
+    local action_src="$script_dir/data/org.gigamate.dgpu-gate.policy"
+    local action_dir="/usr/share/polkit-1/actions"
+    if [ -d "$action_dir" ] && [ -f "$action_src" ]; then
+        sudo install -m 644 -o root -g root "$action_src" "$action_dir/org.gigamate.dgpu-gate.policy"
+        info "Installed polkit action: $action_dir/org.gigamate.dgpu-gate.policy"
+    fi
+
+    local rule_src="$script_dir/data/50-gigamate-dgpu-gate.rules"
+    local rule_dir="/etc/polkit-1/rules.d"
+    if [ -d "$rule_dir" ] && [ -f "$rule_src" ]; then
+        sudo install -m 644 -o root -g root "$rule_src" "$rule_dir/50-gigamate-dgpu-gate.rules"
+        info "Installed polkit rule: $rule_dir/50-gigamate-dgpu-gate.rules"
+    fi
+
+    local ac_src="$script_dir/data/99-gigamate-dgpu-ac.rules"
+    local ac_dst="/etc/udev/rules.d/99-gigamate-dgpu-ac.rules"
+    if [ -f "$ac_src" ]; then
+        if [ -f "$ac_dst" ] && cmp -s "$ac_src" "$ac_dst"; then
+            info "dGPU AC event udev rule up to date: $ac_dst"
+        else
+            sudo install -m 644 -o root -g root "$ac_src" "$ac_dst"
+            sudo udevadm control --reload-rules 2>/dev/null || true
+            info "Installed dGPU AC event udev rule: $ac_dst"
+        fi
     fi
 }
 
@@ -868,9 +941,11 @@ install_dgpu_service() {
     local svc_src="$script_dir/data/gigamate-dgpu.service"
     local svc_dst="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gigamate-dgpu.service"
 
-    # Only meaningful with a discrete NVIDIA GPU.
+    # Only meaningful with a discrete NVIDIA GPU (including while gated off).
     local has_nvidia=false
-    if [ -d /sys/bus/pci/devices ]; then
+    if [ -f /run/gigamate-dgpu-gate.json ]; then
+        has_nvidia=true
+    elif [ -d /sys/bus/pci/devices ]; then
         for v in /sys/bus/pci/devices/*/vendor; do
             if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
                 has_nvidia=true
@@ -1038,6 +1113,7 @@ main() {
     verify_udev_access
     configure_gpu_power
     install_dgpu_helper
+    install_dgpu_gate_helper
     install_repair_helper
     # Migrate the old config/profiles *before* starting the tray: the tray
     # creates ~/.config/gigamate on launch, which would otherwise make

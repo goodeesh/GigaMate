@@ -19,6 +19,13 @@ Known risks:
 - Certain animated keyboard effects can hang the keyboard firmware
   (requires USB reset to recover). Only `static` mode is safe.
 - ACPI profile switching adjusts CPU/GPU power limits.
+- **dGPU Power Gate (`AI Power Gear III`)**: cutting the dGPU power rail and
+  removing its PCI devices via ACPI (`_OFF`/`_ON` or `_PS3`/`_PS0`) is
+  firmware-level control (ships Experimental per model) and **disables
+  HDMI/DisplayPort outputs wired directly to the dGPU** until powered back on.
+  GigaMate checks for connected dGPU displays and active GPU sessions before
+  gating off; if firmware fails to re-enumerate the card on wake, a reboot
+  restores normal PCI enumeration.
 - To allow control without root, the kernel module exposes `profile` and
   `charge_limit` as world-writable (`0666`). Any local user on the machine can
   therefore change these settings. The keyboard is handled differently: the
@@ -51,6 +58,7 @@ After install, the tray app auto-starts on login. Launch manually with `gigamate
 - **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
 - **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
 - **🧊 Discrete GPU Undervolt & Clock Control (NVIDIA)** — A V/F-curve offset ("undervolt"), an optional boost-clock cap, and an optional signed **memory-clock offset** (overclock/underclock) for the dGPU. All three are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center (one **Apply** commits all three) or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
+- **🔌 dGPU Power Gate (AI Power Gear III, Experimental)** — True dGPU power-rail gating via ACPI (`_OFF`/`_ON` or `_PS3`/`_PS0`) plus PCI de-enumeration/rescan, matching GiMATE's **Optimus** (kernel runtime PM), **ECO** (gated off until switched back), and **Auto** (gated off on battery, restored on AC via udev events) modes. Cuts dGPU draw to ~0 W where runtime D3cold alone can wake on polls, displays `Off (gated)` status in tray/Center/CLI, pauses NVML tuning while gated off, and reconciles on resume from suspend. *Note: HDMI/DP ports wired to the dGPU do not work while gated off (blocked automatically if a display is connected).*
 - **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
 - **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
 - **🧪 Experimental Model Support** — Community-evidenced Gigabyte models (GIGABYTE GAMING A16/A18 family, AERO X16 family) get profile controls as *Experimental*: shown but disabled until you explicitly enable them once, since they're unconfirmed on your exact unit. One report from a real device promotes a model to Confirmed. See [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
@@ -72,8 +80,9 @@ gigamate center       # or click "GigaMate Center..." in the tray menu
 The tray icon provides instant status and quick actions:
 ```
 GigaMate Center...
-Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep  |  Batt: 85% (AC)
+Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep (or Off (gated))  |  Batt: 85% (AC)
 Power Profile → Quiet / Balanced / Performance / Gaming
+dGPU Power → Optimus / ECO / Auto
 Keyboard → Colour (Red … Blush Pink) / Brightness / Backlight idle off: 10 seconds
 Battery: 85% (AC) → [x] Battery Care (Cap at 80%) / Charge to 100% Once
 Settings → Sync system power profile / Apply on startup / Reload profiles /
@@ -95,7 +104,9 @@ gigamate rgb static <colour>     # Set keyboard colour
 gigamate rgb off                 # Turn backlight off
 gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
 gigamate status                  # Full hardware status
-gigamate gpu status              # Show discrete GPU power state (awake/asleep)
+gigamate gpu status              # Show discrete GPU power state (awake/asleep/off (gated))
+gigamate gpu power status        # Inspect dGPU power-gate mode, ACPI path, and guards
+gigamate gpu power <optimus|eco|auto|off|on|probe>  # Switch mode, gate dGPU, or probe ACPI path
 gigamate gpu undervolt 100       # Undervolt the NVIDIA dGPU (V/F offset, MHz; 0-255)
 gigamate gpu undervolt off       # Reset the dGPU to stock
 gigamate gpu undervolt status    # Show dGPU undervolt state
@@ -280,6 +291,15 @@ selector only offers the values the driver enumerates.
 
 Each laptop model is described by a JSON profile defining its RGB colour map
 and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
+
+For dGPU Power Gate (`AI Power Gear III`), `gigamate_acpi` additionally exposes
+`dgpu_acpi_path` (read-only `0444`) and root-only `acpi_eval` (`0644`, guarded
+by `CAP_SYS_ADMIN`), falling back to `/proc/acpi/call` when unloaded. Power-gate
+transitions run through `/usr/lib/gigamate/gigamate-dgpu-gate` via `pkexec`
+(polkit rules for `wheel`/`sudo`), enforcing runtime-PM and connected-display
+guards, coordinating PCI device removal/rescan and `nvidia-powerd`, publishing
+state to `/run/gigamate-dgpu-gate.json`, and reacting to AC plug/unplug events
+from `99-gigamate-dgpu-ac.rules`.
 
 For details on the USB RGB protocol and ACPI reverse engineering, see
 [docs/RGB_PROTOCOL.md](docs/RGB_PROTOCOL.md) and [docs/research.md](docs/research.md).

@@ -1,4 +1,4 @@
-# GigaMate Device Profile Schema v2
+# GigaMate Device Profile Schema v4
 
 > Each Gigabyte laptop model is described by a single JSON profile that
 > defines its keyboard RGB and ACPI capabilities. Profiles live in
@@ -42,7 +42,7 @@ dmi_gigabyte_gaming_a16_cmh.json
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "name": "Full Model Name",
   "vid": "0x0414",
   "pid": "0x8105",
@@ -64,7 +64,7 @@ keyboard (e.g. GIGABYTE GAMING A16) and are named `dmi_<slug>.json`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `version` | int | optional (default 1) | Schema version. v3 adds DMI keys and `acpi.confidence`. |
+| `version` | int | optional (default 1) | Schema version. v3 adds DMI keys and `acpi.confidence`; v4 adds `acpi.dgpu_gate`. |
 | `name` | string | yes | Human-readable model name, e.g. `"Gigabyte Aero X16 (EG61VH)"` |
 | `vid` | string | see note | USB Vendor ID as hex string, e.g. `"0x0414"` |
 | `pid` | string | see note | USB Product ID as hex string, e.g. `"0x8105"` |
@@ -203,6 +203,20 @@ via its AMW0 WMI device.
 | `profiles` | object | `{}` | Available power profiles (see below) |
 | `backend` | string | `"module"` | Preferred ACPI backend: `"module"` or `"acpi_call"` |
 | `confidence` | string | `"verified"` | `"verified"` (confirmed on real hardware) or `"experimental"` (community-evidenced, opt-in; requires `has_power_profiles` + `profiles`) |
+| `dgpu_gate` | object | `null` | Optional v4 section defining dGPU ACPI power-gate control (see below) |
+
+### dgpu_gate sub-fields (v4)
+
+Used by GigaMate's dGPU Power Gate (`AI Power Gear III`) to cut and restore the dGPU power rail via ACPI + PCI device removal/rescan. Populated or verified via `gigamate calibrate acpi` / `gigamate gpu power probe`, and reported by `gigamate profile report`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `path` | string | required | ACPI object or `PowerResource` path for the dGPU bridge/gate (e.g. `"\\_SB.PCI0.GPP9.PG00"` or `"\\_SB.PCI0.GPP9.PEGP"`) |
+| `method` | string | `"_OFF"` | ACPI method evaluated to cut the rail (`"_OFF"` or `"_PS3"`) |
+| `on_method` | string | `null` | Optional override method evaluated to restore power (e.g. `"_ON"` or `"_PS0"`) |
+| `sta_method` | string | `null` | Optional status method name (e.g. `"_STA"`) |
+| `quirks` | array[string] | `[]` | Firmware sequence quirks (e.g. `["remove_before_off"]` to remove PCI functions `.1`/`.0` before evaluating `method`) |
+| `confidence` | string | `"experimental"` | Gate-specific confidence (`"experimental"` or `"verified"`), validated independently of `acpi.confidence` |
 
 ### profiles sub-fields
 

@@ -1,0 +1,9 @@
+// GigaMate — allow wheel/sudo to power-gate the discrete GPU without password.
+// The privileged helper validates BDF/ACPI paths, checks display & idle guards,
+// and executes one ACPI/PCI power-gate operation before exiting.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.gigamate.dgpu-gate.control" &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});

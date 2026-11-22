@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -32,6 +33,61 @@ def _parse_hex_id(value) -> int:
         return 0
 
 
+_ACPI_PATH_RE = re.compile(r"^\\[A-Za-z0-9_.]+$")
+_VALID_GATE_METHODS = ("_OFF", "_PS3")
+_VALID_GATE_ON_METHODS = ("_ON", "_PS0")
+_VALID_GATE_STA_METHODS = ("_STA", "_PSC")
+
+
+@dataclass
+class DgpuGateConfig:
+    """ACPI power-gate configuration for a discrete GPU (schema v4)."""
+    path: str = ""
+    method: str = "_OFF"
+    quirks: List[str] = field(default_factory=list)
+    confidence: str = "experimental"
+    on_method: Optional[str] = None
+    sta_method: Optional[str] = None
+
+    @property
+    def effective_on_method(self) -> str:
+        if self.on_method:
+            return self.on_method
+        return "_PS0" if self.method == "_PS3" else "_ON"
+
+    @property
+    def effective_sta_method(self) -> str:
+        if self.sta_method:
+            return self.sta_method
+        return "_PSC" if self.method == "_PS3" else "_STA"
+
+    def to_dict(self) -> dict:
+        out: Dict[str, object] = {
+            "path": self.path,
+            "method": self.method,
+            "quirks": list(self.quirks),
+            "confidence": self.confidence,
+        }
+        if self.on_method:
+            out["on_method"] = self.on_method
+        if self.sta_method:
+            out["sta_method"] = self.sta_method
+        return out
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DgpuGateConfig":
+        raw_quirks = d.get("quirks", [])
+        quirks = list(raw_quirks) if isinstance(raw_quirks, list) else raw_quirks
+        return cls(
+            path=str(d.get("path", "")),
+            method=str(d.get("method", "_OFF")),
+            quirks=quirks,
+            confidence=str(d.get("confidence", "experimental")),
+            on_method=str(d["on_method"]) if d.get("on_method") is not None else None,
+            sta_method=str(d["sta_method"]) if d.get("sta_method") is not None else None,
+        )
+
+
 @dataclass
 class AcpiConfig:
     """ACPI capabilities for a specific laptop model.
@@ -50,6 +106,7 @@ class AcpiConfig:
     # "verified" (confirmed on real hardware) or "experimental" (community
     # evidence, unconfirmed — shown only after the user opts in).
     confidence: str = "verified"
+    dgpu_gate: Optional[DgpuGateConfig] = None
 
     @property
     def is_experimental(self) -> bool:
@@ -150,7 +207,7 @@ class DeviceProfile:
         if self.rgb_protocol != "vendor":
             result["rgb_protocol"] = self.rgb_protocol
         if self.acpi is not None:
-            result["acpi"] = {
+            acpi_dict = {
                 "has_fan_control": self.acpi.has_fan_control,
                 "has_temperature": self.acpi.has_temperature,
                 "has_power_profiles": self.acpi.has_power_profiles,
@@ -161,6 +218,9 @@ class DeviceProfile:
                 "backend": self.acpi.backend,
                 "confidence": self.acpi.confidence,
             }
+            if self.acpi.dgpu_gate is not None:
+                acpi_dict["dgpu_gate"] = self.acpi.dgpu_gate.to_dict()
+            result["acpi"] = acpi_dict
         if self.hotkeys:
             result["hotkeys"] = dict(self.hotkeys)
         return result
@@ -176,6 +236,12 @@ class DeviceProfile:
         acpi = None
         if "acpi" in d:
             a = d["acpi"]
+            raw_gate = a.get("dgpu_gate")
+            dgpu_gate = (
+                DgpuGateConfig.from_dict(raw_gate)
+                if isinstance(raw_gate, dict)
+                else None
+            )
             acpi = AcpiConfig(
                 has_fan_control=a.get("has_fan_control", False),
                 has_temperature=a.get("has_temperature", False),
@@ -186,6 +252,7 @@ class DeviceProfile:
                 profiles=dict(a.get("profiles", {})),
                 backend=str(a.get("backend", "module")),
                 confidence=str(a.get("confidence", "verified")),
+                dgpu_gate=dgpu_gate,
             )
 
         dmi = None
@@ -466,16 +533,9 @@ class ModelMatch:
         return self.profile.name.split("—")[0].strip()
 
 
-def resolve_model(vid: Optional[int] = None,
-                  pid: Optional[int] = None) -> Optional[ModelMatch]:
-    """Resolve the model profile that gates power-profile switching.
-
-    Precedence: user USB → built-in USB → user DMI → built-in DMI. The first
-    entry that *declares* a profile set wins for ACPI; a USB-keyed profile with
-    no declared ACPI never suppresses a later DMI profile's profiles. RGB
-    resolution is separate (``resolve_profile``). Returns None when no matching
-    profile declares profiles.
-    """
+def _resolve_model_candidates(vid: Optional[int] = None,
+                              pid: Optional[int] = None) -> List[Tuple[str, DeviceProfile]]:
+    """Gather matching profiles in resolution order: user USB -> built-in USB -> user DMI -> built-in DMI."""
     if vid is None or pid is None:
         detected = detect_device()
         if detected is not None:
@@ -496,11 +556,37 @@ def resolve_model(vid: Optional[int] = None,
         builtin_dmi = _best_dmi_profile(load_builtin_dmi_profiles())
         if builtin_dmi is not None:
             candidates.append(("builtin-dmi", builtin_dmi))
+    return candidates
 
-    for source, profile in candidates:
+
+def resolve_model(vid: Optional[int] = None,
+                  pid: Optional[int] = None) -> Optional[ModelMatch]:
+    """Resolve the model profile that gates power-profile switching.
+
+    Precedence: user USB → built-in USB → user DMI → built-in DMI. The first
+    entry that *declares* a profile set wins for ACPI; a USB-keyed profile with
+    no declared ACPI never suppresses a later DMI profile's profiles. RGB
+    resolution is separate (``resolve_profile``). Returns None when no matching
+    profile declares profiles.
+    """
+    for source, profile in _resolve_model_candidates(vid, pid):
         if has_verified_profiles(profile):
             return ModelMatch(profile=profile, source=source,
                               experimental=bool(profile.acpi and profile.acpi.is_experimental))
+    return None
+
+
+def resolve_dgpu_gate_profile(vid: Optional[int] = None,
+                              pid: Optional[int] = None) -> Optional[ModelMatch]:
+    """Resolve the first matching model profile declaring ``acpi.dgpu_gate``."""
+    for source, profile in _resolve_model_candidates(vid, pid):
+        if profile.acpi is not None and profile.acpi.dgpu_gate is not None:
+            gate = profile.acpi.dgpu_gate
+            return ModelMatch(
+                profile=profile,
+                source=source,
+                experimental=(gate.confidence == "experimental"),
+            )
     return None
 
 
@@ -622,6 +708,20 @@ def validate_profile(profile: DeviceProfile) -> List[str]:
             errors.append("Experimental profiles require has_power_profiles and a profiles set")
         if acpi.backend not in ("module", "acpi_call"):
             errors.append(f"Unknown ACPI backend: {acpi.backend}")
+        if acpi.dgpu_gate is not None:
+            gate = acpi.dgpu_gate
+            if not isinstance(gate.path, str) or not _ACPI_PATH_RE.match(gate.path):
+                errors.append(f"Invalid dgpu_gate path: {gate.path!r}")
+            if gate.method not in _VALID_GATE_METHODS:
+                errors.append(f"Invalid dgpu_gate method: {gate.method!r}")
+            if not isinstance(gate.quirks, list) or not all(isinstance(q, str) for q in gate.quirks):
+                errors.append("dgpu_gate quirks must be a list of strings")
+            if gate.confidence not in ("verified", "experimental"):
+                errors.append(f"Unknown dgpu_gate confidence: {gate.confidence!r}")
+            if gate.on_method is not None and gate.on_method not in _VALID_GATE_ON_METHODS:
+                errors.append(f"Invalid dgpu_gate on_method: {gate.on_method!r}")
+            if gate.sta_method is not None and gate.sta_method not in _VALID_GATE_STA_METHODS:
+                errors.append(f"Invalid dgpu_gate sta_method: {gate.sta_method!r}")
 
     if profile.hotkeys:
         from .hotkeys import KNOWN_ACTIONS, HotkeySpec

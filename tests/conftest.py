@@ -66,6 +66,13 @@ def _no_real_hardware(monkeypatch, tmp_path):
     # ── Hermetic env ──
     monkeypatch.delenv("GIGAMATE_FORCE_SETUP", raising=False)
     monkeypatch.delenv("GIGAMATE_ACPI_MOCK", raising=False)
+    monkeypatch.setenv("GIGAMATE_GATE_STATE_FILE", str(tmp_path / "gate-state.json"))
+    monkeypatch.setattr("gigamate.dgpu_gate.AC_EVENT_FILE", tmp_path / "ac-event", raising=False)
+    monkeypatch.setattr(
+        "gigamate.dgpu_gate.policy_state_file_path",
+        lambda: tmp_path / "gate-ui.json",
+        raising=False,
+    )
 
     # ── IPC: never touch the live instance's socket/lock ──
     sock = str(tmp_path / "gigamate-center-test.sock")

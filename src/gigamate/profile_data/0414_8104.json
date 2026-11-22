@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 4,
   "name": "GIGABYTE AERO X16 1VH",
   "vid": "0x0414",
   "pid": "0x8104",
@@ -38,6 +38,14 @@
       }
     },
     "backend": "module",
-    "confidence": "verified"
+    "confidence": "verified",
+    "dgpu_gate": {
+      "path": "\\_SB.PCI0.GPP9.PG00",
+      "method": "_OFF",
+      "quirks": [
+        "remove_before_off"
+      ],
+      "confidence": "experimental"
+    }
   }
 }

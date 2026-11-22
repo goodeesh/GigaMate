@@ -11,6 +11,9 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
+#include <linux/pci.h>
+#include <linux/ctype.h>
+#include <linux/string.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
 #include <linux/mutex.h>
@@ -26,6 +29,9 @@ static acpi_handle amw0_handle;
 static struct platform_device *gigamate_pdev;
 static int current_profile = -1; /* unknown */
 static int current_charge_limit = -1; /* unknown */
+static char cached_dgpu_acpi_path[128];
+static char last_eval_result[128];
+static bool has_eval_result;
 static DEFINE_MUTEX(gigamate_acpi_mutex);
 
 /* ────────────────────────────────────────────
@@ -455,6 +461,172 @@ static void gigamate_cache_wmbd_aml(void)
 }
 
 /* ────────────────────────────────────────────
+ * Sysfs attributes — dGPU ACPI lookup & method evaluation
+ * ──────────────────────────────────────────── */
+
+static int gigamate_lookup_dgpu_acpi_path_locked(char *out, size_t out_len)
+{
+	struct pci_dev *pdev = NULL;
+	struct pci_dev *nv_dev = NULL;
+	struct pci_dev *amd_dev = NULL;
+	struct pci_dev *target;
+	acpi_handle handle;
+	struct acpi_buffer buf = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+	int ret = -ENODATA;
+
+	while ((pdev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, pdev)) != NULL) {
+		u32 base_cls = pdev->class >> 16;
+		u32 sub_cls = pdev->class >> 8;
+
+		if (base_cls != PCI_BASE_CLASS_DISPLAY)
+			continue;
+
+		if (pdev->vendor == 0x10de &&
+		    (sub_cls == PCI_CLASS_DISPLAY_VGA || sub_cls == PCI_CLASS_DISPLAY_3D)) {
+			if (!nv_dev)
+				nv_dev = pci_dev_get(pdev);
+		} else if (pdev->vendor == 0x1002 && sub_cls == PCI_CLASS_DISPLAY_3D) {
+			if (!amd_dev)
+				amd_dev = pci_dev_get(pdev);
+		}
+	}
+
+	target = nv_dev ? nv_dev : amd_dev;
+	if (target) {
+		handle = ACPI_HANDLE(&target->dev);
+		if (handle) {
+			status = acpi_get_name(handle, ACPI_FULL_PATHNAME, &buf);
+			if (ACPI_SUCCESS(status) && buf.pointer) {
+				strscpy(cached_dgpu_acpi_path, (const char *)buf.pointer,
+					sizeof(cached_dgpu_acpi_path));
+				if (out && out_len > 0)
+					strscpy(out, cached_dgpu_acpi_path, out_len);
+				ret = 0;
+			}
+			kfree(buf.pointer);
+		}
+	}
+
+	pci_dev_put(nv_dev);
+	pci_dev_put(amd_dev);
+
+	if (ret != 0 && cached_dgpu_acpi_path[0] != '\0') {
+		if (out && out_len > 0)
+			strscpy(out, cached_dgpu_acpi_path, out_len);
+		ret = 0;
+	}
+
+	return ret;
+}
+
+static ssize_t dgpu_acpi_path_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	char path[sizeof(cached_dgpu_acpi_path)];
+	int ret;
+
+	mutex_lock(&gigamate_acpi_mutex);
+	ret = gigamate_lookup_dgpu_acpi_path_locked(path, sizeof(path));
+	mutex_unlock(&gigamate_acpi_mutex);
+
+	if (ret < 0)
+		return ret;
+	return sysfs_emit(buf, "%s\n", path);
+}
+static DEVICE_ATTR_RO(dgpu_acpi_path);
+
+static ssize_t acpi_eval_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	char res[sizeof(last_eval_result)];
+	bool valid;
+
+	mutex_lock(&gigamate_acpi_mutex);
+	valid = has_eval_result;
+	if (valid)
+		strscpy(res, last_eval_result, sizeof(res));
+	mutex_unlock(&gigamate_acpi_mutex);
+
+	if (!valid)
+		return -ENODATA;
+	return sysfs_emit(buf, "%s\n", res);
+}
+
+static ssize_t acpi_eval_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	char path[128];
+	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
+	acpi_status status;
+	size_t start = 0, end = count, len, i;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	while (start < end && isspace((unsigned char)buf[start]))
+		start++;
+	while (end > start && isspace((unsigned char)buf[end - 1]))
+		end--;
+
+	len = end - start;
+	if (len < 2 || len >= sizeof(path))
+		return -EINVAL;
+
+	memcpy(path, buf + start, len);
+	path[len] = '\0';
+
+	if (path[0] != '\\')
+		return -EINVAL;
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)path[i];
+		if (!isalnum(c) && c != '_' && c != '.' && c != '\\')
+			return -EINVAL;
+	}
+
+	mutex_lock(&gigamate_acpi_mutex);
+	status = acpi_evaluate_object(NULL, path, NULL, &output);
+	if (ACPI_FAILURE(status)) {
+		snprintf(last_eval_result, sizeof(last_eval_result), "error:0x%x", status);
+		has_eval_result = true;
+		kfree(output.pointer);
+		mutex_unlock(&gigamate_acpi_mutex);
+		pr_debug(DRIVER_NAME ": acpi_eval(%s) failed: 0x%x\n", path, status);
+		return (status == AE_NOT_FOUND) ? -ENOENT : -EIO;
+	}
+
+	if (output.pointer) {
+		union acpi_object *obj = output.pointer;
+		if (obj->type == ACPI_TYPE_INTEGER) {
+			snprintf(last_eval_result, sizeof(last_eval_result),
+				 "0x%llx", (unsigned long long)obj->integer.value);
+		} else if (obj->type == ACPI_TYPE_STRING && obj->string.pointer) {
+			snprintf(last_eval_result, sizeof(last_eval_result),
+				 "%.120s", obj->string.pointer);
+		} else if (obj->type == ACPI_TYPE_BUFFER) {
+			snprintf(last_eval_result, sizeof(last_eval_result),
+				 "buffer:%u", obj->buffer.length);
+		} else {
+			strscpy(last_eval_result, "ok", sizeof(last_eval_result));
+		}
+		kfree(output.pointer);
+	} else {
+		strscpy(last_eval_result, "ok", sizeof(last_eval_result));
+	}
+	has_eval_result = true;
+	mutex_unlock(&gigamate_acpi_mutex);
+
+	return count;
+}
+
+static struct device_attribute dev_attr_acpi_eval = {
+	.attr = { .name = "acpi_eval", .mode = 0644 },
+	.show = acpi_eval_show,
+	.store = acpi_eval_store,
+};
+
+/* ────────────────────────────────────────────
  * File operations: create/remove attributes on probe/remove
  * ──────────────────────────────────────────── */
 
@@ -483,6 +655,8 @@ static const struct device_attribute *gigamate_acpi_dev_attrs[] = {
 	&dev_attr_npcf_acbt,
 	&dev_attr_npcf_amat,
 	&dev_attr_npcf_dbac,
+	&dev_attr_dgpu_acpi_path,
+	&dev_attr_acpi_eval,
 	NULL,
 };
 
@@ -506,6 +680,9 @@ static int gigamate_acpi_probe(struct platform_device *pdev)
 	}
 
 	gigamate_cache_wmbd_aml();
+	mutex_lock(&gigamate_acpi_mutex);
+	gigamate_lookup_dgpu_acpi_path_locked(NULL, 0);
+	mutex_unlock(&gigamate_acpi_mutex);
 
 	/* Create sysfs files under the device directory */
 	for (attr = gigamate_acpi_dev_attrs; *attr; attr++) {
@@ -544,6 +721,9 @@ static int gigamate_acpi_remove(struct platform_device *pdev)
 	wmbd_aml_len = 0;
 	current_profile = -1;
 	current_charge_limit = -1;
+	cached_dgpu_acpi_path[0] = '\0';
+	last_eval_result[0] = '\0';
+	has_eval_result = false;
 	pr_info(DRIVER_NAME ": module removed\n");
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 	return 0;

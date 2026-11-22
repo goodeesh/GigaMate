@@ -659,3 +659,25 @@ def probe_acpi_capabilities(backend: Optional[str] = None) -> AcpiCapabilities:
     """
     controller = AcpiController(backend=backend)
     return controller.detect()
+
+
+def read_dgpu_acpi_path(sysfs_dir: Path = GIGAMATE_ACPI_SYSFS) -> Optional[str]:
+    """Read the discrete GPU ACPI pathname cached/reported by gigamate_acpi."""
+    path = sysfs_dir / "dgpu_acpi_path"
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def acpi_eval_backend(
+    sysfs_dir: Path = GIGAMATE_ACPI_SYSFS,
+    proc_acpi_call: Path = PROC_ACPI_CALL,
+) -> str:
+    """Return which ACPI method evaluation backend is available ('module', 'acpi_call', or 'none')."""
+    if (sysfs_dir / "acpi_eval").exists():
+        return "module"
+    if proc_acpi_call.exists():
+        return "acpi_call"
+    return "none"
