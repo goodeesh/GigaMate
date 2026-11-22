@@ -292,7 +292,13 @@ install_system_deps() {
 # Derive the DKMS version from the app release so every release registers a
 # distinct module version (dkms add never collides with a prior release).
 dkms_registered() {
-    dkms status 2>/dev/null | grep -q "^gigamate_acpi/$1[ ,]"
+    # Do not pipe `dkms status` into `grep -q`: grep exits at the first match
+    # and SIGPIPEs dkms, so under `set -o pipefail` every registered version
+    # reports as absent and install.sh re-runs a doomed `dkms add` ("DKMS
+    # tree already contains"). Collect the output first, then match.
+    local status_out
+    status_out="$(dkms status 2>/dev/null || true)"
+    grep -q "^gigamate_acpi/$1[ ,]" <<<"$status_out}"
 }
 
 # Prune stale gigamate_acpi DKMS registrations (and their /usr/src source
