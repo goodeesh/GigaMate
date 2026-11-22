@@ -253,6 +253,7 @@ class TestRepairHelpers:
     def test_terminal_repair_snippet(self):
         snippet = updates.terminal_repair_snippet()
         assert "dkms install" in snippet
+        assert "dkms remove" in snippet  # prunes stale registrations (B3-protected)
         assert "modprobe gigamate_acpi" in snippet
         assert "uname -r" in snippet
 

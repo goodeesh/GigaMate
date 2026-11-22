@@ -89,6 +89,8 @@ class TestRepairFlow:
              patch.object(mod, "dkms_registered", return_value=False), \
              patch.object(mod, "dkms_add", return_value=(True, "")), \
              patch.object(mod, "dkms_install", return_value=(True, "")), \
+             patch.object(mod, "dkms_prune_stale",
+                         return_value=["pruned stale registration gigamate_acpi/3.0.0"]), \
              patch.object(mod, "reload_module", return_value=(True, "")), \
              patch.object(mod, "module_loaded", return_value=True):
             code = mod.main(["gigamate-repair"])
@@ -97,6 +99,7 @@ class TestRepairFlow:
         assert code == 0
         assert result["ok"] is True
         assert result["version"] == "3.1.0"
+        assert any("pruned stale registration" in s for s in result["steps"])
 
     def test_dkms_add_fails_falls_back_to_manual(self, capsys):
         mod = _load_helper()

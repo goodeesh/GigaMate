@@ -292,7 +292,54 @@ install_system_deps() {
 # Derive the DKMS version from the app release so every release registers a
 # distinct module version (dkms add never collides with a prior release).
 dkms_registered() {
-    dkms status 2>/dev/null | grep -q "^gigamate_acpi/$1[ ,]"
+    # Do not pipe `dkms status` into `grep -q`: grep exits at the first match
+    # and SIGPIPEs dkms, so under `set -o pipefail` every registered version
+    # reports as absent and install.sh re-runs a doomed `dkms add` ("DKMS
+    # tree already contains"). Collect the output first, then match.
+    local status_out
+    status_out="$(dkms status 2>/dev/null || true)"
+    grep -q "^gigamate_acpi/$1[ ,]" <<<"$status_out}"
+}
+
+# Prune stale gigamate_acpi DKMS registrations (and their /usr/src source
+# copies) so the tree does not accumulate one entry per release — every
+# kernel update retries all registered versions, and the stale ones abort
+# the DKMS hook with "not newer than what is already found". Enumerates the
+# DKMS tree itself: `dkms status` hides versions registered but never built.
+# Protected: the version being kept, plus any version a live kernel symlink
+# still points to (it still owns that kernel's module — B3: never leave a
+# kernel uncovered). A symlink for a kernel whose tree is gone protects
+# nothing.
+dkms_prune_stale_versions() {
+    local keep_version="${1:?}"
+    local dkms_tree="/var/lib/dkms/gigamate_acpi"
+    [ -d "$dkms_tree" ] || return 0
+
+    local protected="$keep_version"
+    local link kver owner stale
+    for link in "$dkms_tree"/kernel-*; do
+        [ -L "$link" ] || continue
+        # kernel-<kver>-<arch> -> <version>/<kver>/<arch>
+        kver="${link##*/}"; kver="${kver#kernel-}"; kver="${kver%-*}"
+        [ -d "/lib/modules/$kver" ] || continue
+        owner="$(readlink "$link" 2>/dev/null)" || continue
+        owner="${owner#"$dkms_tree"/}"
+        owner="${owner%%/*}"
+        [ -n "$owner" ] || continue
+        protected="$protected $owner"
+    done
+
+    for stale in $(ls "$dkms_tree" 2>/dev/null); do
+        case "$stale" in kernel-*) continue ;; esac
+        case " $protected " in *" $stale "*) continue ;; esac
+        info "Pruning stale DKMS registration: gigamate_acpi/$stale"
+        if sudo dkms remove "gigamate_acpi/$stale" --all; then
+            sudo rm -rf "/usr/src/gigamate_acpi-$stale" \
+                || warn "Could not remove /usr/src/gigamate_acpi-$stale"
+        else
+            warn "Could not remove gigamate_acpi/$stale from DKMS; keeping its /usr/src copy."
+        fi
+    done
 }
 
 build_kernel_module() {
@@ -389,17 +436,14 @@ build_kernel_module() {
             fi
         done
 
-        # Once the running kernel is covered, prune stale release versions so
-        # the DKMS tree does not accumulate old copies ("already contains").
-        if [ "$running_built" = true ]; then
-            local entry
-            for entry in $(dkms status 2>/dev/null | grep '^gigamate_acpi/' | cut -d, -f1 | sort -u); do
-                if [ "$entry" != "gigamate_acpi/$mod_version" ]; then
-                    info "Pruning stale DKMS entry: $entry"
-                    sudo dkms remove "$entry" --all 2>/dev/null || true
-                fi
-            done
-        else
+        # Prune stale release registrations so the DKMS tree does not
+        # accumulate one entry per release — every kernel update retries all
+        # of them and the old ones abort the DKMS hook ("not newer than what
+        # is already found"). Runs even when the running kernel was not
+        # rebuilt: versions still covering a live kernel are protected (B3),
+        # so pruning can never uncover a kernel.
+        dkms_prune_stale_versions "$mod_version"
+        if [ "$running_built" != true ]; then
             warn "Module build/install did not succeed for the running kernel ($running_kver)."
             warn "Fan/power features may be unavailable. Install kernel headers and re-run install.sh."
         fi
