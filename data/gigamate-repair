@@ -9,7 +9,9 @@ is deliberately self-contained (stdlib only) so it runs under the system
 
 This fixes the state where a GigaMate update (or a kernel upgrade) left the
 running kernel without a built module — e.g. after a DKMS "already contains"
-collision — so the tray reports "ACPI kernel driver not loaded".
+collision — so the tray reports "ACPI kernel driver not loaded". After a
+successful DKMS install it also prunes stale gigamate_acpi registrations so
+kernel updates stop retrying (and failing) old releases.
 
 Commands (argv):
     status   Report JSON without touching anything.
@@ -130,6 +132,56 @@ def dkms_add(version, run=None):
     return code == 0, (err or out).strip() or f"dkms add failed (exit {code})"
 
 
+def dkms_prune_stale(keep_version, run=None):
+    """Drop stale gigamate_acpi DKMS registrations and their /usr/src copies.
+
+    Keeps ``keep_version`` plus any version a live ``kernel-<kver>`` symlink
+    still points to — that version still owns the module in a live kernel
+    tree, and removing it would uncover the kernel (B3). Enumerates the DKMS
+    tree directly: ``dkms status`` hides versions registered but never
+    built. Returns step strings; failures are reported, never fatal.
+    """
+    steps = []
+    tree = "/var/lib/dkms/gigamate_acpi"
+    try:
+        names = sorted(os.listdir(tree))
+    except OSError:
+        return steps
+
+    protected = {keep_version}
+    for name in names:
+        if not name.startswith("kernel-"):
+            continue
+        link = os.path.join(tree, name)
+        if not os.path.islink(link):
+            continue
+        kver = name[len("kernel-"):].rsplit("-", 1)[0]
+        if not os.path.isdir(os.path.join("/lib/modules", kver)):
+            continue  # dead kernel trees no longer pin their version
+        try:
+            target = os.readlink(link)
+        except OSError:
+            continue
+        if target.startswith(tree + "/"):
+            target = target[len(tree) + 1:]
+        owner = target.split("/", 1)[0]
+        if owner:
+            protected.add(owner)
+
+    for name in names:
+        if name.startswith("kernel-") or name in protected:
+            continue
+        code, out, err = run_cmd(
+            ["dkms", "remove", f"gigamate_acpi/{name}", "--all"], run=run)
+        if code == 0:
+            run_cmd(["rm", "-rf", f"/usr/src/gigamate_acpi-{name}"], run=run)
+            steps.append(f"pruned stale registration gigamate_acpi/{name}")
+        else:
+            detail = (err or out).strip() or f"exit {code}"
+            steps.append(f"prune gigamate_acpi/{name} FAILED ({detail})")
+    return steps
+
+
 def manual_install(src, kernel, run=None):
     """Direct Kbuild install when DKMS is unavailable. Returns (ok, error)."""
     kdir = f"/lib/modules/{kernel}/build"
@@ -215,6 +267,10 @@ def cmd_repair():
                 return _emit({"ok": False, "version": ver, "kernel": kernel,
                               "module_loaded": module_loaded(), "steps": steps,
                               "error": err}, code=2)
+            # DKMS owns the running kernel again — drop stale registrations so
+            # kernel updates stop retrying (and failing) old releases.
+            # Versions still covering a live kernel are kept (B3).
+            steps.extend(dkms_prune_stale(ver))
     else:
         ok, err = manual_install(src, kernel)
         steps.append("manual build+install" + (" OK" if ok else f" FAILED ({err})"))
