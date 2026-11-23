@@ -12,15 +12,16 @@ The wizard never nags: both Finish and Skip record ``onboarding_complete``.
 
 import json
 import os
+from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
-    QSlider,
+    QSizePolicy,
     QVBoxLayout,
     QWizard,
     QWizardPage,
@@ -30,8 +31,13 @@ from ..capabilities import detect_system_capabilities
 from ..config import CONFIG_FILE, load as load_config, update_config
 from ..hardware import apply_hardware_settings
 from ..idle import IDLE_TIMEOUT_STEPS, nearest_idle_step
+from ..paths import ICON_PATHS
 from ..protocol import COLOUR_MAP
 from ..config import resolve_active_profile
+from . import icons
+from .styles import dialog_stylesheet
+from .theme import THEME
+from .widgets import M3Card, M3ComboBox, M3Slider, M3Switch
 
 
 def has_user_config() -> bool:
@@ -64,14 +70,56 @@ def _colour_keys() -> list:
     return list(COLOUR_MAP.keys())
 
 
+def _style_notice(label: QLabel) -> None:
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"background-color: {THEME.surface_container}; "
+        f"color: {THEME.on_surface_variant}; "
+        f"border-radius: {THEME.radius_control}px; "
+        f"padding: 10px 14px; font-size: 12px;"
+    )
+
+
 class _WelcomePage(QWizardPage):
     def __init__(self) -> None:
         super().__init__()
         self.setTitle("Welcome to GigaMate")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
         self.body = QLabel()
         self.body.setWordWrap(True)
+        self.body.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 13px; background: transparent;"
+        )
         layout.addWidget(self.body)
+
+        self._summary_card = M3Card()
+        self._summary_layout = QVBoxLayout(self._summary_card)
+        self._summary_layout.setContentsMargins(16, 14, 16, 14)
+        self._summary_layout.setSpacing(10)
+        layout.addWidget(self._summary_card)
+        layout.addStretch()
+
+    def _add_summary_row(self, icon_name: str, text: str, tone_color: str) -> None:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(16, 16)
+        icon_lbl.setStyleSheet("background: transparent;")
+        icon_lbl.setPixmap(icons.render_icon_pixmap(icon_name, color=tone_color, size=16))
+        row.addWidget(icon_lbl)
+
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(
+            f"color: {tone_color}; font-size: 12px; font-weight: 600; background: transparent;"
+        )
+        row.addWidget(lbl, stretch=1)
+        self._summary_layout.addLayout(row)
 
     def initializePage(self) -> None:
         w = self.wizard()
@@ -88,43 +136,81 @@ class _WelcomePage(QWizardPage):
         else:
             intro = ("This is a one-time setup. Nothing on your hardware is "
                      "changed until you choose it here.")
-        summary = [
-            f"Device: {caps.product_name}",
-            "Gigabyte laptop: yes" if caps.is_gigabyte_laptop
-            else "Gigabyte laptop: no — fan/power control is unavailable",
-            "Keyboard RGB: detected" if caps.keyboard_detected
-            else "Keyboard RGB: not detected",
-            "ACPI fan/power control: loaded" if caps.acpi_available
-            else "ACPI fan/power control: not available",
-            "Battery charge limit: supported" if caps.charge_limit_supported
-            else "Battery charge limit: unsupported on this hardware",
-        ]
-        self.body.setText(intro + "\n\n" + "\n".join(summary))
+        self.body.setText(intro)
+
+        while self._summary_layout.count():
+            item = self._summary_layout.takeAt(0)
+            if item.layout() is not None:
+                while item.layout().count():
+                    child = item.layout().takeAt(0)
+                    if child.widget() is not None:
+                        child.widget().deleteLater()
+
+        self._add_summary_row(
+            "laptop",
+            f"Device: {caps.product_name} "
+            + ("(Gigabyte laptop)" if caps.is_gigabyte_laptop else "(Generic — fan/power control unavailable)"),
+            THEME.success if caps.is_gigabyte_laptop else THEME.on_surface_variant,
+        )
+        self._add_summary_row(
+            "keyboard",
+            "Keyboard RGB: detected" if caps.keyboard_detected else "Keyboard RGB: not detected",
+            THEME.success if caps.keyboard_detected else THEME.on_surface_muted,
+        )
+        self._add_summary_row(
+            "bolt",
+            "ACPI fan/power control: loaded" if caps.acpi_available else "ACPI fan/power control: not available",
+            THEME.success if caps.acpi_available else THEME.warning,
+        )
+        self._add_summary_row(
+            "battery",
+            "Battery charge limit: supported" if caps.charge_limit_supported else "Battery charge limit: unsupported on this hardware",
+            THEME.success if caps.charge_limit_supported else THEME.on_surface_muted,
+        )
 
 
 class _RgbPage(QWizardPage):
     def __init__(self) -> None:
         super().__init__()
+        self._supported = True
         self.setTitle("Keyboard lighting")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
         self.notice = QLabel()
-        self.notice.setWordWrap(True)
+        _style_notice(self.notice)
         layout.addWidget(self.notice)
-        self.apply_chk = QCheckBox("Apply my keyboard lighting at startup")
-        self.colour_combo = QComboBox()
-        self.brightness_combo = QComboBox()
+
+        card = M3Card()
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(18, 16, 18, 16)
+        card_lay.setSpacing(14)
+
+        self.apply_chk = M3Switch("Apply my keyboard lighting at startup")
+        self.apply_chk.toggled.connect(self._sync_child_enabled)
+        self.colour_combo = M3ComboBox()
+        self.brightness_combo = M3ComboBox()
         for label, val in (("Off", 0), ("Dim", 1), ("Full", 2)):
             self.brightness_combo.addItem(label, val)
         form = QFormLayout()
+        form.setSpacing(10)
         form.addRow("Colour", self.colour_combo)
         form.addRow("Brightness", self.brightness_combo)
-        layout.addWidget(self.apply_chk)
-        layout.addLayout(form)
+        card_lay.addWidget(self.apply_chk)
+        card_lay.addLayout(form)
+        layout.addWidget(card)
+        layout.addStretch()
+
+    def _sync_child_enabled(self) -> None:
+        enabled = self._supported and self.apply_chk.isChecked()
+        self.colour_combo.setEnabled(enabled)
+        self.brightness_combo.setEnabled(enabled)
 
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
+        self._supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
         self.colour_combo.clear()
         for key in _colour_keys():
             self.colour_combo.addItem(key.replace("_", " ").title(), key)
@@ -137,9 +223,9 @@ class _RgbPage(QWizardPage):
         if bidx >= 0:
             self.brightness_combo.setCurrentIndex(bidx)
         self.apply_chk.setChecked(bool(cfg.get("startup_apply", False)))
-        for widget in (self.apply_chk, self.colour_combo, self.brightness_combo):
-            widget.setEnabled(supported)
-        if supported:
+        self.apply_chk.setEnabled(self._supported)
+        self._sync_child_enabled()
+        if self._supported:
             self.notice.setText("")
             self.notice.hide()
         else:
@@ -151,33 +237,50 @@ class _RgbPage(QWizardPage):
 class _IdlePage(QWizardPage):
     def __init__(self) -> None:
         super().__init__()
+        self._supported = True
         self.setTitle("Idle backlight")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
         self.notice = QLabel()
-        self.notice.setWordWrap(True)
+        _style_notice(self.notice)
         layout.addWidget(self.notice)
-        self.enable_chk = QCheckBox("Turn the keyboard backlight off when idle")
-        self.timeout_combo = QComboBox()
+
+        card = M3Card()
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(18, 16, 18, 16)
+        card_lay.setSpacing(14)
+
+        self.enable_chk = M3Switch("Turn the keyboard backlight off when idle")
+        self.enable_chk.toggled.connect(self._sync_child_enabled)
+        self.timeout_combo = M3ComboBox()
         for sec, label in IDLE_TIMEOUT_STEPS:
             if sec > 0:
                 self.timeout_combo.addItem(label, sec)
         form = QFormLayout()
+        form.setSpacing(10)
         form.addRow("After", self.timeout_combo)
-        layout.addWidget(self.enable_chk)
-        layout.addLayout(form)
+        card_lay.addWidget(self.enable_chk)
+        card_lay.addLayout(form)
+        layout.addWidget(card)
+        layout.addStretch()
+
+    def _sync_child_enabled(self) -> None:
+        self.timeout_combo.setEnabled(self._supported and self.enable_chk.isChecked())
 
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
+        self._supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
         self.enable_chk.setChecked(bool(cfg.get("idle_off_enabled", False)))
         tidx = self.timeout_combo.findData(
             nearest_idle_step(int(cfg.get("idle_timeout_sec", 60))))
         if tidx >= 0:
             self.timeout_combo.setCurrentIndex(tidx)
-        self.enable_chk.setEnabled(supported)
-        self.timeout_combo.setEnabled(supported)
-        if supported:
+        self.enable_chk.setEnabled(self._supported)
+        self._sync_child_enabled()
+        if self._supported:
             self.notice.hide()
         else:
             self.notice.setText("No compatible RGB keyboard detected; idle backlight control is unavailable.")
@@ -187,33 +290,58 @@ class _IdlePage(QWizardPage):
 class _BatteryPage(QWizardPage):
     def __init__(self) -> None:
         super().__init__()
+        self._supported = True
         self.setTitle("Battery care")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
         self.notice = QLabel()
-        self.notice.setWordWrap(True)
+        _style_notice(self.notice)
         layout.addWidget(self.notice)
-        self.enable_chk = QCheckBox("Limit charging to protect battery lifespan")
-        self.limit_slider = QSlider(Qt.Orientation.Horizontal)
+
+        card = M3Card()
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(18, 16, 18, 16)
+        card_lay.setSpacing(14)
+
+        self.enable_chk = M3Switch("Limit charging to protect battery lifespan")
+        self.enable_chk.toggled.connect(self._sync_child_enabled)
+        self.limit_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=False)
         self.limit_slider.setRange(40, 100)
         self.limit_slider.setSingleStep(5)
         self.limit_label = QLabel("Limit: 80%")
+        self.limit_label.setProperty("class", "ValueReadoutPill")
+        self.limit_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
         self.limit_slider.valueChanged.connect(
             lambda v: self.limit_label.setText(f"Limit: {v}%"))
+        slider_row = QHBoxLayout()
+        slider_row.setContentsMargins(0, 0, 0, 0)
+        slider_row.setSpacing(12)
+        slider_row.addWidget(self.limit_slider, stretch=1)
+        slider_row.addWidget(self.limit_label)
         form = QFormLayout()
-        form.addRow("Maximum charge", self.limit_slider)
-        layout.addWidget(self.enable_chk)
-        layout.addWidget(self.limit_label)
-        layout.addLayout(form)
+        form.setSpacing(10)
+        form.addRow("Maximum charge", slider_row)
+        card_lay.addWidget(self.enable_chk)
+        card_lay.addLayout(form)
+        layout.addWidget(card)
+        layout.addStretch()
+
+    def _sync_child_enabled(self) -> None:
+        self.limit_slider.setEnabled(self._supported and self.enable_chk.isChecked())
 
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        supported = w.caps.charge_limit_supported
+        self._supported = w.caps.charge_limit_supported
         self.enable_chk.setChecked(bool(cfg.get("charge_limit_enabled", False)))
         self.limit_slider.setValue(int(cfg.get("charge_limit", 80)))
-        self.enable_chk.setEnabled(supported)
-        self.limit_slider.setEnabled(supported)
-        if supported:
+        self.enable_chk.setEnabled(self._supported)
+        self._sync_child_enabled()
+        if self._supported:
             self.notice.setText("Capping charge at 80% significantly reduces "
                                 "lithium-ion wear.")
         elif not w.caps.battery_present:
@@ -230,12 +358,23 @@ class _PowerPage(QWizardPage):
         super().__init__()
         self.setTitle("System power")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
         self.notice = QLabel()
-        self.notice.setWordWrap(True)
+        _style_notice(self.notice)
         layout.addWidget(self.notice)
-        self.sync_chk = QCheckBox(
+
+        card = M3Card()
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(18, 16, 18, 16)
+        card_lay.setSpacing(12)
+
+        self.sync_chk = M3Switch(
             "Sync the Linux system power profile with the fan profile")
-        layout.addWidget(self.sync_chk)
+        card_lay.addWidget(self.sync_chk)
+        layout.addWidget(card)
+        layout.addStretch()
 
     def initializePage(self) -> None:
         w = self.wizard()
@@ -260,9 +399,33 @@ class _FinishPage(QWizardPage):
         super().__init__()
         self.setTitle("All set")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(14)
+
+        card = M3Card()
+        card_lay = QHBoxLayout(card)
+        card_lay.setContentsMargins(20, 20, 20, 20)
+        card_lay.setSpacing(14)
+
+        badge = QLabel()
+        badge.setFixedSize(32, 32)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(
+            f"background-color: {THEME.success_container}; "
+            f"border: 1px solid {THEME.success_border}; "
+            f"border-radius: 16px;"
+        )
+        badge.setPixmap(icons.render_icon_pixmap("check", color=THEME.success, size=18))
+        card_lay.addWidget(badge, alignment=Qt.AlignmentFlag.AlignTop)
+
         self.body = QLabel()
         self.body.setWordWrap(True)
-        layout.addWidget(self.body)
+        self.body.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 13px; background: transparent;"
+        )
+        card_lay.addWidget(self.body, stretch=1)
+        layout.addWidget(card)
+        layout.addStretch()
 
     def initializePage(self) -> None:
         w = self.wizard()
@@ -286,8 +449,15 @@ class OnboardingWizard(QWizard):
         self.rerun = bool(self.cfg.get("onboarding_complete", False))
 
         self.setWindowTitle("GigaMate Setup")
+        icon_path = ICON_PATHS.get("gigamate")
+        if icon_path and Path(icon_path).exists():
+            app_icon = QIcon(icon_path)
+            self.setWindowIcon(app_icon)
+            self.setPixmap(QWizard.WizardPixmap.LogoPixmap, app_icon.pixmap(QSize(36, 36)))
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
+        self.setMinimumSize(560, 440)
+        self.setStyleSheet(dialog_stylesheet())
 
         self.p_welcome = _WelcomePage()
         self.p_rgb = _RgbPage()
@@ -298,6 +468,25 @@ class OnboardingWizard(QWizard):
         for page in (self.p_welcome, self.p_rgb, self.p_idle,
                      self.p_battery, self.p_power, self.p_finish):
             self.addPage(page)
+
+        for btn_role in (
+            QWizard.WizardButton.NextButton,
+            QWizard.WizardButton.FinishButton,
+        ):
+            btn = self.button(btn_role)
+            if btn is not None:
+                btn.setProperty("class", "PrimaryButton")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+        for btn_role in (
+            QWizard.WizardButton.BackButton,
+            QWizard.WizardButton.NextButton,
+            QWizard.WizardButton.FinishButton,
+            QWizard.WizardButton.CancelButton,
+        ):
+            btn = self.button(btn_role)
+            if btn is not None:
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
     # -- persistence -------------------------------------------------------
     def _apply_choices(self, complete: bool) -> None:

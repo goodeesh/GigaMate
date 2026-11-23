@@ -1,14 +1,13 @@
 """GigaMate Center — Keyboard RGB Lighting & Effects Page."""
 
+from __future__ import annotations
+
 from typing import Dict, Optional, Tuple
+
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
-    QComboBox,
-    QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -20,6 +19,16 @@ from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, resolve_active_profile, update_config
 from ...idle import IDLE_STEP_OFF, IDLE_TIMEOUT_STEPS, nearest_idle_step
 from ...protocol import get_keyboard, set_off, set_static
+from .. import icons
+from ..theme import THEME
+from ..widgets import (
+    M3Banner,
+    M3Card,
+    M3ComboBox,
+    M3PageHeader,
+    M3ResponsiveGrid,
+    M3SegmentedBar,
+)
 
 # Color swatch hex codes (display names match tray.py: cname.replace('_', ' ').title())
 COLOR_HEX_MAP: Dict[str, str] = {
@@ -37,14 +46,14 @@ COLOR_HEX_MAP: Dict[str, str] = {
 }
 
 
-def make_color_swatch_icon(hex_color: str, size: int = 14) -> QIcon:
+def make_color_swatch_icon(hex_color: str, size: int = 16) -> QIcon:
     """Generate a crisp circular antialiased color swatch icon."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setBrush(QColor(hex_color))
-    painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
+    painter.setPen(QPen(QColor(255, 255, 255, 68), 1))
     painter.drawEllipse(1, 1, size - 2, size - 2)
     painter.end()
     return QIcon(pixmap)
@@ -63,13 +72,19 @@ class RgbPage(QWidget):
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(16)
+
+        header = M3PageHeader(
+            "RGB Lighting",
+            "Keyboard backlight colour, brightness & idle energy saver",
+        )
+        layout.addWidget(header)
 
         # ── Colour Palette Card ──
-        colour_card = QFrame()
-        colour_card.setProperty("class", "Card")
+        colour_card = M3Card()
         c_layout = QVBoxLayout(colour_card)
+        c_layout.setContentsMargins(20, 18, 20, 18)
         c_layout.setSpacing(14)
 
         # Header with Title and Active Badge
@@ -81,64 +96,62 @@ class RgbPage(QWidget):
 
         self.active_color_badge = QLabel("")
         self.active_color_badge.setStyleSheet(
-            "font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 12px; "
-            "background-color: #171b25; border: 1px solid #364157;"
+            f"font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 12px; "
+            f"background-color: {THEME.surface_container_high}; border: 1px solid {THEME.outline_variant}; "
+            f"color: {THEME.on_surface_variant};"
         )
         c_header.addWidget(self.active_color_badge)
         c_layout.addLayout(c_header)
 
         # ── Notice 1: Unsupported Keyboard (non-Gigabyte) ──
-        self.kbd_unsupported_notice = QFrame()
-        self.kbd_unsupported_notice.setStyleSheet(
-            "background-color: #171b26; border: 1px solid #283347; border-radius: 8px; padding: 14px;"
+        self.kbd_unsupported_notice = M3Banner(
+            title="No Compatible RGB Keyboard Detected",
+            body=(
+                "GigaMate did not detect a supported Gigabyte ITE 829x USB keyboard "
+                "controller on this system."
+            ),
+            tone="info",
+            icon="keyboard",
         )
-        u_lay = QVBoxLayout(self.kbd_unsupported_notice)
-        u_lay.setContentsMargins(14, 12, 14, 12)
-        u_lay.setSpacing(4)
-        u_title = QLabel("ℹ️ No Compatible RGB Keyboard Detected")
-        u_title.setStyleSheet("color: #ffffff; font-size: 13px; font-weight: 600;")
-        u_body = QLabel(
-            "GigaMate did not detect a supported Gigabyte ITE 829x USB keyboard controller on this system."
-        )
-        u_body.setStyleSheet("color: #8896ab; font-size: 12px;")
-        u_body.setWordWrap(True)
-        u_lay.addWidget(u_title)
-        u_lay.addWidget(u_body)
         c_layout.addWidget(self.kbd_unsupported_notice)
 
         # ── Notice 2: Uncalibrated Gigabyte Keyboard (profile missing) ──
-        self.kbd_uncalibrated_notice = QFrame()
-        self.kbd_uncalibrated_notice.setStyleSheet(
-            "background-color: #2c1b12; border: 1px solid #744210; border-radius: 8px; padding: 14px;"
+        self.kbd_uncalibrated_notice = M3Banner(
+            title="Uncalibrated Gigabyte Keyboard Detected",
+            body=(
+                "Your keyboard hardware was detected, but a color profile has not been generated for this model yet. "
+                "Each Gigabyte generation maps colors to distinct USB payload bytes."
+            ),
+            tone="warning",
+            icon="warning",
         )
-        c_lay2 = QVBoxLayout(self.kbd_uncalibrated_notice)
-        c_lay2.setContentsMargins(14, 12, 14, 12)
-        c_lay2.setSpacing(8)
+        self.uncalibrated_title = self.kbd_uncalibrated_notice.title_lbl
+        self.uncalibrated_body = self.kbd_uncalibrated_notice.body_lbl
 
-        self.uncalibrated_title = QLabel("⚠️ Uncalibrated Gigabyte Keyboard Detected")
-        self.uncalibrated_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 600;")
-        self.uncalibrated_body = QLabel(
-            "Your keyboard hardware was detected, but a color profile has not been generated for this model yet. "
-            "Each Gigabyte generation maps colors to distinct USB payload bytes."
-        )
-        self.uncalibrated_body.setStyleSheet("color: #cbd5e0; font-size: 12px;")
-        self.uncalibrated_body.setWordWrap(True)
-        c_lay2.addWidget(self.uncalibrated_title)
-        c_lay2.addWidget(self.uncalibrated_body)
-
-        action_row = QHBoxLayout()
+        action_widget = QWidget()
+        action_row = QHBoxLayout(action_widget)
+        action_row.setContentsMargins(0, 4, 0, 0)
         action_row.setSpacing(12)
-        cmd_hint = QLabel("💡 Run 'gigamate calibrate rgb' in your terminal to create a profile.")
-        cmd_hint.setStyleSheet("color: #ecc94b; font-size: 11px;")
-        cmd_hint.setWordWrap(True)
+
+        cmd_hint = QLabel("Run 'gigamate calibrate rgb'")
+        cmd_hint.setStyleSheet(
+            f"color: {THEME.warning}; font-family: {THEME.mono_family}; "
+            f"font-size: 11px; font-weight: 600; background: transparent;"
+        )
         action_row.addWidget(cmd_hint)
         action_row.addStretch()
 
         btn_safe_off = QPushButton("Turn Off Backlight")
+        btn_safe_off.setProperty("class", "TonalButton")
+        btn_safe_off.setIcon(
+            icons.make_icon("power_off", color=THEME.on_primary_container, size=15)
+        )
+        btn_safe_off.setIconSize(QSize(15, 15))
+        btn_safe_off.setMinimumHeight(34)
         btn_safe_off.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_safe_off.clicked.connect(self._turn_off_backlight)
         action_row.addWidget(btn_safe_off)
-        c_lay2.addLayout(action_row)
+        self.kbd_uncalibrated_notice.add_action(action_widget)
 
         c_layout.addWidget(self.kbd_uncalibrated_notice)
 
@@ -152,49 +165,49 @@ class RgbPage(QWidget):
         layout.addWidget(colour_card)
 
         # ── Brightness & Energy Saver Card ──
-        self.opts_card = QFrame()
-        self.opts_card.setProperty("class", "Card")
+        self.opts_card = M3Card()
         o_layout = QVBoxLayout(self.opts_card)
+        o_layout.setContentsMargins(20, 18, 20, 18)
         o_layout.setSpacing(16)
 
         o_title = QLabel("Brightness & Energy Saver")
         o_title.setProperty("class", "CardTitle")
         o_layout.addWidget(o_title)
 
-        # Brightness segmented buttons
+        # Brightness segmented bar
         b_row = QHBoxLayout()
+        b_row.setSpacing(12)
         b_label = QLabel("Backlight Brightness:")
-        b_label.setStyleSheet("color: #cbd5e0; font-weight: 500; min-width: 160px;")
+        b_label.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-weight: 500; min-width: 145px;"
+        )
         b_row.addWidget(b_label)
 
         self.brightness_group = QButtonGroup(self)
         self.brightness_group.setExclusive(True)
         self.brightness_buttons = {}
 
-        b_btns_layout = QHBoxLayout()
-        b_btns_layout.setSpacing(8)
+        self._brightness_bar = M3SegmentedBar()
         for b_val, label in enumerate(("Off", "Dim (50%)", "Full (100%)")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setProperty("class", "SegmentButton")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn = self._brightness_bar.add_segment(label, checkable=True, min_height=38)
             self.brightness_group.addButton(btn, b_val)
             self.brightness_buttons[b_val] = btn
             btn.clicked.connect(lambda _, v=b_val: self._set_brightness(v))
-            b_btns_layout.addWidget(btn)
 
-        b_row.addLayout(b_btns_layout)
-        b_row.addStretch()
+        b_row.addWidget(self._brightness_bar, stretch=1)
         o_layout.addLayout(b_row)
 
         # Idle Sleep Timeout
         idle_row = QHBoxLayout()
+        idle_row.setSpacing(12)
         idle_label = QLabel("Keyboard Idle Sleep:")
-        idle_label.setStyleSheet("color: #cbd5e0; font-weight: 500; min-width: 160px;")
+        idle_label.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-weight: 500; min-width: 145px;"
+        )
         idle_row.addWidget(idle_label)
 
-        self.idle_combo = QComboBox()
-        self.idle_combo.setFixedWidth(200)
+        self.idle_combo = M3ComboBox()
+        self.idle_combo.setMinimumWidth(210)
         # Single source of truth shared with the tray (gigamate.idle).
         self.idle_options = [(label, sec) for sec, label in IDLE_TIMEOUT_STEPS]
         for text, sec in self.idle_options:
@@ -249,40 +262,46 @@ class RgbPage(QWidget):
         else:
             colour_keys = list(COLOR_HEX_MAP.keys())
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
+        grid = M3ResponsiveGrid(
+            wide_cols=4,
+            narrow_cols=3,
+            breakpoint=660,
+            h_spacing=10,
+            v_spacing=10,
+        )
 
         self._palette_info = {}
         self.color_buttons = {}
-        for idx, col_key in enumerate(colour_keys):
+        for col_key in colour_keys:
             label = col_key.replace("_", " ").title()
             hex_color = COLOR_HEX_MAP.get(col_key, "#a0aec0")
             self._palette_info[col_key] = (label, hex_color)
             btn = QPushButton(f"  {label}")
-            btn.setIcon(make_color_swatch_icon(hex_color, 14))
-            btn.setIconSize(QSize(14, 14))
+            btn.setIcon(make_color_swatch_icon(hex_color, 16))
+            btn.setIconSize(QSize(16, 16))
             btn.setProperty("class", "ColorPaletteBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setMinimumHeight(44)
+            btn.setMinimumHeight(46)
             btn.clicked.connect(lambda _, c=col_key: self._set_colour(c))
             self.color_buttons[col_key] = btn
-            grid.addWidget(btn, idx // 4, idx % 4)
+            grid.addWidget(btn)
 
         # "Turn Off" goes in the next free cell so it never overlaps a colour
         # when a profile exposes 12+ colours.
         btn_off = QPushButton("  Turn Off")
-        btn_off.setIcon(make_color_swatch_icon("#4a5568", 14))
-        btn_off.setIconSize(QSize(14, 14))
+        btn_off.setIcon(
+            icons.make_icon("power_off", color=THEME.on_surface_variant, size=16)
+        )
+        btn_off.setIconSize(QSize(16, 16))
         btn_off.setProperty("class", "ColorPaletteBtn")
         btn_off.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_off.setMinimumHeight(44)
+        btn_off.setMinimumHeight(46)
         btn_off.clicked.connect(self._turn_off_backlight)
         self.color_buttons["off"] = btn_off
-        self._palette_info["off"] = ("Turn Off", "#4a5568")
-        off_idx = len(colour_keys)
-        grid.addWidget(btn_off, off_idx // 4, off_idx % 4)
+        self._palette_info["off"] = ("Turn Off", THEME.on_surface_muted)
+        grid.addWidget(btn_off)
 
-        self._palette_layout.addLayout(grid)
+        self._palette_layout.addWidget(grid)
 
     def _refresh_keyboard_support(self) -> None:
         """Inspect hardware capabilities and display appropriate notices."""
@@ -300,12 +319,15 @@ class RgbPage(QWidget):
             self.kbd_unsupported_notice.setVisible(False)
             self.kbd_uncalibrated_notice.setVisible(True)
             vid, pid = caps.keyboard_vid_pid or (0x0414, 0x0000)
-            self.uncalibrated_title.setText(f"⚠️ Uncalibrated Gigabyte Keyboard (VID 0x{vid:04X} PID 0x{pid:04X})")
+            self.uncalibrated_title.setText(
+                f"Uncalibrated Gigabyte Keyboard (VID 0x{vid:04X} PID 0x{pid:04X})"
+            )
             self.opts_card.setVisible(False)
             self.active_color_badge.setText("Uncalibrated")
             self.active_color_badge.setStyleSheet(
-                "color: #ecc94b; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-                "border-radius: 12px; background-color: #171b25; border: 1px solid #744210;"
+                f"color: {THEME.warning}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
+                f"border-radius: 12px; background-color: {THEME.surface_container_high}; "
+                f"border: 1px solid {THEME.warning_border};"
             )
             self.active_color_badge.setVisible(True)
         else:
@@ -391,14 +413,18 @@ class RgbPage(QWidget):
             if b_level == 0:
                 self.active_color_badge.setText(f"Active: {active_label} (Off)")
                 self.active_color_badge.setStyleSheet(
-                    "color: #718096; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-                    "border-radius: 12px; background-color: #171c26; border: 1px solid #4a5568;"
+                    f"color: {THEME.on_surface_muted}; font-size: 12px; font-weight: 600; "
+                    f"padding: 4px 12px; border-radius: 12px; "
+                    f"background-color: {THEME.surface_container_high}; "
+                    f"border: 1px solid {THEME.outline_variant};"
                 )
             else:
                 self.active_color_badge.setText(f"Active: {active_label}")
                 self.active_color_badge.setStyleSheet(
-                    f"color: {active_hex}; font-size: 12px; font-weight: 600; padding: 4px 12px; "
-                    f"border-radius: 12px; background-color: #171c26; border: 1px solid {active_hex};"
+                    f"color: {active_hex}; font-size: 12px; font-weight: 600; "
+                    f"padding: 4px 12px; border-radius: 12px; "
+                    f"background-color: {THEME.surface_container_high}; "
+                    f"border: 1px solid {active_hex};"
                 )
 
         for col_key, btn in self.color_buttons.items():
@@ -406,35 +432,25 @@ class RgbPage(QWidget):
             if b_level == 0 and col_key == "off":
                 btn.setText(f"  {label}   ✓")
                 btn.setStyleSheet(
-                    "background-color: #242c3d; "
-                    "border: 2px solid #718096; "
-                    "color: #ffffff; "
-                    "font-weight: 700; "
-                    "border-radius: 8px; "
-                    "padding: 8px 14px; "
-                    "text-align: left;"
+                    "QPushButton { background-color: #36302B; border: 2px solid #857A72; "
+                    "color: #F2ECE7; font-weight: 600; border-radius: 12px; "
+                    "padding: 10px 14px; text-align: left; }"
                 )
             elif b_level > 0 and col_key == active_col:
                 btn.setText(f"  {label}   ✓")
                 btn.setStyleSheet(
-                    f"background-color: #242c3d; "
-                    f"border: 2px solid {hex_color}; "
-                    f"color: #ffffff; "
-                    f"font-weight: 700; "
-                    f"border-radius: 8px; "
-                    f"padding: 8px 14px; "
-                    f"text-align: left;"
+                    f"QPushButton {{ background-color: #36302B; border: 2px solid {hex_color}; "
+                    f"color: #F2ECE7; font-weight: 600; border-radius: 12px; "
+                    f"padding: 10px 14px; text-align: left; }}"
                 )
             else:
                 btn.setText(f"  {label}")
                 btn.setStyleSheet(
-                    "background-color: #1c212d; "
-                    "border: 1px solid #2f3a4e; "
-                    "color: #cbd5e0; "
-                    "font-weight: 500; "
-                    "border-radius: 8px; "
-                    "padding: 8px 14px; "
-                    "text-align: left;"
+                    "QPushButton { background-color: #2C2723; border: 1px solid #423a35; "
+                    "color: #B9AEA6; font-weight: 500; border-radius: 12px; "
+                    "padding: 10px 14px; text-align: left; } "
+                    "QPushButton:hover { background-color: #36302B; border-color: #6E635B; "
+                    "color: #F2ECE7; }"
                 )
 
         b_level = self.cfg.get("brightness", 2)

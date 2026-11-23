@@ -2,7 +2,7 @@
 
 import time
 from typing import Optional
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -19,10 +19,20 @@ from ... import dgpu_gate
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
-from ...gpu import GpuState, get_gpu_state, gpu_status_text
+from ...gpu import GpuState, get_gpu_state
 from ...power_limits import SystemPowerLimits, discover_power_limits
 from ...profiles import profile_usable, resolve_model
 from ...system_power import sync_system_power
+from .. import icons
+from ..theme import THEME
+from ..widgets import (
+    M3Banner,
+    M3Card,
+    M3MetricTile,
+    M3PageHeader,
+    M3SegmentedBar,
+    M3StatusPill,
+)
 
 
 class DashboardPage(QWidget):
@@ -67,20 +77,28 @@ class DashboardPage(QWidget):
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(16)
+
+        header = M3PageHeader(
+            "Dashboard",
+            "Power policy, thermal limits & live hardware telemetry",
+        )
+        self.gpu_header_pill = M3StatusPill("")
+        self.gpu_header_pill.setVisible(False)
+        header.set_trailing_widget(self.gpu_header_pill)
+        layout.addWidget(header)
 
         # ── Power & Fan Profile Selector Card ──
-        prof_card = QFrame()
-        prof_card.setProperty("class", "Card")
+        prof_card = M3Card()
         prof_layout = QVBoxLayout(prof_card)
+        prof_layout.setContentsMargins(20, 18, 20, 18)
         prof_layout.setSpacing(12)
 
         p_title = QLabel("Power & Thermal Profiles")
         p_title.setProperty("class", "CardTitle")
         p_sub = QLabel(
-            "Controls hardware power and thermal policy. Effects vary by laptop model and firmware, "
-            "ranging from fan response curves to TDP/TGP power limits."
+            "Controls hardware power and thermal policy, from fan response curves to TDP/TGP limits."
         )
         p_sub.setProperty("class", "CardSubtitle")
         p_sub.setWordWrap(True)
@@ -88,52 +106,46 @@ class DashboardPage(QWidget):
         prof_layout.addWidget(p_sub)
 
         # Warning box for uninstalled/unloaded ACPI driver or non-Gigabyte hardware
-        self.acpi_warning_box = QFrame()
-        self.acpi_warning_box.setStyleSheet(
-            "background-color: #26160c; border: 1px solid #6b3512; border-radius: 10px; padding: 14px;"
+        self.acpi_warning_box = M3Banner(
+            title="ACPI Kernel Driver Not Loaded",
+            body=(
+                "Hardware fan control and live telemetry require the gigamate_acpi kernel driver. "
+                "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
+            ),
+            tone="warning",
+            icon="warning",
         )
-        wb_lay = QVBoxLayout(self.acpi_warning_box)
-        wb_lay.setContentsMargins(14, 12, 14, 12)
-        wb_lay.setSpacing(6)
-        self.wb_title = QLabel("⚠️ ACPI Kernel Driver Not Loaded")
-        self.wb_title.setStyleSheet("color: #f6ad55; font-size: 13px; font-weight: 700;")
-        self.wb_desc = QLabel(
-            "Hardware fan control and live telemetry require the gigamate_acpi kernel driver. "
-            "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
-        )
-        self.wb_desc.setStyleSheet("color: #e2e8f0; font-size: 12px; line-height: 1.4;")
-        self.wb_desc.setWordWrap(True)
-        wb_lay.addWidget(self.wb_title)
-        wb_lay.addWidget(self.wb_desc)
+        self.wb_title = self.acpi_warning_box.title_lbl
+        self.wb_desc = self.acpi_warning_box.body_lbl
         prof_layout.addWidget(self.acpi_warning_box)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
 
         self.prof_group = QButtonGroup(self)
         self.prof_group.setExclusive(True)
-        self.prof_layout = btn_layout
+        self.prof_bar = M3SegmentedBar()
         self._btn_ids: list = []
         self._profile_base_labels: dict = {}
 
         # Shown only for experimental (unconfirmed) models before opt-in.
         self.btn_enable_experimental = QPushButton("Enable Experimental Profiles")
-        self.btn_enable_experimental.setProperty("class", "ProfileButton")
-        self.btn_enable_experimental.setMinimumHeight(40)
+        self.btn_enable_experimental.setIcon(
+            icons.make_icon("sparkles", color=THEME.on_primary_container, size=15)
+        )
+        self.btn_enable_experimental.setIconSize(QSize(15, 15))
+        self.btn_enable_experimental.setProperty("class", "TonalButton")
+        self.btn_enable_experimental.setMinimumHeight(38)
         self.btn_enable_experimental.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_enable_experimental.clicked.connect(self._on_enable_experimental)
         self.btn_enable_experimental.setVisible(False)
         prof_layout.addWidget(self.btn_enable_experimental)
 
-        prof_layout.addLayout(btn_layout)
+        prof_layout.addWidget(self.prof_bar)
 
-        self.dgpu_profile_lock_notice = QLabel(
-            "🔒 Performance & Gaming locked while the discrete GPU is powered off (ECO / gated)."
+        self.dgpu_profile_lock_notice = M3Banner(
+            title="Performance & Gaming are locked while the discrete GPU is powered off (ECO / gated).",
+            tone="warning",
+            icon="lock",
+            compact=True,
         )
-        self.dgpu_profile_lock_notice.setStyleSheet(
-            "color: #f6ad55; font-size: 12px; font-weight: 600; padding: 2px 2px;"
-        )
-        self.dgpu_profile_lock_notice.setWordWrap(True)
         self.dgpu_profile_lock_notice.setVisible(False)
         prof_layout.addWidget(self.dgpu_profile_lock_notice)
 
@@ -143,19 +155,38 @@ class DashboardPage(QWidget):
         pl_layout.setContentsMargins(0, 6, 0, 0)
         pl_layout.setSpacing(8)
 
+        self._battery_notice_row = QWidget()
+        self._battery_notice_row.setStyleSheet("background: transparent;")
+        bn_layout = QHBoxLayout(self._battery_notice_row)
+        bn_layout.setContentsMargins(2, 4, 2, 4)
+        bn_layout.setSpacing(6)
+
+        bn_icon = QLabel()
+        bn_icon.setFixedSize(14, 14)
+        bn_icon.setStyleSheet("background: transparent;")
+        bn_icon.setPixmap(icons.render_icon_pixmap("battery", color=THEME.warning, size=14))
+        bn_layout.addWidget(bn_icon)
+
         self.power_battery_notice = QLabel(
-            "⚡ Running on battery — firmware applies reduced battery power limits."
+            "Running on battery — firmware applies reduced battery power limits."
         )
+        self.power_battery_notice.setWordWrap(True)
         self.power_battery_notice.setStyleSheet(
-            "color: #f6ad55; font-size: 12px; font-weight: 600; padding: 4px 2px;"
+            f"color: {THEME.warning}; font-size: 12px; font-weight: 600; "
+            f"background: transparent;"
         )
+        bn_layout.addWidget(self.power_battery_notice, stretch=1)
+        self._battery_notice_row.setVisible(False)
         self.power_battery_notice.setVisible(False)
-        pl_layout.addWidget(self.power_battery_notice)
+        pl_layout.addWidget(self._battery_notice_row)
 
         self.compare_limits_frame = QFrame()
-        self.compare_limits_frame.setProperty("class", "MetricTile")
+        self.compare_limits_frame.setStyleSheet(
+            f"background-color: {THEME.surface_container_high}; "
+            f"border-radius: 14px; border: none;"
+        )
         self.compare_grid = QGridLayout(self.compare_limits_frame)
-        self.compare_grid.setContentsMargins(16, 12, 16, 12)
+        self.compare_grid.setContentsMargins(18, 14, 18, 14)
         self.compare_grid.setHorizontalSpacing(18)
         self.compare_grid.setVerticalSpacing(6)
         pl_layout.addWidget(self.compare_limits_frame)
@@ -166,27 +197,37 @@ class DashboardPage(QWidget):
         layout.addWidget(prof_card)
 
         # ── Live Telemetry Cards ──
-        self.telemetry_card = QFrame()
-        self.telemetry_card.setProperty("class", "Card")
+        self.telemetry_card = M3Card()
         t_layout = QVBoxLayout(self.telemetry_card)
+        t_layout.setContentsMargins(20, 18, 20, 18)
         t_layout.setSpacing(14)
         t_title = QLabel("Real-Time Hardware Telemetry")
         t_title.setProperty("class", "CardTitle")
         t_layout.addWidget(t_title)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(14)
+        grid.setSpacing(12)
 
         # Row 0: Thermals & GPU (CPU Temp & Discrete GPU)
-        self.cpu_tile = self._make_stat_tile("CPU Temperature", "stat_cpu_temp", "🌡️", "stat_cpu_sub")
+        self.cpu_tile = M3MetricTile(
+            "CPU Temperature", "stat_cpu_temp", "thermometer", "stat_cpu_sub", show_bar=True
+        )
+        self.gpu_tile = M3MetricTile(
+            "Discrete GPU State", "stat_gpu", "gpu", "stat_gpu_sub", show_bar=False
+        )
         grid.addWidget(self.cpu_tile, 0, 0)
-        grid.addWidget(self._make_stat_tile("Discrete GPU State", "stat_gpu", "⚡", "stat_gpu_sub"), 0, 1, 1, 2)
+        grid.addWidget(self.gpu_tile, 0, 1, 1, 2)
 
         # Row 1: Cooling Fans & Total Duty
-        self.fan1_tile = self._make_stat_tile("CPU Fan Speed", "stat_fan1_rpm", "🌀", "stat_fan1_sub")
-        self.fan2_tile = self._make_stat_tile("GPU Fan Speed", "stat_fan2_rpm", "🌀", "stat_fan2_sub")
-        self.duty_tile = self._make_stat_tile("Total Fan Duty", "stat_duty", "📊", "stat_duty_sub")
+        self.fan1_tile = M3MetricTile(
+            "CPU Fan Speed", "stat_fan1_rpm", "fan", "stat_fan1_sub", show_bar=True
+        )
+        self.fan2_tile = M3MetricTile(
+            "GPU Fan Speed", "stat_fan2_rpm", "fan", "stat_fan2_sub", show_bar=True
+        )
+        self.duty_tile = M3MetricTile(
+            "Total Fan Duty", "stat_duty", "gauge", "stat_duty_sub", show_bar=True
+        )
 
         grid.addWidget(self.fan1_tile, 1, 0)
         grid.addWidget(self.fan2_tile, 1, 1)
@@ -197,40 +238,6 @@ class DashboardPage(QWidget):
 
         layout.addStretch()
         self._refresh_telemetry()
-
-    def _make_stat_tile(self, title: str, object_name: str, icon_str: str, subtext_obj: str = "") -> QFrame:
-        tile = QFrame()
-        tile.setProperty("class", "MetricTile")
-        t_layout = QVBoxLayout(tile)
-        t_layout.setContentsMargins(16, 14, 16, 14)
-        t_layout.setSpacing(4)
-
-        hdr = QHBoxLayout()
-        hdr.setSpacing(8)
-        hdr.setContentsMargins(0, 0, 0, 0)
-        icon_lbl = QLabel(icon_str)
-        icon_lbl.setStyleSheet("font-size: 14px;")
-        hdr.addWidget(icon_lbl)
-
-        lbl_title = QLabel(title)
-        lbl_title.setObjectName(f"{object_name}_title" if object_name else "")
-        lbl_title.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;")
-        hdr.addWidget(lbl_title)
-        hdr.addStretch()
-        t_layout.addLayout(hdr)
-
-        lbl_val = QLabel("--")
-        lbl_val.setObjectName(object_name)
-        lbl_val.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
-        t_layout.addWidget(lbl_val)
-
-        if subtext_obj:
-            lbl_sub = QLabel("")
-            lbl_sub.setObjectName(subtext_obj)
-            lbl_sub.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
-            t_layout.addWidget(lbl_sub)
-
-        return tile
 
     def _ensure_acpi_controller(self) -> None:
         """Re-probe for an ACPI backend at most once every 10 s when absent."""
@@ -279,26 +286,16 @@ class DashboardPage(QWidget):
         if ids != self._btn_ids:
             for btn in self._profile_buttons.values():
                 self.prof_group.removeButton(btn)
-                self.prof_layout.removeWidget(btn)
-                btn.deleteLater()
+            self.prof_bar.clear_segments()
             self._profile_buttons = {}
             self._profile_base_labels = {}
             self._btn_ids = []
             for pid in ids:
                 label = (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
                 self._profile_base_labels[pid] = label
-                btn = QPushButton(label)
-                btn.setProperty("class", "ProfileButton")
-                btn.setStyleSheet(
-                    "QPushButton:disabled { background-color: #0e121b; color: #4a5568; "
-                    "border: 1px dashed #252d3d; }"
-                )
-                btn.setCheckable(True)
-                btn.setMinimumHeight(48)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn = self.prof_bar.add_segment(label, checkable=True, min_height=42)
                 btn.clicked.connect(lambda _, p=pid: self._select_profile(p))
                 self.prof_group.addButton(btn, pid)
-                self.prof_layout.addWidget(btn)
                 self._profile_buttons[pid] = btn
                 self._btn_ids.append(pid)
 
@@ -308,17 +305,20 @@ class DashboardPage(QWidget):
                 pid, (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
             )
             locked_by_gate = usable and not high_ok and pid in (2, 3)
-            allowed = usable and not locked_by_gate
-            btn.setEnabled(allowed)
+            btn.setText(base_label)
             if locked_by_gate:
-                btn.setText(f"🔒 {base_label}")
-                btn.setCursor(Qt.CursorShape.ForbiddenCursor)
-                btn.setToolTip("Unavailable while dGPU is powered off (ECO / gated)")
-            else:
-                btn.setText(base_label)
-                btn.setCursor(
-                    Qt.CursorShape.PointingHandCursor if allowed else Qt.CursorShape.ArrowCursor
+                btn.setLocked(
+                    True,
+                    tooltip="Unavailable while dGPU is powered off (ECO / gated)",
                 )
+            elif not usable:
+                btn.setLocked(False)
+                btn.setEnabled(False)
+                btn.setCursor(Qt.CursorShape.ArrowCursor)
+                btn.setToolTip("")
+            else:
+                btn.setLocked(False)
+                btn.setEnabled(True)
                 btn.setToolTip("")
         if hasattr(self, "dgpu_profile_lock_notice"):
             self.dgpu_profile_lock_notice.setVisible(bool(usable and not high_ok))
@@ -366,7 +366,8 @@ class DashboardPage(QWidget):
                 self.acpi_warning_box.setVisible(False)
             else:
                 self.acpi_warning_box.setVisible(True)
-                self.wb_title.setText("ℹ️ No profile support for this model")
+                self.acpi_warning_box.set_tone("info", "info")
+                self.wb_title.setText("No profile support for this model")
                 self.wb_desc.setText(
                     "Profile switching is only exposed on models with a matching "
                     "profile. Run 'gigamate calibrate acpi' to generate one.")
@@ -399,16 +400,22 @@ class DashboardPage(QWidget):
                 if state.temp_cpu is not None:
                     cpu_lbl.setText(f"{state.temp_cpu} °C")
                     if state.temp_cpu >= 85:
-                        cpu_lbl.setStyleSheet("color: #fc8181; font-size: 22px; font-weight: 800; margin-top: 2px;")
-                    elif state.temp_cpu >= 75:
-                        cpu_lbl.setStyleSheet("color: #f6ad55; font-size: 22px; font-weight: 800; margin-top: 2px;")
+                        temp_color = THEME.error
+                    elif state.temp_cpu >= 65:
+                        temp_color = THEME.warning
                     else:
-                        cpu_lbl.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
+                        temp_color = THEME.success
+                    self.cpu_tile.set_value_color(temp_color)
+                    self.cpu_tile.set_icon("thermometer", temp_color)
+                    ratio = max(0.05, min(1.0, (state.temp_cpu - 30.0) / 65.0))
+                    self.cpu_tile.set_bar(ratio, temp_color)
                     if cpu_sub:
                         cpu_sub.setText("Optimal Thermal" if state.temp_cpu < 65 else "Active Load")
                 else:
                     cpu_lbl.setText("--")
-                    cpu_lbl.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: 800; margin-top: 2px;")
+                    self.cpu_tile.set_value_color(THEME.on_surface)
+                    self.cpu_tile.set_icon("thermometer", THEME.on_surface_variant)
+                    self.cpu_tile.set_bar(0.0, THEME.primary)
                     if cpu_sub:
                         cpu_sub.setText("Monitoring")
 
@@ -418,10 +425,15 @@ class DashboardPage(QWidget):
             if f1_lbl:
                 if state.fan1_rpm is None:
                     f1_lbl.setText("--")
+                    self.fan1_tile.set_value_color(THEME.on_surface_muted)
+                    self.fan1_tile.set_bar(0.0, THEME.primary)
                     if f1_sub:
                         f1_sub.setText("No data")
                 else:
                     f1_lbl.setText(f"{state.fan1_rpm} RPM")
+                    f1_color = THEME.primary if state.fan1_rpm > 0 else THEME.on_surface_muted
+                    self.fan1_tile.set_value_color(THEME.on_surface if state.fan1_rpm > 0 else THEME.on_surface_muted)
+                    self.fan1_tile.set_bar(max(0.0, min(1.0, state.fan1_rpm / 5800.0)), f1_color)
                     if f1_sub:
                         f1_sub.setText("Silent / Stopped" if state.fan1_rpm == 0 else "Active Exhaust")
 
@@ -430,17 +442,30 @@ class DashboardPage(QWidget):
             if f2_lbl:
                 if state.fan2_rpm is None:
                     f2_lbl.setText("--")
+                    self.fan2_tile.set_value_color(THEME.on_surface_muted)
+                    self.fan2_tile.set_bar(0.0, THEME.primary)
                     if f2_sub:
                         f2_sub.setText("No data")
                 else:
                     f2_lbl.setText(f"{state.fan2_rpm} RPM")
+                    f2_color = THEME.primary if state.fan2_rpm > 0 else THEME.on_surface_muted
+                    self.fan2_tile.set_value_color(THEME.on_surface if state.fan2_rpm > 0 else THEME.on_surface_muted)
+                    self.fan2_tile.set_bar(max(0.0, min(1.0, state.fan2_rpm / 5800.0)), f2_color)
                     if f2_sub:
                         f2_sub.setText("Silent / Stopped" if state.fan2_rpm == 0 else "Active Exhaust")
 
             duty_lbl = self.findChild(QLabel, "stat_duty")
             duty_sub = self.findChild(QLabel, "stat_duty_sub")
             if duty_lbl:
-                duty_lbl.setText(f"{state.duty_total}%" if state.duty_total is not None else "--")
+                if state.duty_total is not None:
+                    duty_lbl.setText(f"{state.duty_total}%")
+                    duty_color = THEME.accent_cta if state.duty_total >= 70 else THEME.primary
+                    self.duty_tile.set_value_color(THEME.on_surface)
+                    self.duty_tile.set_bar(max(0.0, min(1.0, state.duty_total / 100.0)), duty_color)
+                else:
+                    duty_lbl.setText("--")
+                    self.duty_tile.set_value_color(THEME.on_surface_muted)
+                    self.duty_tile.set_bar(0.0, THEME.primary)
                 if duty_sub:
                     duty_sub.setText("Hardware Auto Curve")
         else:
@@ -455,14 +480,16 @@ class DashboardPage(QWidget):
             sys_caps = detect_system_capabilities()
             self.acpi_warning_box.setVisible(True)
             if sys_caps.is_gigabyte_laptop:
-                self.wb_title.setText("⚠️ ACPI Kernel Driver (gigamate_acpi) Not Loaded")
+                self.acpi_warning_box.set_tone("warning", "warning")
+                self.wb_title.setText("ACPI Kernel Driver (gigamate_acpi) Not Loaded")
                 self.wb_desc.setText(
                     "Hardware fan profiles and live telemetry require the gigamate_acpi kernel module. "
                     "Re-run install.sh (it installs the module for every kernel), or try: sudo modprobe gigamate_acpi."
                 )
                 reason_str = "Driver Required"
             else:
-                self.wb_title.setText("ℹ️ Non-Gigabyte Hardware Detected")
+                self.acpi_warning_box.set_tone("info", "info")
+                self.wb_title.setText("Non-Gigabyte Hardware Detected")
                 self.wb_desc.setText(
                     "Hardware thermal profiles and Embedded Controller sensor telemetry are only available "
                     "on supported Gigabyte Aero / AORUS laptops."
@@ -482,25 +509,42 @@ class DashboardPage(QWidget):
         gpu = get_gpu_state()
         gpu_lbl = self.findChild(QLabel, "stat_gpu")
         gpu_sub = self.findChild(QLabel, "stat_gpu_sub")
-        if gpu_lbl:
-            if not gpu.present:
+        if not gpu.present:
+            self.gpu_header_pill.setVisible(False)
+            if gpu_lbl:
                 gpu_lbl.setText("Not Present")
-                gpu_lbl.setStyleSheet("color: #718096; font-size: 20px; font-weight: 700;")
+                self.gpu_tile.set_value_color(THEME.on_surface_muted)
+                self.gpu_tile.set_icon("gpu", THEME.on_surface_muted)
                 if gpu_sub:
                     gpu_sub.setText("iGPU Only")
-            elif gpu.gated_off or gpu.status == "gated_off":
+        elif gpu.gated_off or gpu.status == "gated_off":
+            self.gpu_header_pill.setText("dGPU Gated · 0 W")
+            self.gpu_header_pill.set_tone("gated")
+            self.gpu_header_pill.setVisible(True)
+            if gpu_lbl:
                 gpu_lbl.setText("Off (gated)")
-                gpu_lbl.setStyleSheet("color: #38b2ac; font-size: 20px; font-weight: 700;")
+                self.gpu_tile.set_value_color(THEME.gated)
+                self.gpu_tile.set_icon("gpu", THEME.gated)
                 if gpu_sub:
                     gpu_sub.setText("Power rail cut (0 W)")
-            elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
+        elif gpu.status == "suspended" or gpu.power_state in ("D3hot", "D3cold"):
+            self.gpu_header_pill.setText("dGPU Asleep")
+            self.gpu_header_pill.set_tone("success")
+            self.gpu_header_pill.setVisible(True)
+            if gpu_lbl:
                 gpu_lbl.setText(f"Asleep ({gpu.power_state or 'D3cold'})")
-                gpu_lbl.setStyleSheet("color: #48bb78; font-size: 20px; font-weight: 700;")
+                self.gpu_tile.set_value_color(THEME.success)
+                self.gpu_tile.set_icon("gpu", THEME.success)
                 if gpu_sub:
                     gpu_sub.setText("Power gate off")
-            else:
+        else:
+            self.gpu_header_pill.setText("dGPU Active")
+            self.gpu_header_pill.set_tone("warning")
+            self.gpu_header_pill.setVisible(True)
+            if gpu_lbl:
                 gpu_lbl.setText(f"Active ({gpu.power_state or 'D0'})")
-                gpu_lbl.setStyleSheet("color: #ed8936; font-size: 20px; font-weight: 700;")
+                self.gpu_tile.set_value_color(THEME.warning)
+                self.gpu_tile.set_icon("gpu", THEME.warning)
                 if gpu_sub:
                     gpu_sub.setText("In use")
 
@@ -543,6 +587,7 @@ class DashboardPage(QWidget):
         pid = active_prof_id if active_prof_id in sys_limits.profiles else valid_pids[0]
 
         self.power_limits_container.setVisible(True)
+        self._battery_notice_row.setVisible(sys_limits.on_battery)
         self.power_battery_notice.setVisible(sys_limits.on_battery)
         self.compare_limits_frame.setVisible(True)
 
@@ -568,18 +613,34 @@ class DashboardPage(QWidget):
         decl_profiles = match.profile.acpi.profiles if (match is not None and match.profile.acpi) else {}
 
         hdr_metric = QLabel("Power Limit")
+        hdr_metric.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         hdr_metric.setStyleSheet(
-            "color: #8896ab; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;"
+            f"color: {THEME.on_surface_variant}; font-size: 11px; font-weight: 700; "
+            f"text-transform: uppercase; letter-spacing: 0.5px; background: transparent;"
         )
         self.compare_grid.addWidget(hdr_metric, 0, 0)
 
         for col_idx, pid in enumerate(valid_pids, start=1):
             pname = (decl_profiles.get(str(pid)) or {}).get("name", default_names.get(pid, f"Mode {pid}"))
-            prefix = "● " if pid == active_pid else ""
-            lbl = QLabel(f"{prefix}{pname}")
-            color = "#63b3ed" if pid == active_pid else "#94a3b8"
-            lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 700;")
-            self.compare_grid.addWidget(lbl, 0, col_idx)
+            hdr_cell = QWidget()
+            hdr_cell.setStyleSheet("background: transparent;")
+            hdr_lay = QHBoxLayout(hdr_cell)
+            hdr_lay.setContentsMargins(0, 0, 0, 0)
+            hdr_lay.setSpacing(5)
+            hdr_lay.addStretch()
+            if pid == active_pid:
+                dot = QLabel()
+                dot.setFixedSize(8, 8)
+                dot.setStyleSheet("background: transparent;")
+                dot.setPixmap(icons.render_icon_pixmap("dot", color=THEME.primary, size=8))
+                hdr_lay.addWidget(dot)
+            lbl = QLabel(pname)
+            color = THEME.primary if pid == active_pid else THEME.on_surface_variant
+            lbl.setStyleSheet(
+                f"color: {color}; font-size: 12px; font-weight: 700; background: transparent;"
+            )
+            hdr_lay.addWidget(lbl)
+            self.compare_grid.addWidget(hdr_cell, 0, col_idx)
 
         rows = [
             (
@@ -618,12 +679,19 @@ class DashboardPage(QWidget):
             if all(v is None for v in vals):
                 continue
             r_lbl = QLabel(label_text)
-            r_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
+            r_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            r_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: 12px; font-weight: 500; background: transparent;"
+            )
             self.compare_grid.addWidget(r_lbl, row_idx, 0)
             for col_idx, (pid, val_str) in enumerate(zip(valid_pids, vals), start=1):
                 v_lbl = QLabel(val_str or "")
-                weight = "800" if pid == active_pid else "500"
-                color = "#ffffff" if pid == active_pid else "#94a3b8"
-                v_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: {weight};")
+                v_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                weight = "700" if pid == active_pid else "500"
+                color = THEME.on_surface if pid == active_pid else THEME.on_surface_variant
+                v_lbl.setStyleSheet(
+                    f"color: {color}; font-family: {THEME.mono_family}; "
+                    f"font-size: 13px; font-weight: {weight}; background: transparent;"
+                )
                 self.compare_grid.addWidget(v_lbl, row_idx, col_idx)
             row_idx += 1

@@ -702,7 +702,7 @@ def test_rgb_page_color_highlighting(qapp):
     rgb._set_colour("red")
     assert "border: 2px solid #fc8181" in rgb.color_buttons["red"].styleSheet()
     assert "✓" in rgb.color_buttons["red"].text()
-    assert "border: 1px solid #2f3a4e" in rgb.color_buttons["blue"].styleSheet()
+    assert "border: 1px solid #423a35" in rgb.color_buttons["blue"].styleSheet()
     assert "✓" not in rgb.color_buttons["blue"].text()
 
     # Select Blue
@@ -710,7 +710,7 @@ def test_rgb_page_color_highlighting(qapp):
     assert "border: 2px solid #63b3ed" in rgb.color_buttons["blue"].styleSheet()
     assert "✓" in rgb.color_buttons["blue"].text()
     # Red must be reset!
-    assert "border: 1px solid #2f3a4e" in rgb.color_buttons["red"].styleSheet()
+    assert "border: 1px solid #423a35" in rgb.color_buttons["red"].styleSheet()
     assert "✓" not in rgb.color_buttons["red"].text()
 
 

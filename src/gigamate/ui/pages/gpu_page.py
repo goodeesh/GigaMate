@@ -29,14 +29,13 @@ import threading
 import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -45,20 +44,17 @@ from ... import dgpu_gate, dgpu_tune
 from ...battery import get_battery_manager
 from ...config import load as load_config
 from ...gpu import get_gpu_state, gpu_status_text
-from ..flow_layout import FlowContainer
-
-
-class _SliderNoWheel(QSlider):
-    """A slider that never eats the page's scroll wheel.
-
-    These sliders now live in a scrollable page. Qt's default behaviour is to
-    change the value on any wheel event over the widget, so scrolling the page
-    would silently retune the GPU clocks. Ignoring the event hands it to the
-    scroll area, which is what the user actually asked for.
-    """
-
-    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
-        event.ignore()
+from .. import icons
+from ..theme import THEME
+from ..widgets import (
+    M3Card,
+    M3IconHelpButton,
+    M3PageHeader,
+    M3SegmentButton,
+    M3SegmentedBar,
+    M3Slider,
+    M3StatusPill,
+)
 
 
 class GpuPage(QWidget):
@@ -96,6 +92,9 @@ class GpuPage(QWidget):
         self._gate_buttons: dict[str, QPushButton] = {}
         self._gate_results: queue.Queue = queue.Queue()
         self._gate_busy = False
+        self._controls_enabled: bool = False
+        self._mem_controls_enabled: bool = False
+        self._is_gated: bool = False
         self._gate_timer = QTimer(self)
         self._gate_timer.setInterval(100)
         self._gate_timer.timeout.connect(self._collect_gate_result)
@@ -207,49 +206,49 @@ class GpuPage(QWidget):
     # ── UI ──
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(16)
+        layout.addWidget(
+            M3PageHeader(
+                "GPU Tuning",
+                "Discrete GPU power gating & sleep-aware NVIDIA clock tuning",
+            )
+        )
         layout.addWidget(self._build_state_card())
         layout.addWidget(self._build_power_gate_card())
         layout.addWidget(self._build_core_clock_card())
         layout.addWidget(self._build_mem_clock_card())
-        layout.addLayout(self._build_apply_bar())
+        layout.addWidget(self._build_apply_bar())
         layout.addStretch()
 
-    def _build_power_gate_card(self) -> QFrame:
-        self.power_gate_card = QFrame()
-        self.power_gate_card.setProperty("class", "Card")
+    def _build_power_gate_card(self) -> M3Card:
+        self.power_gate_card = M3Card()
         box = QVBoxLayout(self.power_gate_card)
-        box.setSpacing(10)
+        box.setContentsMargins(20, 18, 20, 18)
+        box.setSpacing(12)
 
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
         title = QLabel("dGPU Power Gate (AI Power Gear III)")
         title.setProperty("class", "CardTitle")
         hdr.addWidget(title)
-        self.gate_exp_badge = QLabel("Experimental")
-        self.gate_exp_badge.setProperty("class", "BadgeWarning")
+        self.gate_exp_badge = M3StatusPill("Experimental", tone="warning")
         self.gate_exp_badge.setVisible(False)
         hdr.addWidget(self.gate_exp_badge)
         hdr.addStretch()
-        self.gate_rail_pill = QLabel("")
-        self.gate_rail_pill.setStyleSheet(
-            "background-color: #1c2333; color: #94a3b8; border: 1px solid #2b364c; "
-            "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
-        )
+        self.gate_rail_pill = M3StatusPill("", tone="neutral")
         hdr.addWidget(self.gate_rail_pill)
         box.addLayout(hdr)
 
         desc = QLabel(
-            "Cut the discrete GPU power rail via ACPI and de-enumerate its PCI device "
-            "(~0 W draw; nothing can wake it until restored). Your saved undervolt / "
-            "overclock profile is preserved and re-applied automatically on wake."
+            "Cut the discrete GPU power rail via ACPI and remove its PCI device "
+            "(~0 W draw); saved tuning re-applies automatically on wake."
         )
-        desc.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.4;")
+        desc.setProperty("class", "CardSubtitle")
         desc.setWordWrap(True)
         box.addWidget(desc)
 
-        btn_row = FlowContainer(spacing=10)
+        self.gate_bar = M3SegmentedBar()
         self.gate_btn_group = QButtonGroup(self)
         self.gate_btn_group.setExclusive(True)
         for mode_key, label, tip in (
@@ -257,51 +256,37 @@ class GpuPage(QWidget):
             ("eco", "ECO (dGPU Off)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
             ("auto", "Auto (Battery)", "Prompt to gate off when AC unplugs; restore automatically on AC"),
         ):
-            from PyQt6.QtGui import QFontMetrics
-
-            btn = QPushButton(label)
-            btn.setProperty("class", "ProfileButton")
-            btn.setStyleSheet(
-                "QPushButton:disabled { background-color: #0e121b; color: #4a5568; "
-                "border: 1px dashed #252d3d; }"
-            )
-            btn.setCheckable(True)
-            btn.setMinimumHeight(36)
-            bold_font = btn.font()
-            bold_font.setBold(True)
-            fm = QFontMetrics(bold_font)
-            sample_text = "ECO (Battery only)" if mode_key == "eco" else label
-            btn.setMinimumWidth(fm.horizontalAdvance(sample_text) + 38)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(tip)
+            btn = self.gate_bar.add_segment(label, tooltip=tip, checkable=True, min_height=40)
             btn.clicked.connect(lambda _checked=False, m=mode_key: self._on_gate_mode_clicked(m))
             self.gate_btn_group.addButton(btn)
-            btn_row.addWidget(btn)
             self._gate_buttons[mode_key] = btn
-        box.addWidget(btn_row)
+        box.addWidget(self.gate_bar)
 
         self.gate_info_lbl = QLabel(
             "Optimus: runtime D3cold  ·  ECO: rail off (~0 W)  ·  Auto: prompt on unplug, restore on AC"
         )
-        self.gate_info_lbl.setStyleSheet("color: #718096; font-size: 11px; line-height: 1.35;")
+        self.gate_info_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         self.gate_info_lbl.setWordWrap(True)
         box.addWidget(self.gate_info_lbl)
 
         self.gate_status_lbl = QLabel("")
-        self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        self.gate_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
         self.gate_status_lbl.setWordWrap(True)
         box.addWidget(self.gate_status_lbl)
 
         force_row = QHBoxLayout()
         self.gate_force_close_btn = QPushButton("Close Apps && Power Off")
+        self.gate_force_close_btn.setProperty("class", "DangerTonalButton")
+        self.gate_force_close_btn.setIcon(
+            icons.make_icon("power_off", color=THEME.error, size=15)
+        )
+        self.gate_force_close_btn.setIconSize(QSize(15, 15))
         self.gate_force_close_btn.setToolTip(
             "Open confirmation dialog listing user apps/services currently holding the dGPU"
-        )
-        self.gate_force_close_btn.setStyleSheet(
-            "QPushButton { background-color: #742a2a; color: #fed7d7; border: 1px solid #c53030; "
-            "border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 600; } "
-            "QPushButton:hover { background-color: #9b2c2c; } "
-            "QPushButton:disabled { opacity: 0.5; }"
         )
         self.gate_force_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.gate_force_close_btn.setVisible(False)
@@ -310,94 +295,116 @@ class GpuPage(QWidget):
         force_row.addStretch()
         box.addLayout(force_row)
 
+        note_row = QHBoxLayout()
+        note_row.setSpacing(6)
+        note_icon = QLabel()
+        note_icon.setFixedSize(14, 14)
+        note_icon.setPixmap(icons.render_icon_pixmap("info", color=THEME.on_surface_muted, size=14))
+        note_icon.setStyleSheet("background: transparent;")
+        note_row.addWidget(note_icon, alignment=Qt.AlignmentFlag.AlignTop)
         note = QLabel(
-            "Note: HDMI/DisplayPort ports wired directly to the dGPU stop working while gated off, "
+            "HDMI/DisplayPort outputs wired directly to the dGPU stop working while gated off, "
             "and audio pauses briefly (~0.5 s) while detaching HDMI audio. Reboot recovers if wake ever fails."
         )
-        note.setStyleSheet("color: #718096; font-size: 11px;")
+        note.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         note.setWordWrap(True)
-        box.addWidget(note)
+        note_row.addWidget(note, 1)
+        box.addLayout(note_row)
 
         self._sync_power_gate_card(recheck_supported=True)
         return self.power_gate_card
 
-    def _build_state_card(self) -> QFrame:
-        state_card = QFrame()
-        state_card.setProperty("class", "Card")
+    def _build_state_card(self) -> M3Card:
+        state_card = M3Card()
         sc = QVBoxLayout(state_card)
-        sc.setContentsMargins(16, 11, 16, 11)
-        sc.setSpacing(4)
+        sc.setContentsMargins(18, 12, 18, 12)
+        sc.setSpacing(6)
 
         top = QHBoxLayout()
         top.setSpacing(10)
-        t = QLabel("Discrete GPU")
-        t.setStyleSheet(
-            "color: #8896ab; font-size: 11px; font-weight: 700; "
-            "text-transform: uppercase; letter-spacing: 0.5px;"
-        )
+        self._gpu_icon_lbl = QLabel()
+        self._gpu_icon_lbl.setFixedSize(18, 18)
+        self._gpu_icon_lbl.setPixmap(icons.render_icon_pixmap("gpu", color=THEME.primary, size=18))
+        self._gpu_icon_lbl.setStyleSheet("background: transparent;")
+        top.addWidget(self._gpu_icon_lbl)
+
+        t = QLabel("DISCRETE GPU")
+        t.setProperty("class", "SectionLabel")
         top.addWidget(t)
 
         self.gpu_state_lbl = QLabel("—")
-        self.gpu_state_lbl.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: 700;")
+        self.gpu_state_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+        )
         top.addWidget(self.gpu_state_lbl)
         top.addStretch()
 
-        self.gpu_meta_lbl = QLabel("")
-        self.gpu_meta_lbl.setStyleSheet(
-            "background-color: #131926; color: #94a3b8; border: 1px solid #232b3d; "
-            "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
-        )
+        self.gpu_meta_lbl = M3StatusPill("", tone="neutral")
         self.gpu_meta_lbl.setVisible(False)
         top.addWidget(self.gpu_meta_lbl)
         sc.addLayout(top)
 
         self.gpu_holders_lbl = QLabel("")
-        self.gpu_holders_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.gpu_holders_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         self.gpu_holders_lbl.setWordWrap(True)
         self.gpu_holders_lbl.setVisible(False)
         sc.addWidget(self.gpu_holders_lbl)
         return state_card
 
-    def _build_core_clock_card(self) -> QFrame:
-        card = QFrame()
-        card.setProperty("class", "Card")
+    def _build_core_clock_card(self) -> M3Card:
+        card = M3Card()
         box = QVBoxLayout(card)
-        box.setSpacing(14)
+        box.setContentsMargins(20, 18, 20, 18)
+        box.setSpacing(12)
 
-        title = QLabel("Core Clock Tuning (Undervolt & Curve Flattening)")
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        title = QLabel("Core Clock Tuning")
         title.setProperty("class", "CardTitle")
-        box.addWidget(title)
-
-        tech_explainer = QLabel(
-            "<b>How modern NVIDIA undervolting works:</b><br/>"
-            "• <b>Curve Offset (Overclock / Undervolt):</b> Shifts the voltage/frequency curve upward so the core reaches higher clock speeds at lower voltages, reducing heat and power draw.<br/>"
-            "• <b>Boost Clock Cap (Flattening):</b> An aggressive offset pushes top frequencies into unstable territory under peak boost. Capping the max clock \"flattens\" the top of the curve, keeping the efficiency gains of the undervolt while maintaining total stability."
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(
+            M3IconHelpButton(
+                "How modern NVIDIA undervolting works:\n"
+                "• Curve Offset (Overclock / Undervolt): Shifts the V/F curve upward so the core "
+                "reaches higher clock speeds at lower voltages, reducing heat and power draw.\n"
+                "• Boost Clock Cap (Flattening): Capping the max clock flattens the top of the "
+                "curve, keeping efficiency gains while preventing peak-boost instability."
+            )
         )
-        tech_explainer.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.4;")
-        tech_explainer.setWordWrap(True)
-        box.addWidget(tech_explainer)
+        box.addLayout(hdr)
 
         self.uv_support_lbl = QLabel("")
-        self.uv_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self.uv_support_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         self.uv_support_lbl.setWordWrap(True)
         box.addWidget(self.uv_support_lbl)
 
         # ── Sub-section 1: V/F Curve Offset ──
-        uv_sub_title = QLabel("1. V/F Curve Offset (Core Undervolt)")
-        uv_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600; margin-top: 4px;")
+        uv_sub_title = QLabel("1. V/F Curve Offset")
+        uv_sub_title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"margin-top: 2px; background: transparent;"
+        )
         box.addWidget(uv_sub_title)
 
         uv_sub_desc = QLabel(
-            "Shift frequency up across all voltage points (0 to +255 MHz). "
-            "Higher values reduce voltage for any given clock."
+            "Shift frequency up across all voltage points (0 to +255 MHz) to lower voltage at any clock."
         )
-        uv_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
+        uv_sub_desc.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         uv_sub_desc.setWordWrap(True)
         box.addWidget(uv_sub_desc)
 
         uv_row = QHBoxLayout()
         uv_row.setSpacing(10)
-        self.uv_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.uv_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.uv_slider.setMinimum(0)
         self.uv_slider.setMaximum(dgpu_tune.MAX_OFFSET_MHZ)
         self.uv_slider.setSingleStep(5)
@@ -406,8 +413,11 @@ class GpuPage(QWidget):
         self.uv_val = QLabel("+0 MHz")
         self.uv_val.setProperty("class", "ValueReadoutPill")
         self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.uv_val.setMinimumWidth(80)
+        self.uv_val.setMinimumWidth(86)
         self.uv_reset_btn = QPushButton("Reset")
+        self.uv_reset_btn.setProperty("class", "OutlinedButton")
+        self.uv_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.uv_reset_btn.setIconSize(QSize(14, 14))
         self.uv_reset_btn.setToolTip("Return the V/F offset to stock (0 MHz) now")
         self.uv_reset_btn.clicked.connect(lambda: self._reset_uv())
         uv_row.addWidget(self.uv_slider, 1)
@@ -416,32 +426,38 @@ class GpuPage(QWidget):
         box.addLayout(uv_row)
 
         self.uv_status_lbl = QLabel("")
-        self.uv_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        self.uv_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
         box.addWidget(self.uv_status_lbl)
 
         # Divider
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        divider.setStyleSheet("color: #232b3d; margin-top: 6px; margin-bottom: 6px;")
+        divider.setStyleSheet(
+            f"background-color: {THEME.divider}; max-height: 1px; border: none; margin: 4px 0;"
+        )
         box.addWidget(divider)
 
         # ── Sub-section 2: Max Clock Cap (Curve Flattening) ──
-        mc_sub_title = QLabel("2. Max Boost Clock Cap (Curve Flattening)")
-        mc_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600;")
+        mc_sub_title = QLabel("2. Max Boost Clock Cap")
+        mc_sub_title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+        )
         box.addWidget(mc_sub_title)
 
         mc_sub_desc = QLabel(
-            "Upper-bound the boost clock. The top of the slider is Stock (unlocked). "
-            "Lowering it flattens the curve above the specified MHz to prevent instability."
+            "Upper-bound the boost clock; top of slider is Stock (unlocked). Lowering flattens the top of the curve."
         )
-        mc_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
+        mc_sub_desc.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         mc_sub_desc.setWordWrap(True)
         box.addWidget(mc_sub_desc)
 
         mc_row = QHBoxLayout()
         mc_row.setSpacing(10)
-        self.max_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.max_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.max_slider.setRange(self._normal_min, self._normal_max)
         self.max_slider.setSingleStep(25)
         self.max_slider.setValue(self._normal_max)
@@ -449,8 +465,11 @@ class GpuPage(QWidget):
         self.max_val = QLabel("Stock (unlocked)")
         self.max_val.setProperty("class", "ValueReadoutPill")
         self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.max_val.setMinimumWidth(160)
+        self.max_val.setMinimumWidth(156)
         self.max_reset_btn = QPushButton("Reset")
+        self.max_reset_btn.setProperty("class", "OutlinedButton")
+        self.max_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.max_reset_btn.setIconSize(QSize(14, 14))
         self.max_reset_btn.setToolTip("Unlock the boost clock now")
         self.max_reset_btn.clicked.connect(lambda: self._reset_max())
         mc_row.addWidget(self.max_slider, 1)
@@ -459,38 +478,44 @@ class GpuPage(QWidget):
         box.addLayout(mc_row)
 
         self.max_status_lbl = QLabel("")
-        self.max_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        self.max_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
         box.addWidget(self.max_status_lbl)
 
         return card
 
-    def _build_mem_clock_card(self) -> QFrame:
-        card = QFrame()
-        card.setProperty("class", "Card")
+    def _build_mem_clock_card(self) -> M3Card:
+        card = M3Card()
         box = QVBoxLayout(card)
+        box.setContentsMargins(20, 18, 20, 18)
         box.setSpacing(10)
 
-        title = QLabel("Memory Clock (VRAM Overclock)")
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        title = QLabel("Memory Clock (VRAM)")
         title.setProperty("class", "CardTitle")
-        box.addWidget(title)
-
-        note = QLabel(
-            "Independent memory frequency offset. Positive values overclock VRAM to increase "
-            "memory bandwidth (improving bandwidth-heavy games and workloads), negative values "
-            "underclock, and 0 is stock. The GPU driver automatically validates supported offsets."
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(
+            M3IconHelpButton(
+                "Independent memory frequency offset. Positive values overclock VRAM to increase "
+                "memory bandwidth; negative values underclock; 0 is stock. The GPU driver "
+                "automatically validates supported offsets."
+            )
         )
-        note.setStyleSheet("color: #8896ab; font-size: 11px; line-height: 1.4;")
-        note.setWordWrap(True)
-        box.addWidget(note)
+        box.addLayout(hdr)
 
         self.mem_support_lbl = QLabel("")
-        self.mem_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self.mem_support_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         self.mem_support_lbl.setWordWrap(True)
         box.addWidget(self.mem_support_lbl)
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.mem_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.mem_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.mem_slider.setRange(dgpu_tune.MEM_OFFSET_MIN_MHZ, dgpu_tune.MEM_OFFSET_MAX_MHZ)
         self.mem_slider.setSingleStep(25)
         self.mem_slider.setPageStep(100)
@@ -499,8 +524,11 @@ class GpuPage(QWidget):
         self.mem_val = QLabel("+0 MHz")
         self.mem_val.setProperty("class", "ValueReadoutPill")
         self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mem_val.setMinimumWidth(110)
+        self.mem_val.setMinimumWidth(120)
         self.mem_reset_btn = QPushButton("Reset")
+        self.mem_reset_btn.setProperty("class", "OutlinedButton")
+        self.mem_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.mem_reset_btn.setIconSize(QSize(14, 14))
         self.mem_reset_btn.setToolTip("Return the memory clock offset to stock now")
         self.mem_reset_btn.clicked.connect(lambda: self._reset_mem())
         row.addWidget(self.mem_slider, 1)
@@ -509,37 +537,55 @@ class GpuPage(QWidget):
         box.addLayout(row)
 
         self.mem_status_lbl = QLabel("")
-        self.mem_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+        self.mem_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
         box.addWidget(self.mem_status_lbl)
         return card
 
-    def _build_apply_bar(self) -> QHBoxLayout:
+    def _build_apply_bar(self) -> QFrame:
         """The single commit point for all three controls."""
-        row = QHBoxLayout()
-        row.setSpacing(12)
+        bar = QFrame()
+        bar.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_high}; "
+            f"border-radius: 16px; border: none; }}"
+        )
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(18, 14, 18, 14)
+        row.setSpacing(14)
         self.apply_btn = QPushButton("Apply Tuning")
         self.apply_btn.setProperty("class", "PrimaryButton")
-        self.apply_btn.setMinimumHeight(38)
+        self.apply_btn.setIcon(
+            icons.make_icon("check", color=THEME.on_accent_cta, size=16)
+        )
+        self.apply_btn.setIconSize(QSize(16, 16))
+        self.apply_btn.setMinimumHeight(40)
         self.apply_btn.setToolTip("Apply the core offset, boost clock cap and memory offset together")
         self.apply_btn.clicked.connect(self._apply_all)
         row.addWidget(self.apply_btn)
         self.apply_hint_lbl = QLabel("")
-        self.apply_hint_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 500;")
+        self.apply_hint_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; "
+            f"font-weight: 500; background: transparent;"
+        )
         self.apply_hint_lbl.setWordWrap(True)
         row.addWidget(self.apply_hint_lbl, 1)
-        return row
+        return bar
 
     # ── slider handlers ──
     def _on_uv_slider(self, value: int) -> None:
         self.uv_val.setText(f"+{value} MHz")
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _on_max_slider(self, value: int) -> None:
         self._update_max_readout(value)
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _on_mem_slider(self, _value: int) -> None:
         self._update_mem_readout()
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _update_max_readout(self, value: int) -> None:
@@ -555,25 +601,124 @@ class GpuPage(QWidget):
         else:
             self.mem_val.setText("+0 MHz (stock)")
 
+    def _staged_controls(self) -> list[str]:
+        staged: list[str] = []
+        if self._uv_cfg_key is not None and self.uv_slider.value() != self._uv_cfg_key[1]:
+            staged.append("undervolt")
+        if self._max_cfg_key is not None:
+            saved_en, saved_val = self._max_cfg_key
+            cur_en = self.max_slider.value() < self._observed_ceiling
+            cur_val = self.max_slider.value() if cur_en else 0
+            if (cur_en, cur_val) != (bool(saved_en), int(saved_val) if saved_en else 0):
+                staged.append("max clock")
+        if self._mem_offset_cfg_key is not None and self._mem_offset() != self._mem_offset_cfg_key:
+            staged.append("memory offset")
+        return staged
+
+    def _sync_reset_buttons(self) -> None:
+        st = self._hw or {}
+        uv_dirty_or_active = (
+            (self.uv_slider.value() != 0)
+            or bool(self._uv_cfg_key and self._uv_cfg_key[1] != 0)
+            or (st.get("offset_mhz") not in (None, 0))
+        )
+        uv_can_reset = self._controls_enabled and not self._is_gated and uv_dirty_or_active
+        self.uv_reset_btn.setEnabled(uv_can_reset)
+        self.uv_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if uv_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.uv_reset_btn.setToolTip(
+            "Return the V/F offset to stock (0 MHz) now"
+            if uv_can_reset
+            else "Already at stock (0 MHz)"
+        )
+
+        max_dirty_or_active = (
+            (self.max_slider.value() < self._observed_ceiling)
+            or bool(self._max_cfg_key and self._max_cfg_key[0])
+            or bool(st.get("applied_max"))
+        )
+        max_can_reset = self._controls_enabled and not self._is_gated and max_dirty_or_active
+        self.max_reset_btn.setEnabled(max_can_reset)
+        self.max_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if max_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.max_reset_btn.setToolTip(
+            "Unlock the boost clock now"
+            if max_can_reset
+            else "Already unlocked (stock)"
+        )
+
+        mem_dirty_or_active = (
+            (self._mem_offset() != 0)
+            or bool(self._mem_offset_cfg_key)
+            or bool(st.get("applied_mem"))
+        )
+        mem_can_reset = self._mem_controls_enabled and not self._is_gated and mem_dirty_or_active
+        self.mem_reset_btn.setEnabled(mem_can_reset)
+        self.mem_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if mem_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.mem_reset_btn.setToolTip(
+            "Return the memory clock offset to stock now"
+            if mem_can_reset
+            else "Already at stock (0 MHz)"
+        )
+
     def _update_apply_hint(self, gated: bool = False) -> None:
         """Tell the user when the sliders no longer match what is configured."""
         if gated:
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 500; background: transparent;"
+            )
             self.apply_hint_lbl.setText(
                 "Tuning controls are read-only while dGPU is powered off (gated). "
                 "Switch to Optimus to edit or apply."
             )
+            self.apply_btn.setEnabled(False)
+            self.apply_btn.setCursor(Qt.CursorShape.ArrowCursor)
+            self.apply_btn.setToolTip("Read-only while dGPU is powered off (gated)")
             return
-        staged = []
-        if self._uv_cfg_key is not None and self.uv_slider.value() != self._uv_cfg_key[1]:
-            staged.append("undervolt")
-        if self._max_cfg_key is not None and self.max_slider.value() != self._max_cfg_key[1]:
-            staged.append("max clock")
-        if self._mem_offset_cfg_key is not None and self._mem_offset() != self._mem_offset_cfg_key:
-            staged.append("memory offset")
+
+        staged = self._staged_controls()
+        needs_manual_reapply = False
+        cfg = load_config()
+        st = self._hw or {}
+        if not bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True))) and self._gpu_awake:
+            uv_cfg = int(cfg.get("dgpu_undervolt_offset_mhz", 0) or 0) if cfg.get("dgpu_undervolt_enabled", False) else 0
+            max_cfg = int(cfg.get("dgpu_max_clock_mhz", 0) or 0) if cfg.get("dgpu_max_clock_enabled", False) else 0
+            mem_cfg = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0) if cfg.get("dgpu_mem_offset_enabled", False) else 0
+            if (
+                (uv_cfg and st.get("offset_mhz") != uv_cfg)
+                or (max_cfg and st.get("applied_max") != max_cfg)
+                or (mem_cfg and st.get("applied_mem") != mem_cfg)
+            ):
+                needs_manual_reapply = True
+
+        can_apply = bool(self._controls_enabled and not gated and (staged or needs_manual_reapply))
+        self.apply_btn.setEnabled(can_apply)
+        self.apply_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if can_apply else Qt.CursorShape.ArrowCursor
+        )
         if staged:
+            self.apply_btn.setToolTip("Apply staged tuning changes")
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 600; background: transparent;"
+            )
             self.apply_hint_lbl.setText(
                 "Unapplied: " + ", ".join(staged) + " — press Apply to send them to the GPU.")
         else:
+            self.apply_btn.setToolTip(
+                "Re-apply saved tuning for this session"
+                if needs_manual_reapply
+                else "Sliders already match saved settings"
+            )
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 500; background: transparent;"
+            )
             self.apply_hint_lbl.setText(
                 "Sliders match the saved settings. Tuning is applied while the dGPU "
                 "is awake and in use; it pauses when the dGPU is idle or asleep.")
@@ -704,6 +849,27 @@ class GpuPage(QWidget):
         if mode == dgpu_gate.MODE_ECO and not dgpu_gate.eco_allowed_on_power():
             self._sync_power_gate_card(recheck_supported=False)
             return
+
+        current_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+        gated_now = dgpu_gate.is_gated_off()
+        try:
+            policy = dgpu_gate.read_policy_state() or {}
+        except Exception:  # noqa: BLE001
+            policy = {}
+        if mode == current_mode:
+            if (mode == "optimus" and not gated_now) or (mode == "eco" and gated_now):
+                if mode in self._gate_buttons:
+                    self._gate_buttons[mode].setChecked(True)
+                return
+            if mode == "auto" and not policy.get("pending_off"):
+                try:
+                    ac_on = bool(get_battery_manager().is_ac_online())
+                except Exception:  # noqa: BLE001
+                    ac_on = True
+                if gated_now or ac_on:
+                    if mode in self._gate_buttons:
+                        self._gate_buttons[mode].setChecked(True)
+                    return
         needs_confirm = False
         try:
             if not dgpu_gate.is_gated_off():
@@ -740,7 +906,9 @@ class GpuPage(QWidget):
             btn.setEnabled(False)
         if hasattr(self, "gate_force_close_btn"):
             self.gate_force_close_btn.setEnabled(False)
-        self.gate_status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 500;")
+        self.gate_status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
         self.gate_status_lbl.setText(f"Switching dGPU power mode to {mode}…")
 
         def _worker() -> None:
@@ -789,6 +957,9 @@ class GpuPage(QWidget):
             mode, res = item
             closable, prompt_allowed = [], False
         self._gate_busy = False
+        self._controls_enabled: bool = False
+        self._mem_controls_enabled: bool = False
+        self._is_gated: bool = False
         self._gate_timer.stop()
         for btn in self._gate_buttons.values():
             btn.setEnabled(True)
@@ -875,7 +1046,17 @@ class GpuPage(QWidget):
         except Exception:  # noqa: BLE001
             ac_online = True
         eco_btn = self._gate_buttons.get(dgpu_gate.MODE_ECO)
-        if eco_btn is not None:
+        if isinstance(eco_btn, M3SegmentButton):
+            eco_btn.setText("ECO (Battery only)" if ac_online else "ECO (dGPU Off)")
+            eco_btn.setLocked(
+                ac_online,
+                tooltip=(
+                    "ECO mode is only available on battery power"
+                    if ac_online
+                    else "Prompt & close GPU apps if needed, then cut power rail until switched back"
+                ),
+            )
+        elif eco_btn is not None:
             eco_btn.setEnabled(not ac_online)
             eco_btn.setCursor(
                 Qt.CursorShape.ForbiddenCursor if ac_online else Qt.CursorShape.PointingHandCursor
@@ -888,16 +1069,10 @@ class GpuPage(QWidget):
             )
         pwr_txt = "AC" if ac_online else "Battery"
         if gated:
-            self.gate_rail_pill.setStyleSheet(
-                "background-color: #132c2d; color: #38b2ac; border: 1px solid #2c7a7b; "
-                "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 700;"
-            )
+            self.gate_rail_pill.set_tone("gated")
             self.gate_rail_pill.setText(f"Rail: OFF (~0 W) · {pwr_txt}")
         else:
-            self.gate_rail_pill.setStyleSheet(
-                "background-color: #1c2333; color: #cbd5e0; border: 1px solid #2b364c; "
-                "border-radius: 6px; padding: 3px 9px; font-size: 11px; font-weight: 600;"
-            )
+            self.gate_rail_pill.set_tone("neutral")
             self.gate_rail_pill.setText(f"Rail: ON · {pwr_txt}")
 
         try:
@@ -915,8 +1090,10 @@ class GpuPage(QWidget):
         if override_result is not None:
             _m, res = override_result
             if not res.get("ok"):
-                color = "#ed8936" if res.get("reason") == "gpu_active" else "#fc8181"
-                self.gate_status_lbl.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 500;")
+                color = THEME.warning if res.get("reason") == "gpu_active" else THEME.error
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {color}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
                 self.gate_status_lbl.setText(str(res.get("error") or "Mode transition failed."))
                 if hasattr(self, "gate_force_close_btn"):
                     self.gate_force_close_btn.setVisible(
@@ -942,7 +1119,9 @@ class GpuPage(QWidget):
                 "GPU needs a reboot — NVIDIA driver reset required; dGPU power gating paused."
             )
         elif policy.get("pending_off") and mode in ("eco", "auto"):
-            self.gate_status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
             msg = policy.get("last_error") or "Waiting for dGPU to suspend before cutting power."
             self.gate_status_lbl.setText(f"Pending ({mode}): {msg}")
         elif mode == "optimus":
@@ -970,13 +1149,17 @@ class GpuPage(QWidget):
         self._gpu_awake = bool(gpu.present and not gated and gpu.status == "active")
         if not gpu.present:
             self.gpu_state_lbl.setText("Not present (iGPU only)")
-            self.gpu_state_lbl.setStyleSheet("color: #94a3b8; font-size: 15px; font-weight: 700;")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
             self.gpu_meta_lbl.setVisible(False)
             self.gpu_holders_lbl.setText("")
             self.gpu_holders_lbl.setVisible(False)
         elif gated:
             self.gpu_state_lbl.setText("Off (gated)")
-            self.gpu_state_lbl.setStyleSheet("color: #38b2ac; font-size: 15px; font-weight: 700;")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
             vendor_name = (gpu.vendor or "NVIDIA").upper()
             bdf = ""
             try:
@@ -990,7 +1173,9 @@ class GpuPage(QWidget):
             self.gpu_holders_lbl.setVisible(False)
         elif wedged:
             self.gpu_state_lbl.setText("Needs reboot (wedged)")
-            self.gpu_state_lbl.setStyleSheet("color: #fc8181; font-size: 15px; font-weight: 700;")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
             vendor_name = (gpu.vendor or "NVIDIA").upper()
             bdf = str(self._hw.get("device") or "")
             meta = (
@@ -1005,12 +1190,14 @@ class GpuPage(QWidget):
         else:
             self.gpu_state_lbl.setText(gpu_status_text(gpu))
             if gpu.status == "suspended":
-                color = "#48bb78"
+                color = THEME.success
             elif gpu.status == "active":
-                color = "#ed8936"
+                color = THEME.warning
             else:
-                color = "#e2e8f0"
-            self.gpu_state_lbl.setStyleSheet(f"color: {color}; font-size: 15px; font-weight: 700;")
+                color = THEME.on_surface
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {color}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
             vendor_name = (gpu.vendor or "Discrete").upper()
             bdf = str(self._hw.get("device") or "")
             self.gpu_meta_lbl.setText(f"{vendor_name} · {bdf}" if bdf else f"{vendor_name} GPU")
@@ -1022,13 +1209,17 @@ class GpuPage(QWidget):
         if gated:
             probed_for_display = self._probed or self._hw or {}
             show_saved = (gpu.vendor in (None, "nvidia"))
-            self.uv_support_lbl.setStyleSheet("color: #38b2ac; font-size: 11px; font-weight: 500;")
+            self.uv_support_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_overline}px; font-weight: 500; background: transparent;"
+            )
             self.uv_support_lbl.setText(
                 "dGPU is powered off (gated) — your saved tuning profile is shown below and will "
                 "automatically re-apply when the dGPU powers back on."
             )
         else:
-            self.uv_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+            self.uv_support_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+            )
             # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
             probed = self._probed
             try:
@@ -1056,8 +1247,8 @@ class GpuPage(QWidget):
                 supported = False
             elif supported:
                 device_name = probed_for_display.get("device") or "NVIDIA GPU"
-                asleep_suffix = " — asleep (D3cold)" if not self._gpu_awake else ""
-                self.uv_support_lbl.setText(f"Supported on {device_name}.{asleep_suffix}")
+                asleep_suffix = " · asleep (D3cold)" if not self._gpu_awake else ""
+                self.uv_support_lbl.setText(f"Supported on {device_name}{asleep_suffix}")
             else:
                 self.uv_support_lbl.setText(
                     "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
@@ -1065,22 +1256,22 @@ class GpuPage(QWidget):
             show_saved = supported
 
         controls_enabled = supported and not gated and not wedged
+        self._is_gated = gated
+        self._controls_enabled = controls_enabled
         self.uv_slider.setEnabled(controls_enabled)
-        self.uv_reset_btn.setEnabled(controls_enabled)
         self.max_slider.setEnabled(controls_enabled)
-        self.max_reset_btn.setEnabled(controls_enabled)
 
         if show_saved:
             self._sync_uv_controls(gated=gated)
             self._sync_max_controls(gated=gated)
             self._sync_mem_controls(probed_for_display, gated=gated)
         else:
+            self._mem_controls_enabled = False
             self.mem_slider.setEnabled(False)
-            self.mem_reset_btn.setEnabled(False)
             self.uv_status_lbl.setText("")
             self.max_status_lbl.setText("")
             self.mem_status_lbl.setText("")
-        self.apply_btn.setEnabled(controls_enabled)
+        self._sync_reset_buttons()
         self._update_apply_hint(gated=gated)
 
     def _sync_uv_controls(self, gated: bool = False) -> None:
@@ -1237,8 +1428,8 @@ class GpuPage(QWidget):
                 f"{dgpu_tune.MEM_OFFSET_MAX_MHZ:+d} MHz "
                 "(+ overclocks, − underclocks, 0 = stock).")
 
-        self.mem_slider.setEnabled(mem_supported and not gated)
-        self.mem_reset_btn.setEnabled(mem_supported and not gated)
+        self._mem_controls_enabled = bool(mem_supported and not gated)
+        self.mem_slider.setEnabled(self._mem_controls_enabled)
 
         # Mirror the configured offset into the slider.
         target = wanted if enabled else 0

@@ -25,12 +25,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from . import icons
 from .pages.battery_page import BatteryPage
 from .pages.dashboard_page import DashboardPage
 from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import apply_theme
+from .theme import THEME
 from ..capabilities import detect_system_capabilities, invalidate_capabilities
 from ..config import CONFIG_FILE, load as load_config
 from ..paths import ICON_PATHS, get_runtime_ipc_paths
@@ -204,7 +206,7 @@ class MainWindow(QMainWindow):
         # ── Sidebar Navigation ──
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(230)
+        sidebar.setFixedWidth(224)
         sb_layout = QVBoxLayout(sidebar)
         sb_layout.setContentsMargins(0, 0, 0, 16)
         sb_layout.setSpacing(4)
@@ -219,9 +221,9 @@ class MainWindow(QMainWindow):
         icon_path = ICON_PATHS.get("gigamate")
         if icon_path and Path(icon_path).exists():
             icon_lbl = QLabel()
-            pixmap = QIcon(icon_path).pixmap(QSize(32, 32))
+            pixmap = QIcon(icon_path).pixmap(QSize(34, 34))
             icon_lbl.setPixmap(pixmap)
-            icon_lbl.setFixedSize(32, 32)
+            icon_lbl.setFixedSize(34, 34)
             brand_layout.addWidget(icon_lbl)
 
         title_box = QVBoxLayout()
@@ -231,7 +233,7 @@ class MainWindow(QMainWindow):
         title_lbl = QLabel("GigaMate")
         title_lbl.setObjectName("AppTitle")
         from .. import __version__
-        sub_lbl = QLabel(f"Command Center v{__version__}")
+        sub_lbl = QLabel(f"Center v{__version__}")
         sub_lbl.setObjectName("AppSubtitle")
 
         title_box.addWidget(title_lbl)
@@ -245,27 +247,43 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
 
-        self.btn_dashboard = self._add_nav_btn("  Dashboard", 0, sb_layout)
-        self.btn_battery = self._add_nav_btn("  Battery Care", 1, sb_layout)
-        self.btn_rgb = self._add_nav_btn("  RGB Lighting", 2, sb_layout)
-        self.btn_gpu = self._add_nav_btn("  GPU Tuning", 3, sb_layout)
-        self.btn_settings = self._add_nav_btn("  Settings", 4, sb_layout)
+        self.btn_dashboard = self._add_nav_btn("Dashboard", "dashboard", 0, sb_layout)
+        self.btn_battery = self._add_nav_btn("Battery Care", "battery", 1, sb_layout)
+        self.btn_rgb = self._add_nav_btn("RGB Lighting", "keyboard", 2, sb_layout)
+        self.btn_gpu = self._add_nav_btn("GPU Tuning", "tune", 3, sb_layout)
+        self.btn_settings = self._add_nav_btn("Settings", "settings", 4, sb_layout)
 
         sb_layout.addStretch()
 
         # ── Sidebar Footer (Hardware Info & Daemon Status) ──
         footer_widget = QWidget()
         footer_widget.setObjectName("SidebarFooter")
-        footer_layout = QVBoxLayout(footer_widget)
-        footer_layout.setContentsMargins(14, 10, 14, 12)
-        footer_layout.setSpacing(2)
+        footer_outer = QVBoxLayout(footer_widget)
+        footer_outer.setContentsMargins(12, 8, 12, 0)
+        footer_outer.setSpacing(0)
+
+        footer_pill = QFrame()
+        footer_pill.setStyleSheet(
+            f"background-color: {THEME.surface_container}; "
+            f"border-radius: 14px; border: none;"
+        )
+        footer_layout = QVBoxLayout(footer_pill)
+        footer_layout.setContentsMargins(12, 10, 12, 10)
+        footer_layout.setSpacing(4)
 
         daemon_row = QHBoxLayout()
         daemon_row.setSpacing(6)
-        self._daemon_dot = QLabel("●")
-        self._daemon_dot.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self._daemon_dot = QLabel()
+        self._daemon_dot.setFixedSize(10, 10)
+        self._daemon_dot.setStyleSheet("background: transparent;")
+        self._daemon_dot.setPixmap(
+            icons.render_icon_pixmap("dot", color=THEME.on_surface_muted, size=10)
+        )
         self._daemon_lbl = QLabel("Daemon: checking…")
-        self._daemon_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 600;")
+        self._daemon_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: 11px; "
+            f"font-weight: 600; background: transparent;"
+        )
         daemon_row.addWidget(self._daemon_dot)
         daemon_row.addWidget(self._daemon_lbl)
         daemon_row.addStretch()
@@ -284,11 +302,14 @@ class MainWindow(QMainWindow):
             sys_name = "Standard PC"
 
         sys_lbl = QLabel(sys_name)
-        color = "#64748b" if "Generic Device" in sys_name else "#8896ab"
-        sys_lbl.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: 500;")
+        sys_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: 10px; "
+            f"font-weight: 500; background: transparent;"
+        )
         sys_lbl.setWordWrap(True)
         footer_layout.addWidget(sys_lbl)
 
+        footer_outer.addWidget(footer_pill)
         sb_layout.addWidget(footer_widget)
 
         root_layout.addWidget(sidebar)
@@ -329,11 +350,22 @@ class MainWindow(QMainWindow):
         area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         return area
 
-    def _add_nav_btn(self, text: str, page_idx: int, layout: QVBoxLayout) -> QPushButton:
+    def _add_nav_btn(
+        self, text: str, icon_name: str, page_idx: int, layout: QVBoxLayout
+    ) -> QPushButton:
         btn = QPushButton(text)
         btn.setProperty("class", "NavButton")
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setIcon(
+            icons.make_icon(
+                icon_name,
+                color=THEME.on_surface_variant,
+                active_color=THEME.on_primary_container,
+                size=18,
+            )
+        )
+        btn.setIconSize(QSize(18, 18))
         btn.clicked.connect(lambda: self.stack.setCurrentIndex(page_idx))
         self.nav_group.addButton(btn)
         layout.addWidget(btn)
@@ -375,8 +407,14 @@ class MainWindow(QMainWindow):
         else:
             active = self._service_is_active()
             self._daemon_status_cache = (now, active)
-        self._daemon_dot.setStyleSheet(
-            f"color: {'#48bb78' if active else '#e53e3e'}; font-size: 11px;")
+        status_color = THEME.success if active else THEME.error
+        self._daemon_dot.setPixmap(
+            icons.render_icon_pixmap("dot", color=status_color, size=10)
+        )
+        self._daemon_lbl.setStyleSheet(
+            f"color: {status_color}; font-size: 11px; "
+            f"font-weight: 600; background: transparent;"
+        )
         self._daemon_lbl.setText("Daemon Active" if active else "Daemon Inactive")
 
     def sync_all_from_config(self, invalidate: bool = False) -> None:
@@ -515,6 +553,10 @@ def run_gui() -> None:
     app.setApplicationName("gigamate-center")
     app.setApplicationDisplayName("GigaMate Center")
     app.setDesktopFileName("gigamate-center.desktop")
+
+    icon_path = ICON_PATHS.get("gigamate")
+    if icon_path and Path(icon_path).exists():
+        app.setWindowIcon(QIcon(icon_path))
 
     apply_theme(app)
     window = MainWindow()

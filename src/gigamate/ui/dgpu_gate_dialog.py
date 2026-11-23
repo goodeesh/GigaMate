@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -27,79 +27,17 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .. import dgpu_gate
 from ..battery import get_battery_manager
-
-
-_DIALOG_STYLE = """
-QDialog {
-    background-color: #0f1218;
-    color: #e2e8f0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 13px;
-}
-QFrame#SectionCard {
-    background-color: #171c28;
-    border: 1px solid #232b3d;
-    border-radius: 10px;
-}
-QFrame#WarnCard {
-    background-color: #1f1916;
-    border: 1px solid #9c4221;
-    border-radius: 10px;
-}
-QFrame#BlockerCard {
-    background-color: #24161a;
-    border: 1px solid #c53030;
-    border-radius: 10px;
-}
-QFrame#SafeCard {
-    background-color: #132226;
-    border: 1px solid #2c7a7b;
-    border-radius: 10px;
-}
-QPushButton#RevertBtn {
-    background-color: #1c2333;
-    color: #e2e8f0;
-    border: 1px solid #2d3748;
-    border-radius: 8px;
-    padding: 9px 16px;
-    font-weight: 600;
-}
-QPushButton#RevertBtn:hover {
-    background-color: #252f44;
-    border-color: #4a5568;
-}
-QPushButton#ConfirmBtn {
-    background-color: #c53030;
-    color: #ffffff;
-    border: 1px solid #e53e3e;
-    border-radius: 8px;
-    padding: 9px 18px;
-    font-weight: 700;
-}
-QPushButton#ConfirmBtn:hover {
-    background-color: #e53e3e;
-}
-QPushButton#ConfirmSafeBtn {
-    background-color: #2c7a7b;
-    color: #ffffff;
-    border: 1px solid #38b2ac;
-    border-radius: 8px;
-    padding: 9px 18px;
-    font-weight: 700;
-}
-QPushButton#ConfirmSafeBtn:hover {
-    background-color: #319795;
-}
-QPushButton:disabled {
-    opacity: 0.45;
-}
-"""
+from . import icons
+from .styles import apply_theme, dialog_stylesheet
+from .theme import THEME
+from .widgets import M3Card
 
 
 class DgpuGateConfirmDialog(QDialog):
@@ -138,9 +76,9 @@ class DgpuGateConfirmDialog(QDialog):
             | Qt.WindowType.Window
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        self.setMinimumWidth(500)
-        self.setMaximumWidth(620)
-        self.setStyleSheet(_DIALOG_STYLE)
+        self.setMinimumWidth(580)
+        self.setMaximumWidth(660)
+        self.setStyleSheet(dialog_stylesheet())
 
         self._scan_state()
         self._build_ui()
@@ -182,35 +120,67 @@ class DgpuGateConfirmDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
 
         title_txt, sub_txt = self._header_copy()
+        hdr_row = QHBoxLayout()
+        hdr_row.setSpacing(14)
+
+        if self.displays:
+            badge_bg, badge_fg, badge_icon = THEME.error_container, THEME.error, "monitor"
+        elif self.closable:
+            badge_bg, badge_fg, badge_icon = THEME.warning_container, THEME.warning, "warning"
+        else:
+            badge_bg, badge_fg, badge_icon = THEME.gated_container, THEME.gated, "power_off"
+
+        icon_badge = QLabel()
+        icon_badge.setFixedSize(40, 40)
+        icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_badge.setPixmap(icons.render_icon_pixmap(badge_icon, color=badge_fg, size=20))
+        icon_badge.setStyleSheet(
+            f"background-color: {badge_bg}; border-radius: 20px;"
+        )
+        hdr_row.addWidget(icon_badge, alignment=Qt.AlignmentFlag.AlignTop)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(4)
+
         self.title_lbl = QLabel(title_txt)
-        self.title_lbl.setStyleSheet("color: #ffffff; font-size: 17px; font-weight: 700;")
+        self.title_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 18px; font-weight: 700; background: transparent;"
+        )
         self.title_lbl.setWordWrap(True)
-        root.addWidget(self.title_lbl)
+        title_col.addWidget(self.title_lbl)
 
         self.subtitle_lbl = QLabel(sub_txt)
-        self.subtitle_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        self.subtitle_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_body}px; background: transparent;"
+        )
         self.subtitle_lbl.setWordWrap(True)
-        root.addWidget(self.subtitle_lbl)
+        title_col.addWidget(self.subtitle_lbl)
+        hdr_row.addLayout(title_col, 1)
+        root.addLayout(hdr_row)
 
         # Summary of hardware effects card
-        info_card = QFrame()
-        info_card.setObjectName("SectionCard")
+        info_card = M3Card()
         info_lay = QVBoxLayout(info_card)
-        info_lay.setContentsMargins(14, 12, 14, 12)
+        info_lay.setContentsMargins(16, 14, 16, 14)
         info_lay.setSpacing(6)
         info_hdr = QLabel("What this action will do")
-        info_hdr.setStyleSheet("color: #cbd5e0; font-size: 12px; font-weight: 700;")
+        info_hdr.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 700; background: transparent;"
+        )
         info_lay.addWidget(info_hdr)
         info_body = QLabel(
             "• Cut the dGPU power rail via ACPI and remove its PCI device (~0 W draw)\n"
             "• Preserve your saved undervolt / overclock profile (re-applies automatically on wake)\n"
             "• Disable HDMI/DisplayPort outputs wired directly to the dGPU while off"
         )
-        info_body.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.45;")
+        info_body.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; background: transparent;"
+        )
         info_body.setWordWrap(True)
         info_lay.addWidget(info_body)
         root.addWidget(info_card)
@@ -218,80 +188,154 @@ class DgpuGateConfirmDialog(QDialog):
         # Holders / blocker section
         self.holders_card = QFrame()
         holders_lay = QVBoxLayout(self.holders_card)
-        holders_lay.setContentsMargins(14, 12, 14, 12)
+        holders_lay.setContentsMargins(16, 14, 16, 14)
         holders_lay.setSpacing(8)
 
         if self.displays:
-            self.holders_card.setObjectName("BlockerCard")
+            self.holders_card.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.error_container}; "
+                f"border: 1px solid {THEME.error_border}; border-radius: {THEME.radius_tile}px; }}"
+            )
+            h_row = QHBoxLayout()
+            h_row.setSpacing(8)
+            h_ico = QLabel()
+            h_ico.setFixedSize(18, 18)
+            h_ico.setPixmap(icons.render_icon_pixmap("monitor", color=THEME.error, size=18))
+            h_ico.setStyleSheet("background: transparent; border: none;")
+            h_row.addWidget(h_ico)
             hdr = QLabel("External display connected to dGPU")
-            hdr.setStyleSheet("color: #feb2b2; font-size: 13px; font-weight: 700;")
-            holders_lay.addWidget(hdr)
+            hdr.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_section}px; font-weight: 700; "
+                f"background: transparent; border: none;"
+            )
+            h_row.addWidget(hdr, 1)
+            holders_lay.addLayout(h_row)
             msg = QLabel(
                 f"Connected display output(s): {', '.join(self.displays)}\n\n"
                 "Disconnect displays wired to the discrete GPU before powering it off."
             )
-            msg.setStyleSheet("color: #fed7d7; font-size: 12px; line-height: 1.4;")
+            msg.setStyleSheet(
+                f"color: {THEME.on_surface}; font-size: {THEME.text_caption}px; "
+                f"background: transparent; border: none;"
+            )
             msg.setWordWrap(True)
             holders_lay.addWidget(msg)
         elif self.closable:
-            self.holders_card.setObjectName("WarnCard")
-            hdr = QLabel(
-                f"Apps/services to be closed ({len(self.closable)})"
+            self.holders_card.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.warning_container}; "
+                f"border: 1px solid {THEME.warning_border}; border-radius: {THEME.radius_tile}px; }}"
             )
-            hdr.setStyleSheet("color: #fbd38d; font-size: 13px; font-weight: 700;")
-            holders_lay.addWidget(hdr)
+            h_row = QHBoxLayout()
+            h_row.setSpacing(8)
+            h_ico = QLabel()
+            h_ico.setFixedSize(18, 18)
+            h_ico.setPixmap(icons.render_icon_pixmap("warning", color=THEME.warning, size=18))
+            h_ico.setStyleSheet("background: transparent; border: none;")
+            h_row.addWidget(h_ico)
+            hdr = QLabel(f"Apps/services to be closed ({len(self.closable)})")
+            hdr.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_section}px; font-weight: 700; "
+                f"background: transparent; border: none;"
+            )
+            h_row.addWidget(hdr, 1)
+            holders_lay.addLayout(h_row)
             warn = QLabel(
                 "These apps/services currently hold the discrete GPU open and will be "
                 "closed immediately before cutting power (unsaved work may be lost):"
             )
-            warn.setStyleSheet("color: #fed7aa; font-size: 12px; line-height: 1.4;")
+            warn.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; "
+                f"background: transparent; border: none;"
+            )
             warn.setWordWrap(True)
             holders_lay.addWidget(warn)
 
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setMaximumHeight(150)
-            scroll.setStyleSheet("background: transparent;")
+            row_count = min(4, len(self.closable))
+            scroll.setMinimumHeight(min(140, row_count * 38 + 6))
+            scroll.setMaximumHeight(180)
+            scroll.setStyleSheet("background: transparent; border: none;")
             list_container = QWidget()
             list_container.setStyleSheet("background: transparent;")
             list_lay = QVBoxLayout(list_container)
-            list_lay.setContentsMargins(4, 2, 4, 2)
-            list_lay.setSpacing(4)
+            list_lay.setContentsMargins(0, 2, 0, 2)
+            list_lay.setSpacing(6)
             for h in self.closable:
-                row_lbl = QLabel(f"• {h.label}")
-                row_lbl.setStyleSheet("color: #ffffff; font-size: 12px; font-weight: 600;")
+                row_pill = QFrame()
+                row_pill.setStyleSheet(
+                    f"QFrame {{ background-color: {THEME.surface_container}; "
+                    f"border-radius: 10px; border: none; }}"
+                )
+                rp_lay = QHBoxLayout(row_pill)
+                rp_lay.setContentsMargins(10, 6, 10, 6)
+                row_lbl = QLabel(h.label)
+                row_lbl.setStyleSheet(
+                    f"color: {THEME.on_surface}; font-size: {THEME.text_caption}px; "
+                    f"font-weight: 600; background: transparent;"
+                )
                 if h.cmdline:
-                    row_lbl.setToolTip(h.cmdline)
-                list_lay.addWidget(row_lbl)
+                    row_pill.setToolTip(h.cmdline)
+                rp_lay.addWidget(row_lbl)
+                list_lay.addWidget(row_pill)
             list_lay.addStretch()
             scroll.setWidget(list_container)
             holders_lay.addWidget(scroll)
         else:
-            self.holders_card.setObjectName("SafeCard")
+            self.holders_card.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.gated_container}; "
+                f"border: 1px solid {THEME.gated_border}; border-radius: {THEME.radius_tile}px; }}"
+            )
+            h_row = QHBoxLayout()
+            h_row.setSpacing(8)
+            h_ico = QLabel()
+            h_ico.setFixedSize(18, 18)
+            h_ico.setPixmap(icons.render_icon_pixmap("check", color=THEME.gated, size=18))
+            h_ico.setStyleSheet("background: transparent; border: none;")
+            h_row.addWidget(h_ico)
             hdr = QLabel("No apps holding the discrete GPU")
-            hdr.setStyleSheet("color: #81e6d9; font-size: 13px; font-weight: 700;")
-            holders_lay.addWidget(hdr)
+            hdr.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_section}px; font-weight: 700; "
+                f"background: transparent; border: none;"
+            )
+            h_row.addWidget(hdr, 1)
+            holders_lay.addLayout(h_row)
             msg = QLabel(
                 "No user applications are currently using the discrete GPU — it can "
                 "power off cleanly without closing anything."
             )
-            msg.setStyleSheet("color: #b2f5ea; font-size: 12px; line-height: 1.4;")
+            msg.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; "
+                f"background: transparent; border: none;"
+            )
             msg.setWordWrap(True)
             holders_lay.addWidget(msg)
 
         root.addWidget(self.holders_card)
 
         if self.audio_holders or (self.topo.audio_bdf and not self.displays):
+            audio_row = QHBoxLayout()
+            audio_row.setSpacing(6)
+            audio_ico = QLabel()
+            audio_ico.setFixedSize(14, 14)
+            audio_ico.setPixmap(icons.render_icon_pixmap("volume", color=THEME.on_surface_muted, size=14))
+            audio_ico.setStyleSheet("background: transparent;")
+            audio_row.addWidget(audio_ico, alignment=Qt.AlignmentFlag.AlignTop)
             audio_note = QLabel(
                 "Audio note: Sound may pause briefly (~0.5 s) while detaching the GPU's HDMI audio device."
             )
-            audio_note.setStyleSheet("color: #718096; font-size: 11px;")
+            audio_note.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+            )
             audio_note.setWordWrap(True)
-            root.addWidget(audio_note)
+            audio_row.addWidget(audio_note, 1)
+            root.addLayout(audio_row)
 
         self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 600;")
+        self.status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+        )
         self.status_lbl.setWordWrap(True)
         self.status_lbl.setVisible(False)
         root.addWidget(self.status_lbl)
@@ -299,7 +343,13 @@ class DgpuGateConfirmDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         self.revert_btn = QPushButton("Revert to Optimus (Keep Open)")
-        self.revert_btn.setObjectName("RevertBtn")
+        self.revert_btn.setProperty("class", "OutlinedButton")
+        self.revert_btn.setIcon(
+            icons.make_icon("undo", color=THEME.on_surface, size=15)
+        )
+        self.revert_btn.setIconSize(QSize(15, 15))
+        self.revert_btn.setMinimumHeight(40)
+        self.revert_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.revert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.revert_btn.clicked.connect(self._on_revert_clicked)
         btn_row.addWidget(self.revert_btn)
@@ -308,12 +358,29 @@ class DgpuGateConfirmDialog(QDialog):
 
         if self.closable:
             self.confirm_btn = QPushButton("Close Apps && Power Off dGPU")
-            self.confirm_btn.setObjectName("ConfirmBtn")
+            self.confirm_btn.setProperty("class", "DangerButton")
+            self.confirm_btn.setIcon(
+                icons.make_icon("power_off", color=THEME.on_accent_cta, size=15)
+            )
+            self.confirm_btn.setIconSize(QSize(15, 15))
         else:
             self.confirm_btn = QPushButton("Power Off dGPU")
-            self.confirm_btn.setObjectName("ConfirmSafeBtn")
-        self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.confirm_btn.setEnabled(not bool(self.displays))
+            self.confirm_btn.setProperty("class", "SuccessButton")
+            self.confirm_btn.setIcon(
+                icons.make_icon("power_off", color=THEME.on_accent_cta, size=15)
+            )
+            self.confirm_btn.setIconSize(QSize(15, 15))
+        self.confirm_btn.setMinimumHeight(40)
+        self.confirm_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        if self.displays:
+            self.confirm_btn.setCursor(Qt.CursorShape.ForbiddenCursor)
+            self.confirm_btn.setToolTip(
+                "Disconnect external displays wired to the discrete GPU first"
+            )
+            self.confirm_btn.setEnabled(False)
+        else:
+            self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.confirm_btn.setEnabled(True)
         self.confirm_btn.clicked.connect(self._on_confirm_clicked)
         btn_row.addWidget(self.confirm_btn)
 
@@ -337,7 +404,9 @@ class DgpuGateConfirmDialog(QDialog):
         self._ac_timer.stop()
         self.revert_btn.setEnabled(False)
         self.confirm_btn.setEnabled(False)
-        self.status_lbl.setStyleSheet("color: #ed8936; font-size: 12px; font-weight: 600;")
+        self.status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+        )
         self.status_lbl.setText(
             "Closing apps holding dGPU and cutting power rail…"
             if self.closable
@@ -370,11 +439,18 @@ class DgpuGateConfirmDialog(QDialog):
             return
 
         err = str(res.get("error") or "Failed to power off discrete GPU.")
-        self.status_lbl.setStyleSheet("color: #fc8181; font-size: 12px; font-weight: 600;")
+        self.status_lbl.setStyleSheet(
+            f"color: {THEME.error}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+        )
         self.status_lbl.setText(f"Could not power off dGPU: {err}")
         self.status_lbl.setVisible(True)
         self.revert_btn.setEnabled(True)
         self.confirm_btn.setEnabled(not bool(self.displays))
+        self.confirm_btn.setCursor(
+            Qt.CursorShape.ForbiddenCursor
+            if self.displays
+            else Qt.CursorShape.PointingHandCursor
+        )
 
     def _check_ac_returned(self) -> None:
         if self._busy or self._user_acted:
@@ -462,6 +538,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
 
         app = QApplication.instance() or QApplication(sys.argv[:1])
+        apply_theme(app)
         dlg = DgpuGateConfirmDialog(
             trigger=args.trigger,
             target_mode=args.target_mode,
