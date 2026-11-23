@@ -257,10 +257,17 @@ class GpuPage(QWidget):
             ("eco", "ECO (dGPU Off)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
             ("auto", "Auto (Battery)", "Prompt to gate off when AC unplugs; restore automatically on AC"),
         ):
+            from PyQt6.QtGui import QFontMetrics
+
             btn = QPushButton(label)
             btn.setProperty("class", "ProfileButton")
             btn.setCheckable(True)
             btn.setMinimumHeight(36)
+            bold_font = btn.font()
+            bold_font.setBold(True)
+            fm = QFontMetrics(bold_font)
+            sample_text = "ECO (Battery only)" if mode_key == "eco" else label
+            btn.setMinimumWidth(fm.horizontalAdvance(sample_text) + 38)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tip)
             btn.clicked.connect(lambda _checked=False, m=mode_key: self._on_gate_mode_clicked(m))
