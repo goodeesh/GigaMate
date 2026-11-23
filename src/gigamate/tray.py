@@ -78,7 +78,8 @@ logger = logging.getLogger(__name__)
 APP_ID = "gigamate"
 APP_ICON = "gigamate"
 BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
-STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds
+STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds on AC
+STATUS_POLL_BATTERY_MS = 15000  # 15 seconds on battery
 _ACPI_RETRY_SEC = 5.0  # throttle for re-probing the ACPI backend when absent
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
 UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000  # daily; one tiny HTTPS req/day
@@ -140,6 +141,7 @@ class GigaMateTrayApp:
         self._status_items: List[Gtk.MenuItem] = []
         self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
         self._status_timer_id: Optional[int] = None
+        self._status_poll_ms: int = STATUS_POLL_INTERVAL_MS
 
         # Hotkey listener state
         self._hotkey_listener: Optional[HotkeyListener] = None
@@ -995,7 +997,7 @@ class GigaMateTrayApp:
                     eco_item.set_label(eco_label)
                 except Exception:
                     pass
-        self._update_profile_items_sensitivity()
+        self._update_profile_items_sensitivity(gst=gst)
 
     def _append_dgpu_power_section(self) -> Optional[Gtk.MenuItem]:
         """Add a dGPU Power Gate flyout (Optimus / ECO / Auto) when supported."""
@@ -1648,11 +1650,45 @@ class GigaMateTrayApp:
     # Status polling
     # ────────────────────────────────────────────
 
+    def _desired_status_poll_ms(self, ac_online: Optional[bool]) -> int:
+        if ac_online is False:
+            return STATUS_POLL_BATTERY_MS
+        return STATUS_POLL_INTERVAL_MS
+
+    def _poll_status_timer(self) -> bool:
+        expected_id = self._status_timer_id
+        keep = self._update_status(_from_timer=True)
+        if not keep:
+            if self._status_timer_id == expected_id:
+                self._status_timer_id = None
+            return False
+        if self._status_timer_id != expected_id:
+            return False
+        return True
+
+    def _sync_status_poll_interval(
+        self, ac_online: Optional[bool], *, from_timer: bool = False
+    ) -> None:
+        desired_ms = self._desired_status_poll_ms(ac_online)
+        if desired_ms == getattr(self, "_status_poll_ms", STATUS_POLL_INTERVAL_MS):
+            return
+        self._status_poll_ms = desired_ms
+        old_id = getattr(self, "_status_timer_id", None)
+        if old_id is not None:
+            if not from_timer:
+                try:
+                    GLib.source_remove(old_id)
+                except Exception:
+                    pass
+            self._status_timer_id = GLib.timeout_add(
+                desired_ms, self._poll_status_timer
+            )
+
     def _start_status_polling(self) -> None:
         """Start the periodic status update timer."""
         self._update_status()
         self._status_timer_id = GLib.timeout_add(
-            STATUS_POLL_INTERVAL_MS, self._update_status
+            self._status_poll_ms, self._poll_status_timer
         )
 
     def _tray_icon_key(self, gpu=None) -> str:
@@ -1712,7 +1748,7 @@ class GigaMateTrayApp:
         except Exception:
             pass
 
-    def _update_status(self) -> bool:
+    def _update_status(self, _from_timer: bool = False) -> bool:
         """Poll ACPI sensors and dGPU state, updating the status labels. Returns True to keep timer alive."""
         self._sync_from_external_config()
         self._ensure_acpi_controller()
@@ -1762,10 +1798,12 @@ class GigaMateTrayApp:
 
 
         # Battery status
+        ac_online: Optional[bool] = None
         try:
             bat_mgr = get_battery_manager()
             bat_info = bat_mgr.get_battery_info()
             if bat_info.present:
+                ac_online = bool(bat_info.ac_online)
                 cal = evaluate_calibration_state(bat_mgr, self._config)
                 if cal.get("event") in ("completed", "timeout", "auto_started"):
                     self._sync_from_external_config()
@@ -1779,6 +1817,8 @@ class GigaMateTrayApp:
                 self._update_battery_label(bat_info)
         except Exception:
             pass
+
+        self._sync_status_poll_interval(ac_online, from_timer=_from_timer)
 
         text = "  |  ".join(parts) if parts else "Status: N/A"
 
@@ -1888,12 +1928,15 @@ class GigaMateTrayApp:
     # Callbacks: ACPI / Power Profile
     # ────────────────────────────────────────────
 
-    def _update_profile_items_sensitivity(self) -> None:
+    def _update_profile_items_sensitivity(self, gst=None) -> None:
         items = getattr(self, "_profile_items", {})
         if not items or self._model is None:
             return
         usable = profile_usable(self._model, self._config)
-        high_ok = dgpu_gate.high_power_profiles_allowed()
+        if gst is not None and "high_power_profiles_allowed" in gst:
+            high_ok = bool(gst["high_power_profiles_allowed"])
+        else:
+            high_ok = dgpu_gate.high_power_profiles_allowed()
         if high_ok == getattr(self, "_high_power_allowed_cache", None):
             return
         self._high_power_allowed_cache = high_ok

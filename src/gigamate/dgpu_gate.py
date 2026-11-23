@@ -118,6 +118,7 @@ _TRANSITION_LOCK_NAME = "gigamate-dgpu-transition.lock"
 _TRANSITION_LOCK_WAIT_SEC = 10.0
 
 # Watcher edge-tracking state (protected by _WATCHER_LOCK).
+_SUPPORT_CACHE_TTL_SEC = 60.0
 _WATCHER_LOCK = threading.Lock()
 _watcher_state: Dict[str, object] = {
     "last_ac": None,
@@ -127,6 +128,8 @@ _watcher_state: Dict[str, object] = {
     "last_attempt_rstatus": None,
     "last_policy_publish": 0.0,
     "awaiting_confirm_at": 0.0,
+    "supported_cache": None,
+    "supported_checked_at": 0.0,
 }
 
 
@@ -925,11 +928,22 @@ def _write_policy_state(state: Dict) -> None:
         pass
 
 
-def is_gated_off(pci_sysfs: Path = PCI_SYSFS) -> bool:
+def is_gated_off(
+    pci_sysfs: Path = PCI_SYSFS,
+    *,
+    topo: Optional[DgpuTopology] = None,
+    gate_state: Optional[Dict] = None,
+) -> bool:
     """Whether the dGPU is currently gated off (self-healing if PCI device returned)."""
-    state = read_gate_state()
+    state = read_gate_state() if gate_state is None else gate_state
     if not state.get("gated"):
         return False
+    if topo is not None:
+        return topo.bdf is None
+    bdf = state.get("bdf")
+    if isinstance(bdf, str) and _BDF_RE.fullmatch(bdf):
+        # Fast path: single stat() check on the known gated BDF.
+        return not (pci_sysfs / bdf).is_dir()
     # If the GPU is visible on PCI again (e.g. BIOS repowered after resume),
     # treat it as NOT gated off.
     if find_dgpu_topology(pci_sysfs=pci_sysfs).bdf is not None:
@@ -1215,12 +1229,23 @@ def get_gate_config() -> Optional[Tuple[DgpuGateConfig, ModelMatch]]:
 def get_availability(
     pci_sysfs: Path = PCI_SYSFS,
     acpi_sysfs: Path = GIGAMATE_ACPI_SYSFS,
+    *,
+    topo: Optional[DgpuTopology] = None,
+    gated: Optional[bool] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Return ``(supported, unsupported_reason)`` for dGPU power gating."""
     try:
-        topo = find_dgpu_topology(pci_sysfs=pci_sysfs, acpi_sysfs=acpi_sysfs)
-        if topo.bdf is None and not is_gated_off(pci_sysfs=pci_sysfs):
-            return False, "no_dgpu"
+        is_off = gated
+        if is_off is None and topo is None:
+            is_off = is_gated_off(pci_sysfs=pci_sysfs)
+        if not is_off:
+            if topo is None:
+                topo = find_dgpu_topology(pci_sysfs=pci_sysfs, acpi_sysfs=acpi_sysfs)
+            if topo.bdf is None:
+                if is_off is None:
+                    is_off = is_gated_off(pci_sysfs=pci_sysfs, topo=topo)
+                if not is_off:
+                    return False, "no_dgpu"
         if get_gate_config() is None:
             return False, "no_profile"
         if acpi_eval_backend(sysfs_dir=acpi_sysfs) == "none":
@@ -1256,9 +1281,17 @@ def availability_message(reason: Optional[str]) -> str:
 def is_supported(
     pci_sysfs: Path = PCI_SYSFS,
     acpi_sysfs: Path = GIGAMATE_ACPI_SYSFS,
+    *,
+    topo: Optional[DgpuTopology] = None,
+    gated: Optional[bool] = None,
 ) -> bool:
     """Whether dGPU power gating is supported and actionable on this system."""
-    return get_availability(pci_sysfs=pci_sysfs, acpi_sysfs=acpi_sysfs)[0]
+    return get_availability(
+        pci_sysfs=pci_sysfs,
+        acpi_sysfs=acpi_sysfs,
+        topo=topo,
+        gated=gated,
+    )[0]
 
 
 def configured_mode() -> str:
@@ -1951,6 +1984,8 @@ def watcher_tick(now: Optional[float] = None) -> None:
         last_attempt_rstatus = _watcher_state["last_attempt_rstatus"]
         last_policy_publish = float(_watcher_state["last_policy_publish"] or 0.0)
         awaiting_confirm_at = float(_watcher_state.get("awaiting_confirm_at") or 0.0)
+        supported_cache = _watcher_state.get("supported_cache")
+        supported_checked_at = float(_watcher_state.get("supported_checked_at") or 0.0)
 
     if mode == MODE_OPTIMUS:
         if awaiting_confirm_at:
@@ -1961,11 +1996,23 @@ def watcher_tick(now: Optional[float] = None) -> None:
                 _publish_policy(mode=mode, pending_off=False)
         return
 
-    if not is_supported():
+    currently_off = is_gated_off()
+    if (
+        supported_cache is None
+        or mode_changed
+        or ac_changed
+        or ev_changed
+        or now < supported_checked_at
+        or (now - supported_checked_at >= _SUPPORT_CACHE_TTL_SEC)
+    ):
+        supported_cache = is_supported(gated=currently_off)
+        with _WATCHER_LOCK:
+            _watcher_state["supported_cache"] = supported_cache
+            _watcher_state["supported_checked_at"] = now
+    if not supported_cache:
         return
 
     want_off = (mode == MODE_ECO and not ac_online) or (mode == MODE_AUTO and not ac_online)
-    currently_off = is_gated_off()
 
     if not want_off:
         if awaiting_confirm_at:
@@ -2145,13 +2192,17 @@ def schedule_resume_reconcile() -> None:
 def get_status(check_helper: bool = False) -> Dict:
     """Return unified dGPU power-gate status for CLI, UI, tray, and reports."""
     mode = configured_mode()
-    topo = find_dgpu_topology()
     gate_state = read_gate_state()
+    gated = is_gated_off(gate_state=gate_state)
+    topo = (
+        DgpuTopology(acpi_path=read_dgpu_acpi_path())
+        if gated
+        else find_dgpu_topology()
+    )
     policy_state = read_policy_state()
-    gated = is_gated_off()
     resolved = get_gate_config()
     eval_be = acpi_eval_backend()
-    supported, unsupported_reason = get_availability()
+    supported, unsupported_reason = get_availability(topo=topo, gated=gated)
 
     try:
         ac_online = bool(get_battery_manager().is_ac_online())
@@ -2195,7 +2246,7 @@ def get_status(check_helper: bool = False) -> Dict:
         "gated": gated,
         "ac_online": ac_online,
         "eco_allowed": not ac_online,
-        "high_power_profiles_allowed": high_power_profiles_allowed(),
+        "high_power_profiles_allowed": (not gated) and (mode != MODE_ECO),
         "eval_backend": eval_be,
         "helper_installed": helper_path() is not None,
         "bdf": topo.bdf or gate_state.get("bdf"),

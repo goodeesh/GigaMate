@@ -71,12 +71,14 @@ HELPER_INSTALLED = "/usr/lib/gigamate/gigamate-dgpu-nvml"
 # Watcher timing (seconds). Each idle probe opens NVML briefly, so keep the
 # cadence modest to avoid churn (and avoid resetting the driver's autosuspend).
 TICK_SEC = 2.0
+TICK_IDLE_SEC = 5.0
 IDLE_POLL_SEC = 30.0
 IDLE_CLEAR_SEC = 60.0
 RETRY_BACKOFF_SEC = 30.0
 IDLE_UTIL_REAPPLY = 5  # percent
 
 _HELPER_TIMEOUT = 15
+_nvidia_bdf_cache: Optional[Tuple[Path, str]] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,6 +87,21 @@ _HELPER_TIMEOUT = 15
 
 def find_nvidia_bdf() -> Optional[str]:
     """Return the PCI BDF of the NVIDIA 3D/VGA controller, or None."""
+    global _nvidia_bdf_cache
+    cached = _nvidia_bdf_cache
+    if cached is not None and cached[0] == PCI_SYSFS:
+        dev = PCI_SYSFS / cached[1]
+        try:
+            vendor = (dev / "vendor").read_text().strip()
+            klass = (dev / "class").read_text().strip()
+            if vendor == NVIDIA_VENDOR and (
+                klass.startswith("0x0300") or klass.startswith("0x0302")
+            ):
+                return cached[1]
+        except OSError:
+            pass
+        _nvidia_bdf_cache = None
+
     try:
         names = os.listdir(PCI_SYSFS)
     except OSError:
@@ -99,6 +116,7 @@ def find_nvidia_bdf() -> Optional[str]:
         if vendor != NVIDIA_VENDOR:
             continue
         if klass.startswith("0x0300") or klass.startswith("0x0302"):
+            _nvidia_bdf_cache = (PCI_SYSFS, name)
             return name
     return None
 
@@ -505,16 +523,29 @@ class DgpuWatcher:
     # ── state machine ──
     def tick(self, now: Optional[float] = None, force_apply: bool = False) -> None:
         now = time.monotonic() if now is None else now
-        bdf = find_nvidia_bdf()
-        if bdf is None:
-            gated_state = None
-            try:
-                from . import dgpu_gate
+        bdf = None
+        gated_state = None
+        try:
+            from . import dgpu_gate
 
-                if dgpu_gate.is_gated_off():
-                    gated_state = dgpu_gate.read_gate_state()
-            except Exception:  # noqa: BLE001
-                gated_state = None
+            state = dgpu_gate.read_gate_state()
+            if state.get("gated") and dgpu_gate.is_gated_off(gate_state=state):
+                gated_state = state
+        except Exception:  # noqa: BLE001
+            gated_state = None
+
+        if gated_state is None:
+            bdf = find_nvidia_bdf()
+
+        if bdf is None:
+            if gated_state is None:
+                try:
+                    from . import dgpu_gate
+
+                    if dgpu_gate.is_gated_off():
+                        gated_state = dgpu_gate.read_gate_state()
+                except Exception:  # noqa: BLE001
+                    gated_state = None
 
             if gated_state is not None:
                 self._was_gated = True
@@ -734,10 +765,10 @@ class DgpuWatcher:
             snapshot["applied_max"] = self._applied_max
             snapshot["applied_mem"] = self._applied_mem
             snapshot["idle_cleared"] = self._idle_cleared
-            snapshot["ts"] = time.time()
         blob = json.dumps(snapshot, sort_keys=True)
         if blob != self._last_state_json:
             self._last_state_json = blob
+            snapshot["ts"] = time.time()
             _write_state_file(snapshot)
 
     def mark_cleared(self) -> None:
@@ -887,6 +918,27 @@ def human_status() -> str:
     return f"{label} pending"
 
 
+def _watcher_sleep_interval(watcher_inst: DgpuWatcher) -> float:
+    """Return adaptive watcher sleep cadence based on current dGPU state."""
+    try:
+        from . import dgpu_gate
+
+        if (
+            dgpu_gate.is_transition_in_progress()
+            or dgpu_gate.is_confirm_dialog_open()
+        ):
+            return TICK_SEC
+    except Exception:  # noqa: BLE001
+        pass
+
+    st = watcher_inst.status()
+    rstatus = st.get("runtime")
+    pstate = st.get("power_state")
+    if rstatus in ("gated_off", "suspended", None) or pstate in ("OFF", "D3cold"):
+        return TICK_IDLE_SEC
+    return TICK_SEC
+
+
 def run_watcher() -> None:
     """Entry point for the watcher service (``gigamate-dgpu-watch``).
 
@@ -937,7 +989,7 @@ def run_watcher() -> None:
             watcher.write_state()
         except Exception as exc:  # noqa: BLE001
             logger.debug("dGPU watcher tick failed: %s", exc)
-        time.sleep(TICK_SEC)
+        time.sleep(_watcher_sleep_interval(watcher))
 
 
 if __name__ == "__main__":

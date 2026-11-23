@@ -487,3 +487,44 @@ class TestAmdSmartShift:
         mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
         mon.detect()
         assert mon._check_dynamic_boost_supported() is False
+
+
+class TestDgpuGateFastPaths:
+    def test_dgpu_gate_is_gated_off_fast_path_and_self_heal(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        gate_state = {"gated": True, "bdf": "0000:01:00.0"}
+        with patch.object(dgpu_gate, "find_dgpu_topology") as find_mock:
+            assert dgpu_gate.is_gated_off(pci_sysfs=tmp_path, gate_state=gate_state) is True
+            find_mock.assert_not_called()
+
+            (tmp_path / "0000:01:00.0").mkdir()
+            assert dgpu_gate.is_gated_off(pci_sysfs=tmp_path, gate_state=gate_state) is False
+            find_mock.assert_not_called()
+
+    def test_dgpu_gate_get_status_single_scan(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state",
+                          return_value={"gated": True, "bdf": "0000:01:00.0", "vendor": "nvidia"}), \
+             patch.object(dgpu_gate, "get_gate_config", return_value=None), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "find_dgpu_topology") as find_mock:
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gated"] is True
+            assert st["bdf"] == "0000:01:00.0"
+            find_mock.assert_not_called()
+
+        topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", vendor="nvidia")
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state", return_value={}), \
+             patch.object(dgpu_gate, "get_gate_config", return_value=None), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo) as find_mock:
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gated"] is False
+            assert st["bdf"] == "0000:01:00.0"
+            assert find_mock.call_count == 1

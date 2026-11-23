@@ -803,3 +803,69 @@ def test_helper_probe_reports_ceiling(capsys):
     assert out["mem_max_clock_mhz"] == 12001
     assert out["mem_offset_api"] is True
     assert out["helper_version"] == mod.HELPER_VERSION
+
+
+def test_write_state_skips_unchanged_snapshots():
+    w = dgpu_tune.DgpuWatcher()
+    written = []
+    times = iter([100.0, 102.0])
+    with mock.patch.object(dgpu_tune, "_write_state_file", side_effect=written.append), \
+         mock.patch.object(dgpu_tune.time, "time", side_effect=lambda: next(times)) as ts_mock:
+        w.write_state()
+        w.write_state()  # Unchanged snapshot -> must not write again.
+        assert len(written) == 1
+        assert written[0]["ts"] == 100.0
+        assert ts_mock.call_count == 1
+
+        w.set_desired(True, 120, True)
+        w.write_state()
+        assert len(written) == 2
+        assert written[1]["desired_offset"] == 120
+        assert written[1]["ts"] == 102.0
+        assert ts_mock.call_count == 2
+
+
+def test_watcher_sleep_interval_adaptive():
+    from gigamate import dgpu_gate
+
+    w = dgpu_tune.DgpuWatcher()
+    with mock.patch.object(dgpu_gate, "is_transition_in_progress", return_value=False), \
+         mock.patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False):
+        w._status["runtime"] = "gated_off"
+        w._status["power_state"] = "OFF"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_IDLE_SEC
+
+        w._status["runtime"] = "suspended"
+        w._status["power_state"] = "D3cold"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_IDLE_SEC
+
+        w._status["runtime"] = "active"
+        w._status["power_state"] = "D0"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_SEC
+
+    with mock.patch.object(dgpu_gate, "is_transition_in_progress", return_value=True), \
+         mock.patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False):
+        w._status["runtime"] = "gated_off"
+        w._status["power_state"] = "OFF"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_SEC
+
+
+def test_find_nvidia_bdf_caches_and_recovers(tmp_path):
+    import shutil
+
+    pci = tmp_path / "pci"
+    dev = pci / "0000:01:00.0"
+    dev.mkdir(parents=True)
+    (dev / "vendor").write_text("0x10de\n")
+    (dev / "class").write_text("0x030000\n")
+
+    with mock.patch.object(dgpu_tune, "PCI_SYSFS", pci), \
+         mock.patch.object(dgpu_tune, "_nvidia_bdf_cache", None):
+        assert dgpu_tune.find_nvidia_bdf() == "0000:01:00.0"
+
+        with mock.patch.object(dgpu_tune.os, "listdir", wraps=dgpu_tune.os.listdir) as ld:
+            assert dgpu_tune.find_nvidia_bdf() == "0000:01:00.0"
+            assert ld.call_count == 0
+
+        shutil.rmtree(dev)
+        assert dgpu_tune.find_nvidia_bdf() is None

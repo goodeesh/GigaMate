@@ -107,6 +107,27 @@ class NvidiaGpuMonitor:
 
     def read_state(self) -> GpuState:
         """Read the current GPU power state (sysfs only, never wakes it)."""
+        if self._device is None and self._pci_sysfs is None:
+            try:
+                from .dgpu_gate import _BDF_RE, read_gate_state
+
+                gate_state = read_gate_state()
+                if gate_state.get("gated"):
+                    bdf = gate_state.get("bdf")
+                    if (
+                        isinstance(bdf, str)
+                        and _BDF_RE.fullmatch(bdf)
+                        and not (self._sysfs_root / bdf).is_dir()
+                    ):
+                        return GpuState(
+                            present=True,
+                            status="gated_off",
+                            power_state="OFF",
+                            vendor=gate_state.get("vendor") or "nvidia",
+                            gated_off=True,
+                        )
+            except Exception:
+                pass
         if not self.is_available:
             if self._pci_sysfs is None:
                 try:
