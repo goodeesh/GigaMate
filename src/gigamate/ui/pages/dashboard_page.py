@@ -114,6 +114,7 @@ class DashboardPage(QWidget):
         self.prof_group.setExclusive(True)
         self.prof_layout = btn_layout
         self._btn_ids: list = []
+        self._profile_base_labels: dict = {}
 
         # Shown only for experimental (unconfirmed) models before opt-in.
         self.btn_enable_experimental = QPushButton("Enable Experimental Profiles")
@@ -125,6 +126,16 @@ class DashboardPage(QWidget):
         prof_layout.addWidget(self.btn_enable_experimental)
 
         prof_layout.addLayout(btn_layout)
+
+        self.dgpu_profile_lock_notice = QLabel(
+            "🔒 Performance & Gaming locked while the discrete GPU is powered off (ECO / gated)."
+        )
+        self.dgpu_profile_lock_notice.setStyleSheet(
+            "color: #f6ad55; font-size: 12px; font-weight: 600; padding: 2px 2px;"
+        )
+        self.dgpu_profile_lock_notice.setWordWrap(True)
+        self.dgpu_profile_lock_notice.setVisible(False)
+        prof_layout.addWidget(self.dgpu_profile_lock_notice)
 
         # ── Discovered Profile Power Limits Comparison Matrix ──
         self.power_limits_container = QFrame()
@@ -271,11 +282,17 @@ class DashboardPage(QWidget):
                 self.prof_layout.removeWidget(btn)
                 btn.deleteLater()
             self._profile_buttons = {}
+            self._profile_base_labels = {}
             self._btn_ids = []
             for pid in ids:
                 label = (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                self._profile_base_labels[pid] = label
                 btn = QPushButton(label)
                 btn.setProperty("class", "ProfileButton")
+                btn.setStyleSheet(
+                    "QPushButton:disabled { background-color: #0e121b; color: #4a5568; "
+                    "border: 1px dashed #252d3d; }"
+                )
                 btn.setCheckable(True)
                 btn.setMinimumHeight(48)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -287,12 +304,24 @@ class DashboardPage(QWidget):
 
         high_ok = dgpu_gate.high_power_profiles_allowed()
         for pid, btn in self._profile_buttons.items():
-            allowed = usable and (high_ok or pid not in (2, 3))
+            base_label = self._profile_base_labels.get(
+                pid, (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
+            )
+            locked_by_gate = usable and not high_ok and pid in (2, 3)
+            allowed = usable and not locked_by_gate
             btn.setEnabled(allowed)
-            if usable and not high_ok and pid in (2, 3):
+            if locked_by_gate:
+                btn.setText(f"🔒 {base_label}")
+                btn.setCursor(Qt.CursorShape.ForbiddenCursor)
                 btn.setToolTip("Unavailable while dGPU is powered off (ECO / gated)")
             else:
+                btn.setText(base_label)
+                btn.setCursor(
+                    Qt.CursorShape.PointingHandCursor if allowed else Qt.CursorShape.ArrowCursor
+                )
                 btn.setToolTip("")
+        if hasattr(self, "dgpu_profile_lock_notice"):
+            self.dgpu_profile_lock_notice.setVisible(bool(usable and not high_ok))
         self.btn_enable_experimental.setVisible(
             bool(match is not None and match.experimental and not usable))
 

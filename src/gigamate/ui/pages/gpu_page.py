@@ -261,6 +261,10 @@ class GpuPage(QWidget):
 
             btn = QPushButton(label)
             btn.setProperty("class", "ProfileButton")
+            btn.setStyleSheet(
+                "QPushButton:disabled { background-color: #0e121b; color: #4a5568; "
+                "border: 1px dashed #252d3d; }"
+            )
             btn.setCheckable(True)
             btn.setMinimumHeight(36)
             bold_font = btn.font()
@@ -873,6 +877,9 @@ class GpuPage(QWidget):
         eco_btn = self._gate_buttons.get(dgpu_gate.MODE_ECO)
         if eco_btn is not None:
             eco_btn.setEnabled(not ac_online)
+            eco_btn.setCursor(
+                Qt.CursorShape.ForbiddenCursor if ac_online else Qt.CursorShape.PointingHandCursor
+            )
             eco_btn.setText("ECO (Battery only)" if ac_online else "ECO (dGPU Off)")
             eco_btn.setToolTip(
                 "ECO mode is only available on battery power"
