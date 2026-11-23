@@ -807,6 +807,13 @@ def force_close_and_gate_off(
         mode_norm = str(mode).strip().lower()
         if mode_norm not in VALID_MODES:
             raise ValueError(f"Unknown dGPU power mode {mode!r}; expected one of {VALID_MODES}")
+        if mode_norm == MODE_ECO and not eco_allowed_on_power():
+            return {
+                "ok": False,
+                "reason": "ac_online",
+                "mode": configured_mode(),
+                "error": "ECO mode is only available on battery power; use Optimus or Auto on AC.",
+            }
         if mode_norm == MODE_AUTO:
             try:
                 if bool(get_battery_manager().is_ac_online()):
@@ -1618,6 +1625,7 @@ def _gate_off_locked(
         allow_active=allow_active,
     )
     if res.get("ok"):
+        _step_down_high_power_profile()
         _publish_policy(mode=mode, pending_off=False)
     else:
         reason = res.get("reason")
@@ -1702,7 +1710,7 @@ def _gate_on_locked() -> Dict:
     if restart_powerd:
         args.append("--restart-nvidia-powerd")
 
-    res = _run_helper(args, timeout=25.0)
+    res = _run_helper(args, timeout=45.0)
     if res.get("ok"):
         if mode == MODE_ECO:
             update_config(lambda c: {**c, "dgpu_power_mode": MODE_OPTIMUS})
@@ -1723,12 +1731,64 @@ def _gate_on_locked() -> Dict:
 # Mode policy (Optimus / ECO / Auto) & AC / Resume sync
 # ──────────────────────────────────────────────────────────────────────────────
 
+_HIGH_POWER_PROFILE_IDS = frozenset({2, 3})
+
+
+def eco_allowed_on_power() -> bool:
+    """Whether ECO mode is permitted on the current power source (battery only)."""
+    try:
+        return not bool(get_battery_manager().is_ac_online())
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def high_power_profiles_allowed() -> bool:
+    """Whether Performance/Gaming profiles are allowed (blocked when dGPU is gated/ECO)."""
+    if is_gated_off():
+        return False
+    return configured_mode() != MODE_ECO
+
+
+def _step_down_high_power_profile() -> None:
+    """Step down Performance/Gaming to Balanced when the dGPU is gated off."""
+    try:
+        cfg = load_config()
+        prof = cfg.get("acpi_profile")
+        if prof not in _HIGH_POWER_PROFILE_IDS:
+            return
+        update_config(lambda c: {**c, "acpi_profile": 1})
+        try:
+            from .acpi import AcpiController, FanProfile
+
+            ctrl = AcpiController()
+            if ctrl.available:
+                ctrl.set_profile(FanProfile.BALANCED)
+        except Exception:  # noqa: BLE001
+            pass
+        if cfg.get("sync_system_power", False):
+            try:
+                from .system_power import sync_system_power
+
+                sync_system_power(1)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def set_mode(mode: str, apply_now: bool = True) -> Dict:
     """Persist ``dgpu_power_mode`` ('optimus' | 'eco' | 'auto') and reconcile."""
     mode = str(mode or "").strip().lower()
     if mode not in VALID_MODES:
         raise ValueError(f"Unknown dGPU power mode {mode!r}; expected one of {VALID_MODES}")
+
+    if mode == MODE_ECO and not eco_allowed_on_power():
+        return {
+            "ok": False,
+            "reason": "ac_online",
+            "mode": configured_mode(),
+            "error": "ECO mode is only available on battery power; use Optimus or Auto on AC.",
+        }
 
     update_config(lambda c: {**c, "dgpu_power_mode": mode})
 
@@ -1774,6 +1834,16 @@ def _sync_policy_locked(reason: str = "sync", mode: Optional[str] = None) -> Dic
         return {"ok": True, "mode": mode, "action": "unsupported", "gated": False}
 
     if mode == MODE_ECO:
+        if not eco_allowed_on_power():
+            update_config(lambda c: {**c, "dgpu_power_mode": MODE_OPTIMUS})
+            if is_gated_off():
+                res = _gate_on_locked()
+                res["mode"] = MODE_OPTIMUS
+                res["action"] = "gate_on"
+                res["auto_switched_from"] = MODE_ECO
+                return res
+            _publish_policy(mode=MODE_OPTIMUS, pending_off=False)
+            return {"ok": True, "mode": MODE_OPTIMUS, "action": "auto_optimus_ac", "gated": False}
         want_off = True
     else:  # MODE_AUTO
         try:
@@ -1894,14 +1964,14 @@ def watcher_tick(now: Optional[float] = None) -> None:
     if not is_supported():
         return
 
-    want_off = (mode == MODE_ECO) or (mode == MODE_AUTO and not ac_online)
+    want_off = (mode == MODE_ECO and not ac_online) or (mode == MODE_AUTO and not ac_online)
     currently_off = is_gated_off()
 
     if not want_off:
         if awaiting_confirm_at:
             with _WATCHER_LOCK:
                 _watcher_state["awaiting_confirm_at"] = 0.0
-        if currently_off and (ac_changed or ev_changed or mode_changed or (now - last_attempt_at >= _RETRY_BACKOFF_SEC)):
+        if (currently_off or mode == MODE_ECO) and (ac_changed or ev_changed or mode_changed or (now - last_attempt_at >= _RETRY_BACKOFF_SEC)):
             with _WATCHER_LOCK:
                 _watcher_state["last_attempt_at"] = now
             sync_policy(reason="watcher_restore")
@@ -2124,6 +2194,8 @@ def get_status(check_helper: bool = False) -> Dict:
         "mode": mode,
         "gated": gated,
         "ac_online": ac_online,
+        "eco_allowed": not ac_online,
+        "high_power_profiles_allowed": high_power_profiles_allowed(),
         "eval_backend": eval_be,
         "helper_installed": helper_path() is not None,
         "bdf": topo.bdf or gate_state.get("bdf"),

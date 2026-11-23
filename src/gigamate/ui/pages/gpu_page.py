@@ -690,6 +690,9 @@ class GpuPage(QWidget):
     def _on_gate_mode_clicked(self, mode: str) -> None:
         if self._gate_busy:
             return
+        if mode == dgpu_gate.MODE_ECO and not dgpu_gate.eco_allowed_on_power():
+            self._sync_power_gate_card(recheck_supported=False)
+            return
         needs_confirm = False
         try:
             if not dgpu_gate.is_gated_off():
@@ -860,6 +863,15 @@ class GpuPage(QWidget):
             ac_online = bool(get_battery_manager().is_ac_online())
         except Exception:  # noqa: BLE001
             ac_online = True
+        eco_btn = self._gate_buttons.get(dgpu_gate.MODE_ECO)
+        if eco_btn is not None:
+            eco_btn.setEnabled(not ac_online)
+            eco_btn.setText("ECO (Battery only)" if ac_online else "ECO (dGPU Off)")
+            eco_btn.setToolTip(
+                "ECO mode is only available on battery power"
+                if ac_online
+                else "Prompt & close GPU apps if needed, then cut power rail until switched back"
+            )
         pwr_txt = "AC" if ac_online else "Battery"
         if gated:
             self.gate_rail_pill.setStyleSheet(

@@ -1018,18 +1018,8 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
     prev_state = _read_state()
     full_on = f"{args.path}.{args.method}"
     ok_eval, _, backend, eval_err = _eval_acpi_method(full_on)
-    if not ok_eval:
-        return _emit({
-            "ok": False,
-            "gated": True,
-            "reboot_recommended": True,
-            "backend": backend,
-            "error": (
-                f"{eval_err}. Reboot your laptop to recover the discrete GPU cleanly."
-            ),
-        })
-
-    time.sleep(0.2)
+    if ok_eval:
+        time.sleep(0.2)
 
     bridge_bdf = args.bridge_bdf or prev_state.get("bridge_bdf")
     if bridge_bdf and _is_valid_bdf(bridge_bdf):
@@ -1040,17 +1030,15 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
             except OSError:
                 pass
 
+    rescan_err: Optional[str] = None
     try:
         _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
     except OSError as exc:
-        return _emit({
-            "ok": False,
-            "gated": True,
-            "reboot_recommended": True,
-            "backend": backend,
-            "error": f"PCI rescan failed ({exc}). Reboot your laptop to recover the GPU.",
-        })
+        rescan_err = str(exc)
 
+    # Even if PG00._ON hit AE_AML_LOOP_TIMEOUT (~30.5s), pciehp often already
+    # hot-added and bound the GPU when L23D brought the link up. Wait/check
+    # for enumeration before deciding whether recovery failed.
     deadline = time.monotonic() + 10.0
     found_bdf: Optional[str] = None
     found_vendor: Optional[str] = None
@@ -1068,15 +1056,13 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
         time.sleep(0.25)
 
     if found_bdf is None:
+        msg = eval_err or (f"PCI rescan failed ({rescan_err})" if rescan_err else "dGPU did not re-enumerate after ACPI power-on and PCI rescan")
         return _emit({
             "ok": False,
             "gated": True,
             "reboot_recommended": True,
             "backend": backend,
-            "error": (
-                "dGPU did not re-enumerate after ACPI power-on and PCI rescan. "
-                "Reboot your laptop to recover the GPU cleanly."
-            ),
+            "error": f"{msg}. Reboot your laptop to recover the discrete GPU cleanly.",
         })
 
     # Ensure kernel runtime PM is enabled again on GPU and audio sibling.
@@ -1126,7 +1112,7 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
         "backend": backend,
         "ts": time.time(),
     })
-    return _emit({
+    out = {
         "ok": True,
         "gated": False,
         "bdf": found_bdf,
@@ -1137,7 +1123,10 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
         "sta_after": sta_after,
         "nvidia_powerd_active": powerd_active,
         "backend": backend,
-    })
+    }
+    if not ok_eval and eval_err:
+        out["acpi_warning"] = eval_err
+    return _emit(out)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

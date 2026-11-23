@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ... import dgpu_gate
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
 from ...config import load as load_config, update_config
@@ -235,6 +236,9 @@ class DashboardPage(QWidget):
         self._ensure_acpi_controller()
         if not profile_usable(self._model_profile(), self._config()):
             return
+        if profile_id in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
+            self._refresh_telemetry()
+            return
 
         def _mutate(cfg):
             cfg["acpi_profile"] = profile_id
@@ -281,8 +285,14 @@ class DashboardPage(QWidget):
                 self._profile_buttons[pid] = btn
                 self._btn_ids.append(pid)
 
-        for btn in self._profile_buttons.values():
-            btn.setEnabled(usable)
+        high_ok = dgpu_gate.high_power_profiles_allowed()
+        for pid, btn in self._profile_buttons.items():
+            allowed = usable and (high_ok or pid not in (2, 3))
+            btn.setEnabled(allowed)
+            if usable and not high_ok and pid in (2, 3):
+                btn.setToolTip("Unavailable while dGPU is powered off (ECO / gated)")
+            else:
+                btn.setToolTip("")
         self.btn_enable_experimental.setVisible(
             bool(match is not None and match.experimental and not usable))
 

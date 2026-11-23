@@ -983,6 +983,16 @@ def cmd_profile_set(args, name: str) -> None:
             print(f"Available: {', '.join(str(p) for p in pids)}")
             sys.exit(1)
         fp = FanProfile(val)
+        if val in (2, 3):
+            from . import dgpu_gate
+
+            if not dgpu_gate.high_power_profiles_allowed():
+                pname = _profile_name(fp, profile)
+                print(
+                    f"Profile '{pname}' ({val}) is unavailable while the discrete GPU is powered off (ECO / gated).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
         if ctrl.set_profile(fp):
             _record_profile_and_sync(val)
             pname = _profile_name(fp, profile)
@@ -1003,6 +1013,16 @@ def cmd_profile_set(args, name: str) -> None:
         print(f"Profile '{name}' ({fp.value}) is not available on this model.")
         print(f"Available: {', '.join(str(p) for p in pids)}")
         sys.exit(1)
+    if fp.value in (2, 3):
+        from . import dgpu_gate
+
+        if not dgpu_gate.high_power_profiles_allowed():
+            pname = _profile_name(fp, profile)
+            print(
+                f"Profile '{pname}' ({fp.value}) is unavailable while the discrete GPU is powered off (ECO / gated).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if ctrl.set_profile(fp):
         _record_profile_and_sync(fp.value)
         pname = _profile_name(fp, profile)
@@ -1017,6 +1037,12 @@ def cmd_profile_cycle(args) -> None:
     """Cycle to the next power profile and show OSD."""
     ctrl, match, _cfg = _open_profiles(args)
     pids, p_data = _profile_set_for(match.profile)
+    from . import dgpu_gate
+
+    if not dgpu_gate.high_power_profiles_allowed():
+        filtered = [p for p in pids if p not in (2, 3)]
+        if filtered:
+            pids = filtered
 
     current_fp = ctrl.get_profile()
     current_val = current_fp.value if current_fp is not None else pids[0]

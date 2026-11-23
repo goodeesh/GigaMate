@@ -963,8 +963,14 @@ class GigaMateTrayApp:
     def _update_dgpu_power_labels(self, gst=None) -> None:
         parent = getattr(self, "_dgpu_power_parent_item", None)
         status_item = getattr(self, "_dgpu_power_status_item", None)
-        if parent is None and status_item is None:
+        eco_item = getattr(self, "_dgpu_power_items", {}).get(dgpu_gate.MODE_ECO)
+        if parent is None and status_item is None and eco_item is None:
             return
+        if gst is None:
+            try:
+                gst = dgpu_gate.get_status(check_helper=False)
+            except Exception:
+                gst = {}
         parent_label, status_label = self._dgpu_power_labels(gst)
         if parent is not None and parent_label != getattr(self, "_dgpu_power_parent_label", None):
             self._dgpu_power_parent_label = parent_label
@@ -978,6 +984,18 @@ class GigaMateTrayApp:
                 status_item.set_label(status_label)
             except Exception:
                 pass
+        if eco_item is not None:
+            ac = bool(gst.get("ac_online", True))
+            eco_allowed = not ac
+            eco_label = "ECO (Battery only)" if ac else "ECO (dGPU Off)"
+            if eco_allowed != getattr(self, "_dgpu_eco_allowed_cache", None):
+                self._dgpu_eco_allowed_cache = eco_allowed
+                try:
+                    eco_item.set_sensitive(eco_allowed)
+                    eco_item.set_label(eco_label)
+                except Exception:
+                    pass
+        self._update_profile_items_sensitivity()
 
     def _append_dgpu_power_section(self) -> Optional[Gtk.MenuItem]:
         """Add a dGPU Power Gate flyout (Optimus / ECO / Auto) when supported."""
@@ -1002,10 +1020,12 @@ class GigaMateTrayApp:
         self._dgpu_power_parent_label = parent_label
         submenu = parent.get_submenu()
 
+        ac = bool(gst.get("ac_online", True))
+        self._dgpu_eco_allowed_cache = not ac
         group = None
         for key, label in (
             ("optimus", "Optimus (Default)"),
-            ("eco", "ECO (dGPU Off)"),
+            ("eco", "ECO (Battery only)" if ac else "ECO (dGPU Off)"),
             ("auto", "Auto (Off on Battery)"),
         ):
             item = Gtk.RadioMenuItem(group=group, label=label)
@@ -1013,6 +1033,8 @@ class GigaMateTrayApp:
                 group = item
             if key == mode:
                 item.set_active(True)
+            if key == "eco":
+                item.set_sensitive(not ac)
             item.connect("toggled", self._on_dgpu_power_mode_changed, key)
             submenu.append(item)
             self._dgpu_power_items[key] = item
@@ -1035,6 +1057,17 @@ class GigaMateTrayApp:
         if getattr(self, "_dgpu_power_busy", False):
             return
         prev_mode = getattr(self, "_dgpu_power_mode", "optimus")
+        if mode == dgpu_gate.MODE_ECO and not dgpu_gate.eco_allowed_on_power():
+            items = getattr(self, "_dgpu_power_items", {})
+            if prev_mode in items:
+                old_b = self._building
+                self._building = True
+                try:
+                    items[prev_mode].set_active(True)
+                finally:
+                    self._building = old_b
+            self._update_dgpu_power_labels()
+            return
         self._dgpu_power_mode = mode
         self._dgpu_power_busy = True
         self._update_dgpu_power_labels()
@@ -1262,17 +1295,23 @@ class GigaMateTrayApp:
 
         group = None
         self._profile_items = {}
+        self._profile_base_labels: Dict[int, str] = {}
+        high_ok = dgpu_gate.high_power_profiles_allowed()
+        self._high_power_allowed_cache = high_ok
 
         for pid_int in sorted(int(k) for k in profile_names.keys()):
             pid_str = str(pid_int)
             entry = profile_names.get(pid_str, {})
             label = entry.get("name", f"Profile {pid_int}")
-            item = Gtk.RadioMenuItem(group=group, label=label)
+            self._profile_base_labels[pid_int] = label
+            allowed = usable and (high_ok or pid_int not in (2, 3))
+            disp_label = f"{label} (dGPU off)" if (usable and not high_ok and pid_int in (2, 3)) else label
+            item = Gtk.RadioMenuItem(group=group, label=disp_label)
             if group is None:
                 group = item
             if usable and self._current_acpi_profile == pid_int:
                 item.set_active(True)
-            item.set_sensitive(usable)
+            item.set_sensitive(allowed)
             item.connect("toggled", self._on_profile_changed, pid_int)
             self._menu.append(item)
             self._profile_items[pid_int] = item
@@ -1849,6 +1888,26 @@ class GigaMateTrayApp:
     # Callbacks: ACPI / Power Profile
     # ────────────────────────────────────────────
 
+    def _update_profile_items_sensitivity(self) -> None:
+        items = getattr(self, "_profile_items", {})
+        if not items or self._model is None:
+            return
+        usable = profile_usable(self._model, self._config)
+        high_ok = dgpu_gate.high_power_profiles_allowed()
+        if high_ok == getattr(self, "_high_power_allowed_cache", None):
+            return
+        self._high_power_allowed_cache = high_ok
+        base_labels = getattr(self, "_profile_base_labels", {})
+        for pid, item in items.items():
+            allowed = usable and (high_ok or pid not in (2, 3))
+            base = base_labels.get(pid, f"Profile {pid}")
+            lbl = f"{base} (dGPU off)" if (usable and not high_ok and pid in (2, 3)) else base
+            try:
+                item.set_sensitive(allowed)
+                item.set_label(lbl)
+            except Exception:
+                pass
+
     def _on_profile_changed(self, item: Gtk.RadioMenuItem, profile_id: int) -> None:
         """Handle power profile radio button selection."""
         if not item.get_active() or self._building:
@@ -1856,6 +1915,16 @@ class GigaMateTrayApp:
         if self._acpi_controller is None:
             return
         if not profile_usable(self._model, self._config):
+            return
+        if profile_id in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
+            prev = self._current_acpi_profile
+            if prev in self._profile_items:
+                old_b = self._building
+                self._building = True
+                try:
+                    self._profile_items[prev].set_active(True)
+                finally:
+                    self._building = old_b
             return
         try:
             self._acpi_controller.set_profile(FanProfile(profile_id))
@@ -1877,6 +1946,10 @@ class GigaMateTrayApp:
         # Get available profiles
         pids = sorted(int(k) for k in self._model.profile.acpi.profiles.keys())
         p_data = self._model.profile.acpi.profiles
+        if not dgpu_gate.high_power_profiles_allowed():
+            filtered = [p for p in pids if p not in (2, 3)]
+            if filtered:
+                pids = filtered
 
         if not pids:
             return
