@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 import threading
+from typing import Optional
 
 from .paths import CONFIG_DIR
 
@@ -68,6 +69,7 @@ DEFAULT_CONFIG = {
     "ac_profile_mode": "off",
     "ac_profile_id": 1,
     "battery_profile_id": 0,
+    "disabled_profiles": [],
     # Discrete-GPU (NVIDIA) sleep-aware undervolt: V/F clock offset in MHz.
     # 0 = stock/off. Applied only while the dGPU is awake (see dgpu_tune.py).
     "dgpu_undervolt_enabled": False,
@@ -175,6 +177,26 @@ def _coerce_profile_num(value, default: int) -> int:
         return v if 0 <= v <= 3 else default
     except (ValueError, TypeError):
         return default
+
+
+def _sanitize_disabled_profiles(value) -> list:
+    if value is None or isinstance(value, (str, bytes, dict)):
+        return []
+    try:
+        it = iter(value)
+    except TypeError:
+        return []
+    seen = set()
+    for item in it:
+        if isinstance(item, bool):
+            continue
+        try:
+            v = int(item)
+        except (ValueError, TypeError):
+            continue
+        if 0 <= v <= 7:
+            seen.add(v)
+    return sorted(seen)
 
 
 def _sanitize_custom_hotkeys(value) -> dict:
@@ -397,6 +419,8 @@ def load():
         if "battery_profile_id" in data:
             data["battery_profile_id"] = _coerce_profile_num(
                 data["battery_profile_id"], DEFAULT_CONFIG["battery_profile_id"])
+        if "disabled_profiles" in data:
+            data["disabled_profiles"] = _sanitize_disabled_profiles(data["disabled_profiles"])
         if "custom_hotkeys" in data:
             data["custom_hotkeys"] = _sanitize_custom_hotkeys(data["custom_hotkeys"])
         if "charge_limit" in data:
@@ -650,6 +674,7 @@ def _write_config(config):
         "ac_profile_id": _coerce_profile_num(config.get("ac_profile_id"), DEFAULT_CONFIG["ac_profile_id"]),
         "battery_profile_id": _coerce_profile_num(
             config.get("battery_profile_id"), DEFAULT_CONFIG["battery_profile_id"]),
+        "disabled_profiles": _sanitize_disabled_profiles(config.get("disabled_profiles", [])),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:
@@ -708,3 +733,18 @@ def apply_from_config(dev):
         return set_off(dev)
     pct = max(1, effective_brightness_pct(cfg))
     return set_rgb(dev, effective_rgb_hex(cfg), pct)
+
+
+def enabled_acpi_profiles(discovered: dict, cfg: Optional[dict] = None) -> dict:
+    """Filter discovered ACPI profiles by removing user-disabled IDs.
+
+    Always keeps at least one profile active: if all discovered profiles
+    would be filtered out, returns a shallow copy of ``discovered``.
+    """
+    if cfg is None:
+        cfg = load()
+    disabled = set(_sanitize_disabled_profiles(cfg.get("disabled_profiles", [])))
+    filtered = {pid: info for pid, info in discovered.items() if int(pid) not in disabled}
+    if not filtered and discovered:
+        return dict(discovered)
+    return filtered

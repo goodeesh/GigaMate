@@ -639,6 +639,15 @@ class RgbPage(QWidget):
 
     def _on_brightness_debounce(self) -> None:
         pct = max(5, self.brightness_slider.value())
+
+        def _mutate(cfg):
+            cfg["rgb_enabled"] = True
+            cfg["brightness_pct"] = pct
+            cfg["last_brightness_pct"] = pct
+            cfg["brightness"] = pct_to_legacy_brightness(pct)
+            return cfg
+
+        self.cfg = update_config(_mutate)
         dev = get_keyboard()
         if dev is not None:
             set_rgb(
@@ -646,6 +655,7 @@ class RgbPage(QWidget):
                 effective_rgb_hex(self.cfg),
                 pct,
             )
+        self._highlight_active()
 
     def _on_brightness_slider_released(self) -> None:
         self._set_brightness_pct(self.brightness_slider.value())

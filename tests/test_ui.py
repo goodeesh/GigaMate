@@ -2088,3 +2088,136 @@ def test_gpu_page_gate_disclaimer_cancel_and_accept(qapp):
              patch.object(page, "_refresh"):
             page._on_gate_mode_clicked("auto")
         assert load_config().get("dgpu_gate_disclaimer_accepted") is True
+
+
+def test_rgb_brightness_debounce_persists_and_apply_profile_preserves(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate import hardware
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.rgb_page import RgbPage
+
+    page = RgbPage()
+    page.brightness_slider.setValue(42)
+    page._on_brightness_debounce()
+
+    cfg = load_config()
+    assert cfg["brightness_pct"] == 42
+
+    mock_acpi = MagicMock()
+    mock_acpi.available = True
+    hardware.apply_profile(1, cfg={**cfg, "profile_rgb_enabled": True}, sync_system=False, acpi=mock_acpi)
+    assert load_config()["brightness_pct"] == 42
+
+
+def test_tray_backlight_full_rgb_persists_brightness_atomically(qapp):
+    from unittest.mock import MagicMock
+    from gigamate.config import load as load_config
+    from gigamate.tray import GigaMateTrayApp
+
+    tray = GigaMateTrayApp()
+    tray._building = False
+    item = MagicMock()
+    item.get_active.return_value = True
+    tray._on_backlight_full_rgb_selected(item, 35)
+    assert load_config()["brightness_pct"] == 35
+
+    # Subsequent _save_config() must not clobber brightness_pct
+    tray._save_config()
+    assert load_config()["brightness_pct"] == 35
+
+
+def test_dashboard_disable_profiles_and_automation_refresh(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.acpi import AcpiCapabilities
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    caps = AcpiCapabilities(
+        has_temperature=True,
+        has_fan_rpm=True,
+        has_fan_duty=True,
+        fan_count=2,
+    )
+    profiles = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    page, ctrl = _dashboard_with_profiles(caps, profiles, qapp)
+    assert sorted(page._profile_buttons.keys()) == [0, 1, 2, 3]
+    assert page.visible_profiles_row.isVisible() is True
+
+    # Toggle off Gaming (3)
+    page._profile_enable_checks[3].setChecked(False)
+    qapp.processEvents()
+    assert load_config()["disabled_profiles"] == [3]
+    assert 3 not in page._profile_buttons
+
+    # Disable 0 and 2 -> only 1 remains enabled, and its checkbox is disabled
+    page._profile_enable_checks[0].setChecked(False)
+    page._profile_enable_checks[2].setChecked(False)
+    qapp.processEvents()
+    assert sorted(page._profile_buttons.keys()) == [1]
+    assert page._profile_enable_checks[1].isEnabled() is False
+
+    # Re-enable 0, 2 so only 3 is disabled, then verify AutomationPage.refresh_profiles()
+    page._profile_enable_checks[0].setChecked(True)
+    page._profile_enable_checks[2].setChecked(True)
+    qapp.processEvents()
+
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles):
+        auto_page = AutomationPage()
+        auto_page.refresh_profiles()
+        lbl_3, swatch_3, _base = auto_page._profile_color_rows[3]
+        assert "(Disabled in Dashboard)" in lbl_3.text()
+        assert swatch_3.isEnabled() is False
+        ac_ids = [auto_page.ac_profile_combo.itemData(i) for i in range(auto_page.ac_profile_combo.count())]
+        bat_ids = [auto_page.battery_profile_combo.itemData(i) for i in range(auto_page.battery_profile_combo.count())]
+        assert 3 not in ac_ids
+        assert 3 not in bat_ids
+
+
+def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.config import update_config
+    from gigamate.tray import GigaMateTrayApp
+
+    update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
+    with patch("gigamate.tray.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.tray.hardware.apply_profile") as mock_apply:
+        tray = GigaMateTrayApp()
+        tray._acpi_controller = MagicMock()
+        tray._acpi_controller.available = True
+        tray._current_acpi_profile = 1
+
+        tray._on_hotkey_cycle_profile()
+        mock_apply.assert_called_once()
+        assert mock_apply.call_args[0][0] == 0
+
+
+def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.config import update_config
+    from gigamate.tray import GigaMateTrayApp
+
+    discovered = {
+        0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+        1: {"name": "Balanced", "description": "Balanced performance and noise"},
+        2: {"name": "Performance", "description": "High performance, more fan noise"},
+        3: {"name": "Gaming", "description": "Maximum GPU power and cooling"},
+    }
+    update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
+    with patch("gigamate.tray.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.tray.hardware.apply_profile", return_value=True) as mock_apply, \
+         patch("gigamate.tray.show_profile_osd") as mock_osd:
+        tray = GigaMateTrayApp()
+        tray._acpi_controller = MagicMock()
+        tray._acpi_controller.available = True
+        tray._current_acpi_profile = 1
+        tray._get_discovered_profiles = MagicMock(return_value=discovered)
+
+        tray._on_hotkey_cycle_profile()
+        mock_apply.assert_called_once()
+        assert mock_apply.call_args[0][0] == 0
+        mock_osd.assert_called_once_with("Quiet", "Low fan noise, capped GPU power")

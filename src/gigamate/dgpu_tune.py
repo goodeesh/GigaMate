@@ -529,8 +529,8 @@ class DgpuWatcher:
             from . import dgpu_gate
 
             state = dgpu_gate.read_gate_state()
-            if state.get("gated") and dgpu_gate.is_gated_off(gate_state=state):
-                gated_state = state
+            if dgpu_gate.should_pause_tuning():
+                gated_state = state if state.get("gated") else {"bdf": state.get("bdf")}
         except Exception:  # noqa: BLE001
             gated_state = None
 
@@ -542,7 +542,7 @@ class DgpuWatcher:
                 try:
                     from . import dgpu_gate
 
-                    if dgpu_gate.is_gated_off():
+                    if dgpu_gate.should_pause_tuning():
                         gated_state = dgpu_gate.read_gate_state()
                 except Exception:  # noqa: BLE001
                     gated_state = None

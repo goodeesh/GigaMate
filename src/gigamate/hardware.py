@@ -257,9 +257,10 @@ def _apply_hardware_settings_locked(
     # 4. Discrete GPU tuning (sleep-aware; applies only if awake)
     # ─────────────────────────────────────────────────────────────
     try:
-        from . import dgpu_tune
+        from . import dgpu_gate, dgpu_tune
 
-        dgpu_tune.apply_from_config()
+        if not dgpu_gate.should_pause_tuning():
+            dgpu_tune.apply_from_config()
         results["dgpu"] = bool(
             (cfg.get("dgpu_undervolt_enabled", DEFAULT_CONFIG["dgpu_undervolt_enabled"])
              or cfg.get("dgpu_max_clock_enabled", DEFAULT_CONFIG["dgpu_max_clock_enabled"]))

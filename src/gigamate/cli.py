@@ -50,6 +50,7 @@ from .config import (
     update_config,
     effective_rgb_hex,
     effective_brightness_pct,
+    enabled_acpi_profiles,
 )
 from .acpi import (
     AcpiController,
@@ -890,8 +891,10 @@ def _record_profile_and_sync(val: int) -> None:
 
 def cmd_profile_set(args, name: str) -> None:
     """Set power profile by name or number."""
-    ctrl, profiles_map, _cfg = _open_profiles(args)
+    ctrl, profiles_map, cfg = _open_profiles(args)
     pids, _p_data = _profile_set_for(profiles_map)
+    enabled_map = enabled_acpi_profiles(profiles_map, cfg)
+    disabled_set = set(cfg.get("disabled_profiles", []))
 
     # Try parsing as number first
     try:
@@ -904,6 +907,10 @@ def cmd_profile_set(args, name: str) -> None:
             print(f"Available: {', '.join(str(p) for p in pids)}")
             sys.exit(1)
         fp = FanProfile(val)
+        if val in disabled_set and len(enabled_map) >= 1 and val not in enabled_map:
+            pname = _profile_name(fp, profiles_map)
+            print(f"Profile '{pname}' is currently disabled in Dashboard. Re-enable it to switch to it.")
+            sys.exit(1)
         if val in (2, 3):
             from . import dgpu_gate
 
@@ -934,6 +941,10 @@ def cmd_profile_set(args, name: str) -> None:
         print(f"Profile '{name}' ({fp.value}) is not available on this model.")
         print(f"Available: {', '.join(str(p) for p in pids)}")
         sys.exit(1)
+    if fp.value in disabled_set and len(enabled_map) >= 1 and fp.value not in enabled_map:
+        pname = _profile_name(fp, profiles_map)
+        print(f"Profile '{pname}' is currently disabled in Dashboard. Re-enable it to switch to it.")
+        sys.exit(1)
     if fp.value in (2, 3):
         from . import dgpu_gate
 
@@ -956,7 +967,8 @@ def cmd_profile_set(args, name: str) -> None:
 
 def cmd_profile_cycle(args) -> None:
     """Cycle to the next power profile and show OSD."""
-    ctrl, profiles_map, _cfg = _open_profiles(args)
+    ctrl, profiles_map, cfg = _open_profiles(args)
+    profiles_map = enabled_acpi_profiles(profiles_map, cfg)
     pids, p_data = _profile_set_for(profiles_map)
     from . import dgpu_gate
 
@@ -979,9 +991,9 @@ def cmd_profile_cycle(args) -> None:
 
     if ctrl.set_profile(fp):
         _record_profile_and_sync(next_profile_id)
-        entry = p_data.get(str(next_profile_id), {})
+        entry = p_data.get(next_profile_id) or p_data.get(str(next_profile_id)) or {}
         pname = entry.get("name", f"Profile {next_profile_id}")
-        desc = entry.get("desc", "")
+        desc = entry.get("description") or entry.get("desc", "")
         print(f"Power profile cycled to: {pname}  ({next_profile_id})")
         show_profile_osd(pname, desc)
     else:

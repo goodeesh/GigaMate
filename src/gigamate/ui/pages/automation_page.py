@@ -22,7 +22,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ...config import DEFAULT_CONFIG, load as load_config, profile_rgb_for, save as save_config, update_config
+from ...config import (
+    DEFAULT_CONFIG,
+    enabled_acpi_profiles,
+    load as load_config,
+    profile_rgb_for,
+    save as save_config,
+    update_config,
+)
 from ...hotkeys import (
     ACTION_MODE_SWITCH,
     ACTION_OPEN_CENTER,
@@ -280,28 +287,20 @@ class AutomationPage(QWidget):
         rgb_layout.addWidget(self.profile_rgb_switch)
         rgb_layout.addWidget(self._make_divider())
 
-        from ...power_limits import discover_acpi_profiles
-
-        try:
-            discovered = discover_acpi_profiles()
-        except Exception:
-            discovered = {}
-        if discovered:
-            profile_rows = [
-                (pid, (meta or {}).get("name", f"Profile {pid}"))
-                for pid, meta in sorted(discovered.items())
-            ]
-        else:
-            profile_rows = list(_PROFILE_NAMES)
+        self._profile_color_rows: Dict[int, tuple[QLabel, QPushButton, str]] = {}
+        disabled_set = {int(x) for x in (self.cfg.get("disabled_profiles") or [])}
+        profile_rows = self._all_discovered_profiles()
 
         for pid, name in profile_rows:
             row = QHBoxLayout()
             row.setContentsMargins(0, 4, 0, 4)
             row.setSpacing(12)
 
-            lbl = QLabel(name)
+            is_disabled = pid in disabled_set
+            lbl = QLabel(f"{name} (Disabled in Dashboard)" if is_disabled else name)
+            lbl_color = THEME.on_surface_muted if is_disabled else THEME.on_surface
             lbl.setStyleSheet(
-                f"color: {THEME.on_surface}; font-size: 13px; font-weight: 500; background: transparent;"
+                f"color: {lbl_color}; font-size: 13px; font-weight: 500; background: transparent;"
             )
             row.addWidget(lbl)
             row.addStretch()
@@ -309,8 +308,10 @@ class AutomationPage(QWidget):
             swatch = QPushButton()
             swatch.setFixedSize(64, 28)
             swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setEnabled(not is_disabled)
             swatch.clicked.connect(lambda _checked=False, p=pid: self._pick_profile_color(p))
             self._swatch_buttons[pid] = swatch
+            self._profile_color_rows[pid] = (lbl, swatch, name)
             self._update_swatch_style(pid, profile_rgb_for(self.cfg, pid))
             row.addWidget(swatch)
 
@@ -431,24 +432,11 @@ class AutomationPage(QWidget):
         ac_row.addWidget(ac_lbl)
         ac_row.addStretch()
         self.ac_profile_combo = M3ComboBox()
-        from ...power_limits import discover_acpi_profiles
-
-        try:
-            discovered = discover_acpi_profiles()
-        except Exception:
-            discovered = {}
-        if discovered:
-            profile_rows = [
-                (pid, (meta or {}).get("name", f"Profile {pid}"))
-                for pid, meta in sorted(discovered.items())
-            ]
-        else:
-            profile_rows = list(_PROFILE_NAMES)
-
-        for pid, name in profile_rows:
+        enabled_rows = self._enabled_discovered_profiles(self.cfg)
+        for pid, name in enabled_rows:
             self.ac_profile_combo.addItem(name, pid)
         ac_idx = self.ac_profile_combo.findData(int(self.cfg.get("ac_profile_id", 2)))
-        self.ac_profile_combo.setCurrentIndex(ac_idx if ac_idx >= 0 else 2)
+        self.ac_profile_combo.setCurrentIndex(ac_idx if ac_idx >= 0 else 0)
         self.ac_profile_combo.currentIndexChanged.connect(self._on_ac_profile_changed)
         ac_row.addWidget(self.ac_profile_combo)
         sel_layout.addLayout(ac_row)
@@ -459,21 +447,7 @@ class AutomationPage(QWidget):
         bat_row.addWidget(bat_lbl)
         bat_row.addStretch()
         self.battery_profile_combo = M3ComboBox()
-        from ...power_limits import discover_acpi_profiles
-
-        try:
-            discovered = discover_acpi_profiles()
-        except Exception:
-            discovered = {}
-        if discovered:
-            profile_rows = [
-                (pid, (meta or {}).get("name", f"Profile {pid}"))
-                for pid, meta in sorted(discovered.items())
-            ]
-        else:
-            profile_rows = list(_PROFILE_NAMES)
-
-        for pid, name in profile_rows:
+        for pid, name in enabled_rows:
             self.battery_profile_combo.addItem(name, pid)
         bat_idx = self.battery_profile_combo.findData(int(self.cfg.get("battery_profile_id", 0)))
         self.battery_profile_combo.setCurrentIndex(bat_idx if bat_idx >= 0 else 0)
@@ -880,3 +854,56 @@ class AutomationPage(QWidget):
     def _register_desktop_shortcut(self) -> None:
         ok, msg = register_desktop_shortcut(ACTION_OPEN_CENTER, "Meta+G")
         self.shortcut_status_lbl.setText(msg if msg else ("Registered" if ok else "Failed"))
+
+    def _all_discovered_profiles(self) -> list[tuple[int, str]]:
+        """Return all discovered (pid, name) pairs, falling back to _PROFILE_NAMES."""
+        from ...power_limits import discover_acpi_profiles
+
+        try:
+            discovered = discover_acpi_profiles()
+        except Exception:
+            discovered = {}
+        if discovered:
+            return [
+                (int(pid), (meta or {}).get("name", f"Profile {pid}"))
+                for pid, meta in sorted(discovered.items())
+            ]
+        return list(_PROFILE_NAMES)
+
+    def _enabled_discovered_profiles(self, cfg: Optional[dict] = None) -> list[tuple[int, str]]:
+        """Return enabled (pid, name) pairs filtered via enabled_acpi_profiles."""
+        all_rows = self._all_discovered_profiles()
+        as_dict = {pid: {"name": name} for pid, name in all_rows}
+        enabled = enabled_acpi_profiles(as_dict, cfg)
+        return [(int(pid), (meta or {}).get("name", f"Profile {pid}")) for pid, meta in sorted(enabled.items())]
+
+    def refresh_profiles(self) -> None:
+        """Refresh disabled-profile state for colour swatches and AC/Battery combos."""
+        self.cfg = load_config()
+        disabled_set = {int(x) for x in (self.cfg.get("disabled_profiles") or [])}
+
+        for pid, (lbl, swatch, base_name) in self._profile_color_rows.items():
+            is_disabled = pid in disabled_set
+            lbl.setText(f"{base_name} (Disabled in Dashboard)" if is_disabled else base_name)
+            lbl_color = THEME.on_surface_muted if is_disabled else THEME.on_surface
+            lbl.setStyleSheet(
+                f"color: {lbl_color}; font-size: 13px; font-weight: 500; background: transparent;"
+            )
+            swatch.setEnabled(not is_disabled)
+
+        enabled_rows = self._enabled_discovered_profiles(self.cfg)
+        for combo, cfg_key, default_pid in (
+            (self.ac_profile_combo, "ac_profile_id", 2),
+            (self.battery_profile_combo, "battery_profile_id", 0),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            for pid, name in enabled_rows:
+                combo.addItem(name, pid)
+            idx = combo.findData(int(self.cfg.get(cfg_key, default_pid)))
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self.refresh_profiles()

@@ -472,3 +472,39 @@ def test_profile_rgb_for_helper():
     assert config_module.profile_rgb_for(cfg, 0) == "#aabbcc"
     assert config_module.profile_rgb_for(cfg, 2) == "#f59e0b"
     assert config_module.profile_rgb_for(cfg, 9) == "#ffffff"
+
+
+def test_disabled_profiles_sanitization():
+    """_sanitize_disabled_profiles keeps unique ints in 0..7 sorted."""
+    sanitize = config_module._sanitize_disabled_profiles
+    assert sanitize([3, "1", 3, -1, 8, "bad", None, True, 0, "7"]) == [0, 1, 3, 7]
+    assert sanitize("123") == []
+    assert sanitize({"0": 1}) == []
+    assert sanitize(123) == []
+    assert sanitize(None) == []
+
+
+def test_disabled_profiles_persistence(tmp_path, monkeypatch):
+    """disabled_profiles persists through update_config() + load()."""
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
+
+    config_module.update_config(lambda cfg: cfg.__setitem__("disabled_profiles", [3, "0", 3, 99, "invalid"]))
+    reloaded = config_module.load()
+    assert reloaded["disabled_profiles"] == [0, 3]
+
+
+def test_enabled_acpi_profiles_filtering_and_guard():
+    """enabled_acpi_profiles filters disabled IDs and keeps all if all disabled."""
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+    }
+    filtered = config_module.enabled_acpi_profiles(discovered, {"disabled_profiles": [0, 2]})
+    assert list(filtered.keys()) == [1]
+
+    # Guard: if all discovered profiles are disabled, return all discovered profiles
+    all_disabled = config_module.enabled_acpi_profiles(discovered, {"disabled_profiles": [0, 1, 2]})
+    assert all_disabled == discovered
+    assert all_disabled is not discovered

@@ -1,11 +1,12 @@
 """GigaMate Center — Performance & Hardware Dashboard."""
 
 import time
-from typing import Optional
+from typing import Dict, Optional
 from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (
 from ... import dgpu_gate, hardware
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
-from ...config import load as load_config, profile_rgb_for, update_config
+from ...config import enabled_acpi_profiles, load as load_config, profile_rgb_for, update_config
 from ...gpu import GpuState, get_gpu_state
 from ...power_limits import SystemPowerLimits, discover_acpi_profiles, discover_power_limits
 from ...system_power import sync_system_power
@@ -42,6 +43,8 @@ class DashboardPage(QWidget):
         super().__init__(parent)
         self.acpi_ctrl = AcpiController()
         self._profile_buttons = {}
+        self._profile_enable_checks: Dict[int, QCheckBox] = {}
+        self._enable_check_ids: list[int] = []
         self._cached_profile = None
         self._init_ui()
 
@@ -183,6 +186,26 @@ class DashboardPage(QWidget):
         self._last_limits_key = None
         self.power_limits_container.setVisible(False)
         prof_layout.addWidget(self.power_limits_container)
+
+        # ── Active / Visible Profiles Strip ──
+        self.visible_profiles_row = QWidget()
+        self.visible_profiles_row.setStyleSheet("background: transparent;")
+        vp_layout = QHBoxLayout(self.visible_profiles_row)
+        vp_layout.setContentsMargins(2, 4, 2, 0)
+        vp_layout.setSpacing(10)
+        vp_lbl = QLabel("Visible profiles:")
+        vp_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: 12px; font-weight: 600; background: transparent;"
+        )
+        vp_layout.addWidget(vp_lbl)
+        self._visible_profiles_checks_layout = QHBoxLayout()
+        self._visible_profiles_checks_layout.setContentsMargins(0, 0, 0, 0)
+        self._visible_profiles_checks_layout.setSpacing(10)
+        vp_layout.addLayout(self._visible_profiles_checks_layout)
+        vp_layout.addStretch()
+        self.visible_profiles_row.setVisible(False)
+        prof_layout.addWidget(self.visible_profiles_row)
+
         layout.addWidget(prof_card)
 
         # ── Live Telemetry Cards ──
@@ -253,9 +276,89 @@ class DashboardPage(QWidget):
 
         self._refresh_telemetry()
 
+    def _sync_visible_profile_checks(self, all_profiles: dict, cfg: dict) -> None:
+        """Build/update the compact Visible Profiles toggle strip."""
+        all_ids = sorted(int(k) for k in all_profiles.keys())
+        self.visible_profiles_row.setVisible(len(all_ids) >= 2)
+        if len(all_ids) < 2:
+            return
+
+        if all_ids != self._enable_check_ids:
+            while self._visible_profiles_checks_layout.count():
+                item = self._visible_profiles_checks_layout.takeAt(0)
+                if item and item.widget():
+                    item.widget().deleteLater()
+            self._profile_enable_checks = {}
+            self._enable_check_ids = list(all_ids)
+            for pid in all_ids:
+                label = (all_profiles.get(pid) or all_profiles.get(str(pid)) or {}).get(
+                    "name", f"Profile {pid}"
+                )
+                chk = QCheckBox(label)
+                chk.setCursor(Qt.CursorShape.PointingHandCursor)
+                chk.setStyleSheet(
+                    f"QCheckBox {{ color: {THEME.on_surface_variant}; font-size: 12px; background: transparent; spacing: 5px; }}"
+                )
+                chk.toggled.connect(lambda checked, p=pid: self._on_profile_enabled_toggled(p, checked))
+                self._visible_profiles_checks_layout.addWidget(chk)
+                self._profile_enable_checks[pid] = chk
+
+        enabled_map = enabled_acpi_profiles(all_profiles, cfg)
+        enabled_ids = set(enabled_map.keys())
+        only_one_left = len(enabled_ids) <= 1
+        for pid, chk in self._profile_enable_checks.items():
+            is_enabled = pid in enabled_ids
+            chk.blockSignals(True)
+            chk.setChecked(is_enabled)
+            chk.blockSignals(False)
+            if only_one_left and is_enabled:
+                chk.setEnabled(False)
+                chk.setToolTip("At least one profile must remain enabled")
+            else:
+                chk.setEnabled(True)
+                chk.setToolTip("")
+
+    def _on_profile_enabled_toggled(self, pid: int, checked: bool) -> None:
+        """Persist disabled_profiles and switch away if the active profile was disabled."""
+        all_profiles = self._discovered_profiles()
+
+        def _mutate(c: dict) -> dict:
+            cur = {int(x) for x in (c.get("disabled_profiles") or [])}
+            if checked:
+                cur.discard(int(pid))
+            else:
+                # Never allow disabling the last remaining profile
+                remaining = [int(k) for k in all_profiles.keys() if int(k) not in cur and int(k) != int(pid)]
+                if remaining or not all_profiles:
+                    cur.add(int(pid))
+            return {**c, "disabled_profiles": sorted(cur)}
+
+        update_config(_mutate)
+        fresh_cfg = self._config()
+
+        if not checked:
+            self._ensure_acpi_controller()
+            current_pid = self._cached_profile
+            if current_pid is None and self.acpi_ctrl.available:
+                current_pid = self.acpi_ctrl.get_profile()
+            if current_pid == pid:
+                enabled = enabled_acpi_profiles(all_profiles, fresh_cfg)
+                if enabled:
+                    fallback_pid = 1 if 1 in enabled else sorted(enabled.keys())[0]
+                    hardware.apply_profile(
+                        fallback_pid, cfg=fresh_cfg, sync_system=True, acpi=self.acpi_ctrl
+                    )
+
+        self._refresh_telemetry()
+
     def _rebuild_profile_buttons(self, profiles: dict, usable: bool) -> None:
-        """(Re)build the profile buttons from discovered ACPI profiles."""
-        ids = sorted(int(k) for k in profiles.keys())
+        """(Re)build the profile buttons from discovered & enabled ACPI profiles."""
+        cfg = self._config()
+        all_profiles = dict(profiles or {})
+        self._sync_visible_profile_checks(all_profiles, cfg)
+
+        enabled_profiles = enabled_acpi_profiles(all_profiles, cfg)
+        ids = sorted(int(k) for k in enabled_profiles.keys())
         self.prof_bar.setVisible(bool(ids))
 
         if ids != self._btn_ids:
@@ -266,7 +369,9 @@ class DashboardPage(QWidget):
             self._profile_base_labels = {}
             self._btn_ids = []
             for pid in ids:
-                label = (profiles.get(pid) or profiles.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                label = (enabled_profiles.get(pid) or enabled_profiles.get(str(pid)) or {}).get(
+                    "name", f"Profile {pid}"
+                )
                 self._profile_base_labels[pid] = label
                 btn = self.prof_bar.add_segment(label, checkable=True, min_height=42)
                 btn.clicked.connect(lambda _, p=pid: self._select_profile(p))
@@ -275,11 +380,13 @@ class DashboardPage(QWidget):
                 self._btn_ids.append(pid)
 
         high_ok = dgpu_gate.high_power_profiles_allowed()
-        cfg = self._config()
         show_rgb_dot = bool(cfg.get("profile_rgb_enabled", False))
         for pid, btn in self._profile_buttons.items():
             base_label = self._profile_base_labels.get(
-                pid, (profiles.get(pid) or profiles.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                pid,
+                (enabled_profiles.get(pid) or enabled_profiles.get(str(pid)) or {}).get(
+                    "name", f"Profile {pid}"
+                ),
             )
             locked_by_gate = usable and not high_ok and pid in (2, 3)
             btn.setText(base_label)
@@ -545,7 +652,12 @@ class DashboardPage(QWidget):
             return
 
         sys_limits = discover_power_limits(active_profile_id=active_prof_id, gpu_state=gpu)
-        valid_pids = [k for k, p in sorted(sys_limits.profiles.items()) if p.has_any]
+        enabled_pids = set(enabled_acpi_profiles(self._discovered_profiles(), self._config()).keys())
+        valid_pids = [
+            k
+            for k, p in sorted(sys_limits.profiles.items())
+            if p.has_any and (not enabled_pids or k in enabled_pids)
+        ]
         if not valid_pids:
             self.power_limits_container.setVisible(False)
             return

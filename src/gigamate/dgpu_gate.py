@@ -161,6 +161,8 @@ _watcher_state: Dict[str, object] = {
     "awaiting_confirm_at": 0.0,
     "supported_cache": None,
     "supported_checked_at": 0.0,
+    "want_off_since": 0.0,
+    "boot_prompted": False,
 }
 
 
@@ -2032,6 +2034,22 @@ def launch_confirm_dialog(
     ) is not None
 
 
+def should_pause_tuning(ac_online: Optional[bool] = None) -> bool:
+    """Return True when NVML tuning should be paused to avoid waking/holding the dGPU."""
+    if is_gated_off():
+        return True
+    if configured_mode() not in (MODE_ECO, MODE_AUTO):
+        return False
+    if ac_online is None:
+        try:
+            ac_online = bool(get_battery_manager().is_ac_online())
+        except Exception:  # noqa: BLE001
+            ac_online = True
+    if ac_online:
+        return False
+    return bool(is_supported(gated=False))
+
+
 def watcher_tick(now: Optional[float] = None) -> None:
     """Periodic lightweight policy check run by ``gigamate-dgpu-watch``.
 
@@ -2064,11 +2082,15 @@ def watcher_tick(now: Optional[float] = None) -> None:
         awaiting_confirm_at = float(_watcher_state.get("awaiting_confirm_at") or 0.0)
         supported_cache = _watcher_state.get("supported_cache")
         supported_checked_at = float(_watcher_state.get("supported_checked_at") or 0.0)
+        if ac_changed or mode_changed:
+            _watcher_state["boot_prompted"] = False
 
     if mode == MODE_OPTIMUS:
-        if awaiting_confirm_at:
-            with _WATCHER_LOCK:
+        with _WATCHER_LOCK:
+            if awaiting_confirm_at:
                 _watcher_state["awaiting_confirm_at"] = 0.0
+            _watcher_state["want_off_since"] = 0.0
+            _watcher_state["boot_prompted"] = False
         if mode_changed:
             with _GATE_LOCK:
                 _publish_policy(mode=mode, pending_off=False)
@@ -2093,9 +2115,11 @@ def watcher_tick(now: Optional[float] = None) -> None:
     want_off = (mode == MODE_ECO and not ac_online) or (mode == MODE_AUTO and not ac_online)
 
     if not want_off:
-        if awaiting_confirm_at:
-            with _WATCHER_LOCK:
+        with _WATCHER_LOCK:
+            if awaiting_confirm_at:
                 _watcher_state["awaiting_confirm_at"] = 0.0
+            _watcher_state["want_off_since"] = 0.0
+            _watcher_state["boot_prompted"] = False
         if (currently_off or mode == MODE_ECO) and (ac_changed or ev_changed or mode_changed or (now - last_attempt_at >= _RETRY_BACKOFF_SEC)):
             with _WATCHER_LOCK:
                 _watcher_state["last_attempt_at"] = now
@@ -2107,13 +2131,22 @@ def watcher_tick(now: Optional[float] = None) -> None:
 
     # want_off == True
     if currently_off:
-        if awaiting_confirm_at:
-            with _WATCHER_LOCK:
+        with _WATCHER_LOCK:
+            if awaiting_confirm_at:
                 _watcher_state["awaiting_confirm_at"] = 0.0
+            _watcher_state["want_off_since"] = 0.0
+            _watcher_state["boot_prompted"] = False
         if mode_changed or ac_changed or ev_changed:
             with _GATE_LOCK:
                 _publish_policy(mode=mode, pending_off=False)
         return
+
+    with _WATCHER_LOCK:
+        want_off_since = float(_watcher_state.get("want_off_since") or 0.0)
+        if want_off_since == 0.0:
+            want_off_since = now
+            _watcher_state["want_off_since"] = now
+        boot_prompted = bool(_watcher_state.get("boot_prompted"))
 
     if is_confirm_dialog_open() or is_transition_in_progress():
         return
@@ -2207,6 +2240,31 @@ def watcher_tick(now: Optional[float] = None) -> None:
             _watcher_state["last_policy_publish"] = now
         sync_policy(reason="watcher_gate_off")
         return
+
+    if rstatus == "active" and not displays and (now - want_off_since) >= 12.0 and not boot_prompted:
+        holders = list_gpu_holder_processes(topo.bdf)
+        with _WATCHER_LOCK:
+            _watcher_state["boot_prompted"] = True
+            _watcher_state["last_attempt_at"] = now
+        if not holders:
+            gate_off(allow_active=True)
+            return
+        if has_display_session and not awaiting_confirm_at:
+            with _WATCHER_LOCK:
+                _watcher_state["awaiting_confirm_at"] = now
+                _watcher_state["last_policy_publish"] = now
+            launch_confirm_dialog(
+                trigger="boot_battery",
+                target_mode=mode,
+                prev_mode=mode,
+            )
+            _publish_policy(
+                mode=mode,
+                pending_off=True,
+                last_reason="awaiting_confirmation",
+                last_error="Waiting for confirmation to power off dGPU on battery.",
+            )
+            return
 
     # If the GPU is already suspended with no displays attached, we are only
     # waiting out the retry backoff after a helper failure — preserve the real

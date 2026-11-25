@@ -51,6 +51,8 @@ from .config import (
     effective_brightness_pct,
     is_rgb_enabled,
     effective_rgb_hex,
+    enabled_acpi_profiles,
+    pct_to_legacy_brightness,
 )
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
@@ -117,6 +119,7 @@ class GigaMateTrayApp:
 
     def __init__(self) -> None:
         self._config = load_config()
+        self._disabled_profiles = list(self._config.get("disabled_profiles", []))
         self._indicator: Optional[AppIndicator3.Indicator] = None
         self._menu: Optional[Gtk.Menu] = None
         self._icon_key: Optional[str] = None
@@ -385,6 +388,11 @@ class GigaMateTrayApp:
         if getattr(self, "_last_topup_active", False) != new_topup:
             self._last_topup_active = new_topup
             self._rebuild_menu()
+
+        new_disabled = list(new_cfg.get("disabled_profiles", []))
+        if new_disabled != getattr(self, "_disabled_profiles", []):
+            self._disabled_profiles = new_disabled
+            self._build_menu()
 
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
@@ -927,18 +935,32 @@ class GigaMateTrayApp:
         if not item.get_active() or self._building:
             return
         dev = self._get_keyboard()
+        self._rgb_enabled = pct > 0
+        if pct > 0:
+            self._current_brightness_pct = pct
+        self._config = update_config(
+            lambda c: {
+                **c,
+                "rgb_enabled": pct > 0,
+                **(
+                    {
+                        "brightness_pct": pct,
+                        "last_brightness_pct": pct,
+                        "brightness": pct_to_legacy_brightness(pct),
+                    }
+                    if pct > 0
+                    else {}
+                ),
+            }
+        )
+        self._last_config_mtime = self._get_config_mtime()
         if pct == 0:
-            self._config["rgb_enabled"] = False
-            self._save_config()
             if dev is not None:
                 try:
                     set_off(dev)
                 except Exception:
                     pass
         else:
-            self._config["rgb_enabled"] = True
-            self._config["brightness_pct"] = pct
-            self._save_config()
             if dev is not None:
                 try:
                     set_rgb(
@@ -1351,7 +1373,7 @@ class GigaMateTrayApp:
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
 
-        profile_names = self._get_discovered_profiles()
+        profile_names = enabled_acpi_profiles(self._get_discovered_profiles(), self._config)
         self._add_separator()
         header = Gtk.MenuItem(label="Power Profile")
         header.set_sensitive(False)
@@ -1981,6 +2003,17 @@ class GigaMateTrayApp:
                     target = int(mapped)
                     sync_sys = False
 
+        if target is not None:
+            disabled = set(cfg.get("disabled_profiles", []))
+            if target in disabled:
+                enabled = enabled_acpi_profiles(self._get_discovered_profiles(), cfg)
+                if 1 in enabled:
+                    target = 1
+                elif enabled:
+                    target = sorted(int(k) for k in enabled.keys())[0]
+                else:
+                    target = None
+
         if target in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
             target = None
 
@@ -2159,7 +2192,8 @@ class GigaMateTrayApp:
             return
 
         # Get available profiles
-        p_data = self._get_discovered_profiles()
+        cfg = load_config()
+        p_data = enabled_acpi_profiles(self._get_discovered_profiles(), cfg)
         if not p_data:
             return
         pids = sorted(int(k) for k in p_data.keys())
@@ -2202,9 +2236,9 @@ class GigaMateTrayApp:
                     self._building = False
 
                 # Show OSD
-                entry = p_data.get(str(next_profile_id), {})
+                entry = p_data.get(next_profile_id) or p_data.get(str(next_profile_id)) or {}
                 name = entry.get("name", f"Profile {next_profile_id}")
-                desc = entry.get("desc", "")
+                desc = entry.get("description") or entry.get("desc", "")
                 show_profile_osd(name, desc)
 
                 self._update_status()
