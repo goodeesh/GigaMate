@@ -1,153 +1,40 @@
 # Contributing to GigaMate
 
-The most valuable contribution you can make is adding support for your
-Gigabyte laptop model. The calibration tools do all the work — just
-run them and submit the result.
+Thank you for helping improve GigaMate!
+
+GigaMate 5.0.0 uses **zero-profile automatic hardware discovery** — there are no static laptop model JSON files (`profile_data/*.json`), no `gigamate calibrate` wizard, and no `"experimental"` profile locks. Contributions focus on automatic hardware discovery, the `gigamate_acpi` kernel driver, the Material 3 UI/Automation engine, and tests.
 
 ---
 
-## Adding a New Model
+## Reporting Bugs & Hardware Issues
 
-### Step 1: Install
+When opening an issue for hardware detection, power profiles, RGB, dGPU power-gating, or sensors, please include:
 
-```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
-```
-
-### Step 2: Calibrate keyboard RGB
-
-```sh
-gigamate calibrate rgb
-```
-
-This sends colour samples to your keyboard and asks you to name them.
-It saves a profile to `~/.config/gigamate/profiles/`.
-
-### Step 3: Probe ACPI
-
-```sh
-gigamate detect --acpi
-```
-
-This detects temperature sensors, fan RPM, duty cycles, and power profiles.
-
-### Step 4: Test
-
-```sh
-gigamate status                   # Verify readings
-gigamate profile gaming           # Test profile switching
-```
-
-### Step 5: Contribute via Pull Request
-
-```sh
-gigamate profile contribute
-```
-
-Prints instructions to fork the repo, add your profile file, and open a PR.
-
-**Prefer not to use git?** Open a
-[GitHub issue](https://github.com/goodeesh/GigaMate/issues/new)
-with your profile JSON attached.
+1. **System & Kernel Info**: Laptop model, BIOS version, Linux distribution, and `uname -r`.
+2. **`gigamate doctor` Output**: Run `gigamate doctor` and paste the full output (this includes `diagnose_lamparray`, `gigamate_acpi` status, and sysfs checks).
+3. **`wmbd_aml` Diagnostics**: If your issue involves power profiles or Watt limits, include the `wmbd_aml` / `NPCF` diagnostic output from `gigamate doctor` (or `/sys/devices/platform/gigamate_acpi/`).
 
 ---
 
-## Pull Request Guidelines
+## Development Setup & Running Tests
 
-- If your PR adds a new model:
-  - Include the profile JSON in `src/gigamate/profile_data/`
-  - Include `lsusb` output as evidence
-- Keep one model per PR
-
----
-
-## Profile JSON Schema
-
-Profiles define keyboard RGB and optional ACPI capabilities.
-
-### Minimal RGB-only
-
-```json
-{
-  "name": "Gigabyte Aorus 15BKF",
-  "vid": "0x0414",
-  "pid": "0x7A43",
-  "interfaces": [1, 3],
-  "control_interface": 3,
-  "colour_map": {
-    "red":   {"0": [1, 0],   "1": [1, 25],  "2": [1, 100]},
-    "green": {"0": [2, 0],   "1": [2, 25],  "2": [2, 100]}
-  }
-}
-```
-
-### Full profile with ACPI
-
-```json
-{
-  "name": "Gigabyte Aero X16 (EG61VH)",
-  "version": 3,
-  "vid": "0x0414",
-  "pid": "0x8105",
-  "interfaces": [1, 3],
-  "control_interface": 3,
-  "colour_map": { ... },
-  "acpi": {
-    "has_fan_control": true,
-    "has_temperature": true,
-    "has_power_profiles": true,
-    "confidence": "verified",
-    "fan_count": 2,
-    "fan_labels": ["CPU Fan", "GPU Fan"],
-    "profiles": {
-      "0": {"name": "Quiet"},
-      "3": {"name": "Gaming"}
-    },
-    "backend": "module"
-  }
-}
-```
-
-### ACPI-only profile (no Gigabyte USB keyboard)
-
-Laptops without a Gigabyte USB keyboard (e.g. GIGABYTE GAMING A16) key their
-profile on **DMI** and are named `dmi_<slug>.json`:
-
-```json
-{
-  "name": "Gigabyte GAMING A16 CMH",
-  "version": 3,
-  "dmi": {"product_names": ["GIGABYTE GAMING A16 CMH"]},
-  "interfaces": [],
-  "control_interface": 0,
-  "colour_map": {},
-  "acpi": {
-    "has_fan_control": true,
-    "has_temperature": true,
-    "has_power_profiles": true,
-    "confidence": "experimental",
-    "fan_count": 2,
-    "fan_labels": ["CPU Fan", "GPU Fan"],
-    "profiles": {
-      "0": {"name": "Eco"},
-      "1": {"name": "Balanced"},
-      "2": {"name": "Boost"}
-    },
-    "backend": "module"
-  }
-}
-```
-
-Use `"confidence": "experimental"` for any model whose profile switching you
-have **not** confirmed on real hardware — it ships as opt-in and is promoted to
-`"verified"` once a user reports it works. See
-[docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md) for the registry and
-promotion protocol.
-
-See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md) for the full reference.
+1. Clone the repository and install in editable mode with dev dependencies:
+   ```sh
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e ".[dev]"
+   ```
+2. Run the test suite:
+   ```sh
+   pytest
+   ```
+3. Keep changes focused and ensure `pytest` passes before opening a pull request.
 
 ---
 
-## Questions?
+## Areas for Contribution
 
-Open an issue with the `question` label.
+- **`gigamate_acpi` Kernel Driver**: Improving DSDT `WMBD(0xED)` parsing, `NPCF` handling, fan/thermal sysfs attributes, and kernel compatibility.
+- **Automatic Hardware Discovery**: Enhancing HID LampArray (`Usage Page 0x59`) probing, dGPU ACPI `_OFF`/`_PS3` power-gate probing, and battery charge-threshold sysfs support (see [docs/HARDWARE_DISCOVERY.md](docs/HARDWARE_DISCOVERY.md)).
+- **UI & Automation**: Improvements to the Warm Obsidian Material 3 Center, Automation rules (AC/Battery 3-mode selector, TLP/PowerDevil integration, Shortcuts hardware capture), and system tray.
+- **Documentation & Tests**: Keeping docs accurate and expanding `pytest` coverage for discovery and automation logic.

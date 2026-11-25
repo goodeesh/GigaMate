@@ -25,7 +25,6 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "pyusb>=1.2",
     # evdev 2.x needs Python >=3.11; 1.9.x covers 3.8+ (idle.py only
     # needs it optionally, so any 1.9+ API is fine).
     "evdev>=1.9",
@@ -37,9 +36,6 @@ gigamate = "gigamate.cli:main"
 gigamate-tray = "gigamate.tray:main"
 gigamate-center = "gigamate.ui:run_gui"
 gigamate-dgpu-watch = "gigamate.dgpu_tune:run_watcher"
-# Legacy backward-compat aliases:
-gigabyte-rgb = "gigamate.cli:main"
-gigabyte-rgb-tray = "gigamate.tray:main"
 
 [project.urls]
 Homepage = "https://github.com/goodeesh/GigaMate"
@@ -51,9 +47,6 @@ where = ["src"]
 
 [tool.setuptools.dynamic]
 version = {attr = "gigamate.__version__"}
-
-[tool.setuptools.package-data]
-gigamate = ["profile_data/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

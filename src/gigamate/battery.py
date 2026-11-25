@@ -469,7 +469,15 @@ def evaluate_calibration_state(mgr: Optional[BatteryManager] = None, cfg: Option
             except (ValueError, TypeError):
                 interval_days = 30
             if last_full <= 0:
-                update_config(lambda c: {**c, "last_full_charge_ts": now})
+                try:
+                    baseline = int(cfg.get("charge_calibration_baseline_ts", 0) or 0)
+                except (ValueError, TypeError):
+                    baseline = 0
+                if baseline <= 0:
+                    update_config(lambda c: {**c, "charge_calibration_baseline_ts": now})
+                elif (now - baseline) >= interval_days * 86400:
+                    if start_topup(mgr=mgr):
+                        return {"active": True, "event": "auto_started"}
             elif (now - last_full) >= interval_days * 86400:
                 if start_topup(mgr=mgr):
                     return {"active": True, "event": "auto_started"}

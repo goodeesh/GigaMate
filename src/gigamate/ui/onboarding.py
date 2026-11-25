@@ -32,8 +32,7 @@ from ..config import CONFIG_FILE, load as load_config, update_config
 from ..hardware import apply_hardware_settings
 from ..idle import IDLE_TIMEOUT_STEPS, nearest_idle_step
 from ..paths import ICON_PATHS
-from ..protocol import COLOUR_MAP
-from ..config import resolve_active_profile
+from ..lamparray import PALETTE_HEX
 from . import icons
 from .styles import dialog_stylesheet
 from .theme import THEME
@@ -64,10 +63,7 @@ def has_user_config() -> bool:
 
 
 def _colour_keys() -> list:
-    profile = resolve_active_profile()
-    if profile is not None and profile.colour_names:
-        return list(profile.colour_names)
-    return list(COLOUR_MAP.keys())
+    return list(PALETTE_HEX.keys())
 
 
 def _style_notice(label: QLabel) -> None:
@@ -210,7 +206,7 @@ class _RgbPage(QWizardPage):
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        self._supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
+        self._supported = w.caps.keyboard_detected and w.caps.keyboard_lamparray_supported
         self.colour_combo.clear()
         for key in _colour_keys():
             self.colour_combo.addItem(key.replace("_", " ").title(), key)
@@ -272,7 +268,7 @@ class _IdlePage(QWizardPage):
     def initializePage(self) -> None:
         w = self.wizard()
         cfg = w.cfg
-        self._supported = w.caps.keyboard_detected and w.caps.keyboard_profile_loaded
+        self._supported = w.caps.keyboard_detected and w.caps.keyboard_lamparray_supported
         self.enable_chk.setChecked(bool(cfg.get("idle_off_enabled", False)))
         tidx = self.timeout_combo.findData(
             nearest_idle_step(int(cfg.get("idle_timeout_sec", 60))))
@@ -382,7 +378,7 @@ class _PowerPage(QWizardPage):
         # System power-profile sync only makes sense when a usable model
         # profile exists to map from; experimental (unconfirmed) models are not
         # offered here (they require explicit opt-in).
-        supported = bool(w.caps.profile_verified and not w.caps.profile_experimental)
+        supported = bool(w.caps.has_power_profiles)
         self.sync_chk.setChecked(bool(cfg.get("sync_system_power", False)))
         self.sync_chk.setEnabled(supported)
         if supported:
@@ -492,16 +488,25 @@ class OnboardingWizard(QWizard):
     def _apply_choices(self, complete: bool) -> None:
         def _mutate(cfg):
             caps = self.caps
-            if caps.keyboard_detected and caps.keyboard_profile_loaded:
-                cfg["colour"] = self.p_rgb.colour_combo.currentData() or cfg.get("colour")
-                cfg["brightness"] = int(self.p_rgb.brightness_combo.currentData())
+            if caps.keyboard_detected and caps.keyboard_lamparray_supported:
+                from ..lamparray import PALETTE_HEX
+
+                colour = self.p_rgb.colour_combo.currentData() or cfg.get("colour")
+                brightness = int(self.p_rgb.brightness_combo.currentData())
+                cfg["colour"] = colour
+                cfg["brightness"] = brightness
+                cfg["rgb_enabled"] = brightness > 0
+                rgb_hex = PALETTE_HEX.get(colour)
+                if rgb_hex is not None:
+                    cfg["rgb_hex"] = rgb_hex
+                cfg["brightness_pct"] = 0 if brightness <= 0 else (25 if brightness == 1 else 100)
                 cfg["startup_apply"] = self.p_rgb.apply_chk.isChecked()
                 cfg["idle_off_enabled"] = self.p_idle.enable_chk.isChecked()
                 cfg["idle_timeout_sec"] = int(self.p_idle.timeout_combo.currentData())
             if caps.charge_limit_supported:
                 cfg["charge_limit_enabled"] = self.p_battery.enable_chk.isChecked()
                 cfg["charge_limit"] = int(self.p_battery.limit_slider.value())
-            if caps.profile_verified and not caps.profile_experimental:
+            if caps.has_power_profiles:
                 cfg["sync_system_power"] = self.p_power.sync_chk.isChecked()
                 if cfg["sync_system_power"] and cfg.get("acpi_profile") is None:
                     # Sync needs a fan profile to map from; Balanced by default.
@@ -534,7 +539,7 @@ class OnboardingWizard(QWizard):
 
         # Surface a requested-but-failed apply instead of silently ignoring it.
         problems = []
-        if (self.caps.keyboard_detected and self.caps.keyboard_profile_loaded
+        if (self.caps.keyboard_detected and self.caps.keyboard_lamparray_supported
                 and self.p_rgb.apply_chk.isChecked() and not results.get("keyboard")):
             problems.append("keyboard lighting")
         if self.caps.charge_limit_supported and self.p_battery.enable_chk.isChecked() \

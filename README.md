@@ -1,452 +1,85 @@
-# GigaMate — Gigabyte Laptop Management for Linux
+# GigaMate 5.0.0
 
-**Bringing gimate (Windows) hardware features to Linux (without the AI crap). Control your hardware:** Keyboard RGB backlight, fan monitoring,
-power profile switching — all in one system tray app with community-driven model support.
+**Zero-profile automatic hardware discovery and control center for modern Gigabyte & AORUS laptops on Linux.**
 
-![GigaMate icon](data/gigamate.svg)
-
----
-
-## ⚠ Disclaimer
-
-**Use this software entirely at your own risk.**
-
-GigaMate writes directly to hardware — USB HID for keyboard RGB and ACPI
-for fan/power control. The authors accept no responsibility for any damage,
-malfunction, or data loss caused by using this software.
-
-Known risks:
-- Certain animated keyboard effects can hang the keyboard firmware
-  (requires USB reset to recover). Only `static` mode is safe.
-- ACPI profile switching adjusts CPU/GPU power limits.
-- **dGPU Power Gate (`AI Power Gear III`)**: cutting the dGPU power rail and
-  removing its PCI devices via ACPI (`_OFF`/`_ON` or `_PS3`/`_PS0`) is
-  firmware-level control (ships Experimental per model) and **disables
-  HDMI/DisplayPort outputs wired directly to the dGPU** until powered back on.
-  GigaMate checks for connected dGPU displays and active GPU sessions before
-  gating off; if firmware fails to re-enumerate the card on wake, a reboot
-  restores normal PCI enumeration.
-- To allow control without root, the kernel module exposes `profile` and
-  `charge_limit` as world-writable (`0666`). Any local user on the machine can
-  therefore change these settings. The keyboard is handled differently: the
-  `70-gigamate.rules` rule grants the active local user access through a logind
-  ACL (`uaccess`), not world-writable permissions.
-
-Tested on specific Gigabyte models only. Other models may behave differently.
-Experimental profile support is unconfirmed on your exact unit — it may do
-nothing. Sensor monitoring is unaffected.
+GigaMate 5.0.0 discovers your laptop's power profiles, per-profile Watt limits, 24-bit keyboard RGB, dGPU power gate, hotkeys, and battery charge limits directly from live firmware and kernel sysfs at startup — **no model JSON files, no manual calibration, no `experimental` profile locks, and no `pyusb`**.
 
 ---
 
-## Quick Start
+## Key Features (5.0.0)
+
+### Warm Obsidian Material 3 Center
+- Modern, responsive desktop control center built with a Warm Obsidian Material 3 theme.
+- Live hardware telemetry: CPU/GPU temperatures, fan RPM, fan duty cycle, AC/Battery state, and active power limits.
+
+### 24-Bit HID LampArray RGB
+- Native `/dev/hidraw*` **HID LampArray (`Usage Page 0x59`)** support — zero `pyusb`, zero kernel driver detaching.
+- **5–100%** active brightness floor with dedicated **Off / On** controls.
+- **Backlight Auto-Off** idle timer with **Keep active on AC** option.
+
+### Automation Tab
+- **Colour per Power Profile**: Automatically switch keyboard RGB colour when changing power profiles, with **auto-unlink on manual pick** if you choose a custom colour directly.
+- **3-Mode AC / Battery Card Selector** (**Off / Follow System / GigaMate-Driven**):
+  - **One-click TLP / KDE PowerDevil deactivation** with **reversible restore** so external power daemons don't fight GigaMate.
+  - **Drift watchdog** to keep firmware power state aligned with your selected rule.
+- **Shortcuts**: Record hardware keys directly from the HID stream and register shortcuts with **KDE / GNOME**.
+
+### dGPU Power Gate
+- **Optimus / ECO / Auto** power-gating modes via ACPI `_OFF` / `_PS3` power resources.
+- **Keep dGPU On for Now** temporary override.
+- **2 s live holder auto-cut** safety guard and a **one-time user risk disclaimer** before enabling aggressive power-gating.
+
+### Battery Care
+- Configurable battery charge start/stop thresholds via Linux `power_supply` sysfs.
+
+### System Tray
+- Quick menu: **Open Center**, **Status**, **Power Profile**, **Backlight** (`Off` / `5%` / `50%` / `100%`), and **Quit**.
+
+---
+
+## Hardware Compatibility & Automatic Discovery
+
+GigaMate 5.0.0 automatically probes your system at startup:
+- **Power Profiles & Watt Limits**: Verifies `WMBD(0xED)` in the ACPI DSDT via `gigamate_acpi` (`wmbd_aml` & `NPCF`), rejecting older incompatible BIOSes automatically and discovering 2, 3, or 4 firmware profiles with their CPU/GPU Watt limits.
+- **Keyboard RGB**: Scans `/sys/class/hidraw/hidraw*` for HID LampArray (`0x05 0x59`, Reports `1, 5, 6`, `lamp_count >= 1`).
+- **dGPU Power Gate, Hotkeys & Battery Care**: Discovered dynamically from ACPI/PCI sysfs and Gigabyte HID hotkey events (`interface 2`, `report_id 4`).
+
+See [docs/HARDWARE_DISCOVERY.md](docs/HARDWARE_DISCOVERY.md) for the full architecture and [docs/RGB_PROTOCOL.md](docs/RGB_PROTOCOL.md) for LampArray protocol details.
+
+> [!IMPORTANT]
+> ### Older Pre-2025 Models (Download v4.5.x)
+> GigaMate 5.0.0 dropped legacy vendor `0x08` RGB and static model JSON profiles in favor of pure automatic hardware discovery. If you own an older pre-LampArray Gigabyte or AORUS laptop, please download the final **`v4.5.x`** release from **GitHub Releases**.
+
+---
+
+## CLI Commands
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
-```
-
-After install, the tray app auto-starts on login. Launch manually with `gigamate-tray`.
-
----
-
-## Features
-
-- **🖥️ GigaMate Center** — Dedicated desktop control panel (PyQt6) engineered for KDE Plasma, GNOME, and Hyprland
-- **🔋 Battery Care & Limiter** — Set max 80% (or custom) charge limit to protect battery longevity; health & cycle monitoring
-- **💤 Suspend/Resume Clean State Handler** — Turns off RGB gracefully before sleep, restores power profile, RGB and battery limit on resume
-- **🔁 Persistent Settings** — Fan profile, RGB and charge limit are safely re-applied on login, app launch and resume
-- **⌨️ Keyboard RGB & Idle Sleep** — Set colours and brightness, plus configurable idle backlight auto-off (tray, GUI, or `gigamate rgb idle`)
-- **🌡️ Temperature & Fan Monitoring** — Live CPU and socket thermals, dual fan RPM, and duty cycle readback
-- **⚡ Dynamic Power Boost** — NVIDIA Dynamic Boost (~80W boost via `nvidia-powerd`) & AMD SmartShift power balancing
-- **🧊 Discrete GPU Undervolt & Clock Control (NVIDIA)** — A V/F-curve offset ("undervolt"), an optional boost-clock cap, and an optional signed **memory-clock offset** (overclock/underclock) for the dGPU. All three are applied **only while the GPU is awake**, cleared when it sleeps, and reset to stock on reboot — so they never keep the dGPU (and battery) awake. They auto-clear while the GPU is awake but idle, and re-apply under load. Enforced by a small background service (`gigamate-dgpu.service`, independent of the tray); controlled from GigaMate Center (one **Apply** commits all three) or the CLI. Auto-application on boot/wake can be turned off in Settings (or `gigamate gpu auto off`), leaving the GPU untouched until you apply manually.
-- **🔌 dGPU Power Gate (AI Power Gear III, Experimental)** — True dGPU power-rail gating via ACPI (`_OFF`/`_ON` or `_PS3`/`_PS0`) plus PCI de-enumeration/rescan, matching GiMATE's **Optimus** (kernel runtime PM), **ECO** (gated off until switched back), and **Auto** (gated off on battery, restored on AC via udev events) modes. Cuts dGPU draw to ~0 W where runtime D3cold alone can wake on polls, displays `Off (gated)` status in tray/Center/CLI, pauses NVML tuning while gated off, and reconciles on resume from suspend. *Note: HDMI/DP ports wired to the dGPU do not work while gated off (blocked automatically if a display is connected).*
-- **Hardware Hotkey Support** — Press the `Mode` key (printed as `F7` on the keycap) to cycle power profiles with native KDE Plasma OSD overlay; press the `GigaMate` key to open GigaMate Center
-- **System Power Profile Sync** — Automatically syncs with KDE / GNOME / TLP / `power-profiles-daemon`
-- **🧪 Experimental Model Support** — Community-evidenced Gigabyte models (GIGABYTE GAMING A16/A18 family, AERO X16 family) get profile controls as *Experimental*: shown but disabled until you explicitly enable them once, since they're unconfirmed on your exact unit. One report from a real device promotes a model to Confirmed. See [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
-- **System Tray App** — Lightweight tray daemon with rich multi-metric hover tooltips
-
----
-
-## Usage
-
-### GigaMate Center (GUI)
-
-Launch from your desktop application launcher or via command line:
-```sh
-gigamate center       # or click "GigaMate Center..." in the tray menu
-```
-
-### System Tray App
-
-The tray icon provides instant status and quick actions:
-```
-GigaMate Center...
-Status → CPU: 48°C  |  Fan: 1875 RPM  |  Gaming  |  dGPU: Asleep (or Off (gated))  |  Batt: 85% (AC)
-Power Profile → Quiet / Balanced / Performance / Gaming
-dGPU Power → Optimus / ECO / Auto
-Keyboard → Colour (Red … Blush Pink) / Brightness / Backlight idle off: 10 seconds
-Battery: 85% (AC) → [x] Battery Care (Cap at 80%) / Charge to 100% Once
-Settings → Sync system power profile / Apply on startup / Reload profiles /
-           Set up GigaMate… / Calibrate keyboard… / Check for updates / About
-Quit
-```
-
-The top level stays deliberately short: desktop shells (Plasma in particular)
-split tall tray menus into extra columns instead of scrolling them, so anything
-that is not a one-click action lives in a flyout.
-
-### CLI
-
-```sh
-gigamate center                  # Launch modern GUI Control Panel
-gigamate battery                 # Show battery status, health, and limit
-gigamate battery --limit 80      # Set maximum battery charge limit to 80%
-gigamate rgb static <colour>     # Set keyboard colour
-gigamate rgb off                 # Turn backlight off
-gigamate rgb idle 60             # Auto-off backlight after 60s idle (or 'off')
-gigamate status                  # Full hardware status
-gigamate gpu status              # Show discrete GPU power state (awake/asleep/off (gated))
-gigamate gpu power status        # Inspect dGPU power-gate mode, ACPI path, and guards
-gigamate gpu power <optimus|eco|auto|off|on|probe>  # Switch mode, gate dGPU, or probe ACPI path
-gigamate gpu undervolt 100       # Undervolt the NVIDIA dGPU (V/F offset, MHz; 0-255)
-gigamate gpu undervolt off       # Reset the dGPU to stock
-gigamate gpu undervolt status    # Show dGPU undervolt state
-gigamate gpu maxclock 2100       # Cap the dGPU boost clock (MHz; 0-4000)
-gigamate gpu maxclock off        # Unlock the dGPU clock
-gigamate gpu maxclock status     # Show dGPU max-clock state
-gigamate gpu memoffset --probe   # Report whether the memory-clock offset API is available
-gigamate gpu memoffset 300       # Overclock the memory clock by +300 MHz
-gigamate gpu memoffset -200      # Underclock the memory clock by -200 MHz (saves power/heat)
-gigamate gpu memoffset off       # Return the memory clock to stock
-gigamate gpu auto off            # Don't auto-apply dGPU tuning on boot/wake
-gigamate gpu auto status         # Show dGPU auto-apply state
-gigamate profile                 # Show current power profile
-gigamate profile gaming          # Switch to Gaming mode
-gigamate profile cycle           # Cycle to next mode + trigger OSD
-gigamate profile experimental on # Enable experimental (unconfirmed) profiles for this model
-gigamate profile report          # Print a paste-able model report (helps confirm models)
-gigamate detect                  # Show keyboard + ACPI info
-gigamate detect --acpi           # Probe ACPI capabilities
-gigamate doctor                  # Diagnose keyboard permissions + hardware state
-gigamate repair                  # Rebuild + reload the ACPI driver for the running kernel
-gigamate repair --status         # Report ACPI driver/helper state only
-gigamate calibrate all           # Complete model calibration
-gigamate profile contribute      # Share your profile via PR
-```
-
-Legacy `gigabyte-rgb` commands still work with a deprecation notice.
-
----
-
-## Adding a New Model
-
-Your laptop isn't supported yet? Run these three commands:
-
-```sh
-gigamate calibrate rgb              # Map keyboard colours (5 min)
-gigamate calibrate rgb --interface 4  # Use a specific control interface (including LampArray)
-gigamate calibrate acpi             # Probe ACPI + generate a candidate profile
-gigamate profile contribute         # Print PR instructions to share
-```
-
-No coding required. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-> **Profiles are keyed on your model.** GigaMate exposes profile controls only
-> for models with a matching profile. Laptops *without* a Gigabyte USB keyboard
-> (e.g. GIGABYTE GAMING A16) key their profile on DMI via `gigamate calibrate
-> acpi` — no RGB calibration needed. Unconfirmed models ship as **Experimental**
-> (opt-in, may do nothing) rather than being hidden; see
-> [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md).
-
----
-
-## Installation
-
-### One-liner (recommended)
-
-```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh | bash
-```
-
-The installer auto-detects your distro, installs dependencies, builds the kernel
-module (if headers available), sets up udev rules, and installs a systemd service.
-
-**ACPI kernel module (no AUR required):**
-
-- The `gigamate_acpi` kernel module is built and installed via **DKMS**
-  (installed from your distro's *official* repositories — never from AUR).
-- DKMS auto-rebuilds the module whenever your kernel is updated, so fan/temp/
-  power control keeps working across kernel upgrades.
-- You need the **kernel headers matching your running kernel** (`uname -r`).
-  The installer picks the right package for Arch-family kernels
-  (CachyOS/zen/lts/hardened); on Debian/Ubuntu it uses `linux-headers-$(uname -r)`,
-  on Fedora/SUSE `kernel-devel`.
-- If **Secure Boot** is enabled, enroll the DKMS signing key once after install:
-  `sudo mokutil --import /var/lib/dkms/mok.pub`, then reboot and confirm in the
-  MOK manager. Without this the module will not load after reboot.
-
-### From a git checkout
-
-The one-liner is still the recommended path because it also builds and installs
-the ACPI kernel module. If you only want the Python side and the udev rule:
-
-```sh
-git clone https://github.com/goodeesh/GigaMate.git
-cd GigaMate
-
-sudo install -Dm644 data/70-gigamate.rules /etc/udev/rules.d/70-gigamate.rules
-sudo rm -f /etc/udev/rules.d/99-gigamate.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=hidraw
-
-python3 -m pip install --user --break-system-packages .
-```
-
-Reboot (or log out and back in) after installing the rule. The kernel module
-still needs the headers matching your running kernel, and `install.sh` handles
-that part for you.
-
-### Upgrading from gigabyte-keyboard-rgb
-
-Settings migrate automatically from `~/.config/gigabyte-keyboard-rgb/` on first run.
-
-### Upgrading from 2.0.x
-
-Your existing keyboard/startup/idle settings are kept. GigaMate 3.0 adds GigaMate
-Center, battery care and suspend/resume handling; the new features are **opt-in**
-and configured on first launch of the Center (you can re-run setup any time from
-Settings → *Run Setup Again*). The first update hop is performed by the old 2.0.x
-updater (`curl … install.sh | bash`), which is not checksum-verified; subsequent
-updates use the pinned, checksum-verified updater. GigaMate Center requires
-PyQt6 (installed automatically; on older distros it may come from pip).
-
-### Upgrading from 3.x
-
-Your settings and verified-model behaviour are unchanged. New in 4.0:
-
-- Community-evidenced models (GIGABYTE GAMING A16/A18 family, AERO X16 family)
-  now get profile controls as **Experimental** — disabled until you enable them
-  once (they're unconfirmed on your exact unit).
-- Laptops without a Gigabyte USB keyboard (e.g. GAMING A16) are now supported
-  via DMI-keyed profiles; `gigamate calibrate acpi` works without RGB calibration.
-- `gigamate profile report` prints a paste-able summary to help confirm
-  experimental models.
-
----
-
-## First-run setup
-
-On first launch, GigaMate Center runs a short setup wizard. Nothing on your
-hardware is changed until you choose it:
-
-- Keyboard colour/brightness and whether to apply it at startup
-- Idle backlight auto-off
-- Battery charge limit (only where supported)
-- System power-profile sync (only on supported Gigabyte laptops)
-
-Unsupported hardware (non-Gigabyte, no kernel module, no compatible keyboard,
-or no battery limit) is clearly reported and the corresponding options are
-skipped. Existing 2.0.x users get an "upgrade" variant that keeps their current
-keyboard/idle settings and additionally offers the new features.
-
----
-
-## How It Works
-
-GigaMate has two hardware backends:
-
-| Backend | Purpose | Communication |
-|---------|---------|---------------|
-| **USB HID** | Keyboard RGB | 8-byte control transfers via pyusb |
-| **Kernel module** | Fan, temp, power | ACPI WMBD/WMBC via sysfs |
-
-The kernel module (`gigamate_acpi.ko`) exposes sensors at
-`/sys/devices/platform/gigamate_acpi/`. The Python layer auto-detects
-which backends are available and degrades gracefully if one is missing.
-If the `acpi_call` module happens to be installed on your system, it is
-used automatically as an optional fallback — GigaMate never requires it.
-
-The **dGPU monitor** reads the NVIDIA GPU's power state from
-`/sys/bus/pci/devices/<bdf>/power/{runtime_status,power_state}`. These are
-plain kernel power-management reads — GigaMate never calls `nvidia-smi`, so
-checking the state does **not** wake the GPU.
-
-GigaMate deliberately does **not** show live GPU metrics (temperature, clocks,
-power, VRAM). Tools such as MangoHud and nvtop already do that well, and on a
-hybrid-graphics laptop every NVML read risks resuming a dGPU the kernel has
-powered down — the documented cause of dGPUs that never sleep. GigaMate shows
-what it is *configured and applied* to do, and otherwise leaves the dGPU alone.
-
-The tuning itself does need NVML, so writes and the few reads it requires go
-through a small privileged helper (`/usr/lib/gigamate/gigamate-dgpu-nvml`,
-invoked via `pkexec`) that performs exactly one operation and exits — an open
-NVML handle would keep the dGPU awake. The watcher service publishes the applied
-state to a runtime state file, which the tray, Center, dashboard and CLI all
-read, so no UI process ever blocks on a privileged call, and every UI path is
-gated on the dGPU being awake (`dgpu_tune.nvml_allowed()`).
-
-The memory clock can only be *pinned* to a clock the GPU already reports
-(`nvmlDeviceGetMaxClockInfo`), never pushed beyond it — on a mobile part that
-makes it a guaranteed-max pin or a power-saving cap, not a true overclock. The
-selector only offers the values the driver enumerates.
-
-Each laptop model is described by a JSON profile defining its RGB colour map
-and ACPI capabilities. See [docs/PROFILE_SCHEMA.md](docs/PROFILE_SCHEMA.md).
-
-For dGPU Power Gate (`AI Power Gear III`), `gigamate_acpi` additionally exposes
-`dgpu_acpi_path` (read-only `0444`) and root-only `acpi_eval` (`0644`, guarded
-by `CAP_SYS_ADMIN`), falling back to `/proc/acpi/call` when unloaded. Power-gate
-transitions run through `/usr/lib/gigamate/gigamate-dgpu-gate` via `pkexec`
-(polkit rules for `wheel`/`sudo`), enforcing runtime-PM and connected-display
-guards, coordinating PCI device removal/rescan and `nvidia-powerd`, publishing
-state to `/run/gigamate-dgpu-gate.json`, and reacting to AC plug/unplug events
-from `99-gigamate-dgpu-ac.rules`.
-
-For details on the USB RGB protocol and ACPI reverse engineering, see
-[docs/RGB_PROTOCOL.md](docs/RGB_PROTOCOL.md) and [docs/research.md](docs/research.md).
-
----
-
-## Built-in Profiles
-
-**Verified** (confirmed on real hardware):
-
-| Key | Match | Model | Profiles |
-|-----|-------|-------|----------|
-| USB `0414:8105` | Keyboard VID:PID | Gigabyte Aero X16 (EG61VH) | Quiet / Balanced / Performance / Gaming |
-| DMI `product_family: GIGABYTE GAMING` | DMI | Gigabyte GAMING A16 / A18 family | Eco / Balanced / Boost |
-| DMI `product_name: GIGABYTE EAGLE 9MJ` | DMI | Gigabyte EAGLE 9MJ | Quiet / Balanced / Performance / Gaming |
-
-**Experimental** (community-evidenced, unconfirmed — opt-in per machine, see
-[docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md)):
-
-| Key | Match | Model | Profiles |
-|-----|-------|-------|----------|
-| DMI `product_name prefix: GIGABYTE AERO X16` | DMI | Gigabyte AERO X16 family (all variants) | Quiet / Balanced / Performance / Gaming |
-
-Experimental profiles appear **disabled** until you enable them once (tray menu,
-GigaMate Center, or `gigamate profile experimental on`). Sensors (temps, fan RPM,
-duty) work everywhere the ACPI module loads — the experimental tier only gates
-profile switching.
-
-User profiles in `~/.config/gigamate/profiles/` override built-ins (USB-keyed
-files `{VID}_{PID}.json`; DMI-keyed files `dmi_<slug>.json`).
-
----
-
-## Experimental Models & Reporting
-
-GigaMate only shows profile controls it can stand behind. For models with strong
-community evidence but no in-house confirmation, controls ship as
-**Experimental**: visible, but disabled until you opt in.
-
-- **Enable:** tray menu → "Enable experimental profiles…", GigaMate Center →
-  Enable button, or `gigamate profile experimental on`
-- **Report what they do on your unit:** `gigamate profile report`, then paste the
-  output in a comment on <https://github.com/goodeesh/GigaMate/issues>. One
-  confirmed report promotes the model to Verified for everyone.
-
-Models with a *different* EC command set (AORUS 2025+, older Aero/AORUS) are
-documented as blocked in [docs/EXPERIMENTAL_MODELS.md](docs/EXPERIMENTAL_MODELS.md)
-until their command sets are implemented.
-
----
-
-## Project Structure
-
-```
-GigaMate/
-├── src/gigamate/             # Python package
-├── src/gigamate_acpi/        # Kernel module source
-├── data/                     # Service, udev, icon, desktop
-├── docs/                     # Research notes + profile schema
-├── tests/                    # 240+ unit tests
-├── install.sh / uninstall.sh
-├── README.md / CONTRIBUTING.md
-└── pyproject.toml / LICENSE
+gigamate status                  # Show discovered hardware, power profile, sensors, and RGB state
+gigamate doctor                  # Run diagnostics (gigamate_acpi, wmbd_aml, diagnose_lamparray, sysfs)
+gigamate profile [NAME]          # Get or set the active ACPI power profile
+gigamate rgb [COLOUR] [PCT]      # Set keyboard RGB colour and brightness (5–100%)
+gigamate backlight [on|off]      # Toggle keyboard backlight power
+gigamate dgpu [optimus|eco|auto] # Manage dGPU power-gate mode
+gigamate gui                     # Launch the GigaMate Material 3 Center & tray
 ```
 
 ---
 
-## Troubleshooting
+## Installation & Permissions
 
-### Keyboard RGB: Permission denied
-
-Symptom: `gigamate calibrate rgb` or a normal `gigamate rgb ...` command fails
-with:
-
-```
-Cannot access LampArray keyboard /dev/hidrawN: [Errno 13] Permission denied
-```
-
-`chmod 666 /dev/hidrawN` may appear to fix it, but udev recreates the node on
-every boot, so the permission comes back. It also lets every local user read
-the keyboard. Do not use `chmod` as the permanent fix.
-
-GigaMate ships a 70 prefixed udev rule that gives the active local user access
-through a logind ACL. Check the rule and the node:
-
-```sh
-ls -l /etc/udev/rules.d/70-gigamate.rules
-ls -l /etc/udev/rules.d/99-gigamate.rules 2>/dev/null || true
-ls -l /dev/hidraw*
-gigamate doctor
-```
-
-| What `ls -l` shows | Meaning | What to do |
-|---|---|---|
-| `crw------- root root` | The rule is missing or was rejected | Install the rule, then reboot |
-| `crw-rw---- root root` with no `+` | Another rule set the mode, but `uaccess` did not grant your session | Run `gigamate doctor` and check the session note below |
-| `crw-rw----+ root root` with an ACL entry for your user | Working | No permission problem |
-
-Install the rule, remove the old 99 file, reload udev, then reboot:
-
-```sh
-sudo install -Dm644 data/70-gigamate.rules /etc/udev/rules.d/70-gigamate.rules
-
-# or without a checkout:
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/70-gigamate.rules \
-  | sudo tee /etc/udev/rules.d/70-gigamate.rules >/dev/null
-
-sudo rm -f /etc/udev/rules.d/99-gigamate.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=hidraw
-```
-
-The rule must keep the 70 prefix. A rule numbered 99 runs after
-`73-seat-late.rules`, so the standard `uaccess` ACL is not applied.
-
-Remote sessions (SSH) and systems without systemd-logind, for example systems
-that use seatd, do not receive the `uaccess` ACL. Run GigaMate from the local
-desktop session, or use a group-based udev rule instead.
-
-`gigamate doctor` prints these checks and the exact commands for your machine.
-
----
-
-## Acknowledgements
-
-- **[Paul Ridgway](https://blockdev.io/gigabyte-aero-w15-keyboard-and-linux-ubuntu/)** — Original USB HID protocol reverse engineering
-- **[paul-ridgway/aero-keyboard](https://github.com/paul-ridgway/aero-keyboard)** — Ruby implementation
-- **[yurikhan/aero-keyboard-rgb](https://github.com/yurikhan/aero-keyboard-rgb)** — Python port
-- **[PyUSB](https://pyusb.github.io/pyusb/)** — Python USB library
+1. Install GigaMate and the `gigamate_acpi` kernel module (DKMS) per your distribution package or from source:
+   ```sh
+   pip install -e .
+   ```
+2. Ensure `data/70-gigamate.rules` is installed in `/etc/udev/rules.d/` and reload udev so `/dev/hidraw*` receives `uaccess` ACLs for your local session:
+   ```sh
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+3. Run `gigamate doctor` to verify `gigamate_acpi`, `wmbd_aml`, and `diagnose_lamparray`.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Key areas:
-- **Adding a new model** — Calibrate + submit profile via PR
-- **ACPI research** — Investigate additional commands on your model
-- **Packaging** — Help with distro packages (Flatpak, COPR, etc.)
-
-## Uninstalling
-
-```sh
-curl -sSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/uninstall.sh | bash
-```
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for bug-reporting guidelines (`gigamate doctor` + `wmbd_aml`), development setup, and running `pytest`.

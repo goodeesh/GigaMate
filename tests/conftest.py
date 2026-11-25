@@ -39,6 +39,8 @@ def _safe_apply_hardware_settings(*args, **kwargs):
 def _no_real_hardware(monkeypatch, tmp_path):
     """Replace hardware/config side-effect entry points with inert doubles."""
     monkeypatch.setattr("gigamate.lamparray.find_device", lambda *a, **k: None)
+    monkeypatch.setattr("gigamate.lamparray.detect_lamparray_keyboard", lambda: None)
+    monkeypatch.setattr("gigamate.lamparray.detect_gigabyte_hidraw_keyboard", lambda: None)
     # ── Config isolation (all tests) ──
     import gigamate.config as config_mod
 
@@ -60,8 +62,6 @@ def _no_real_hardware(monkeypatch, tmp_path):
     if tray_mod is not None:
         monkeypatch.setattr("gigamate.tray.CONFIG_FILE", cfg_file, raising=False)
 
-    # ── User profiles isolation ──
-    monkeypatch.setattr("gigamate.profiles.USER_PROFILES_DIR", tmp_path / "profiles", raising=False)
 
     # ── Hermetic env ──
     monkeypatch.delenv("GIGAMATE_FORCE_SETUP", raising=False)
@@ -137,8 +137,6 @@ def _no_real_hardware(monkeypatch, tmp_path):
         acpi_driver_loaded=False,
         acpi_driver_missing=False,
         has_power_profiles=False,
-        profile_verified=False,
-        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -146,8 +144,6 @@ def _no_real_hardware(monkeypatch, tmp_path):
         charge_limit_supported=False,
         battery_name="BAT0",
         keyboard_detected=False,
-        keyboard_profile_loaded=False,
-        keyboard_profile_name=None,
         keyboard_vid_pid=None,
         has_dgpu=False,
         gpu_name="Integrated Only",

@@ -13,14 +13,69 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from .config import DEFAULT_CONFIG, load as load_config, resolve_active_profile
-from .profiles import profile_usable, resolve_model
+from .config import (
+    DEFAULT_CONFIG,
+    effective_brightness_pct,
+    effective_rgb_hex,
+    is_rgb_enabled,
+    load as load_config,
+    profile_rgb_for,
+    update_config,
+)
 
 logger = logging.getLogger(__name__)
 
 # Reapplying hardware touches USB/ACPI/battery; serialize across the GUI thread
 # (launch) and the sleep-listener thread (resume) to avoid concurrent writes.
 _APPLY_LOCK = threading.Lock()
+
+
+def apply_profile(
+    profile_id: int,
+    cfg: Optional[Dict[str, Any]] = None,
+    sync_system: bool = True,
+    acpi: Any = None,
+) -> bool:
+    """Apply a Gigabyte EC power profile, optionally syncing system power and profile RGB."""
+    if cfg is None:
+        cfg = load_config()
+
+    applied = False
+    try:
+        from .acpi import AcpiController, FanProfile
+
+        fp = FanProfile(int(profile_id))
+        ctrl = acpi if acpi is not None else AcpiController()
+        if ctrl.available:
+            if ctrl.get_profile() == fp or ctrl.set_profile(fp):
+                applied = True
+    except Exception as exc:
+        logger.warning("apply_profile: ACPI profile %r failed: %s", profile_id, exc)
+
+    update_config(lambda c: {**c, "acpi_profile": int(profile_id)})
+
+    if applied and sync_system and cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
+        try:
+            from .system_power import sync_system_power
+
+            sync_system_power(int(profile_id))
+        except Exception as exc:
+            logger.warning("apply_profile: system power sync failed: %s", exc)
+
+    if cfg.get("profile_rgb_enabled", False) and is_rgb_enabled(cfg):
+        hex_color = profile_rgb_for(cfg, int(profile_id))
+        update_config(lambda c: {**c, "rgb_hex": hex_color})
+        try:
+            from . import protocol
+
+            dev = protocol.get_keyboard()
+            if dev is not None:
+                pct = effective_brightness_pct(cfg)
+                protocol.set_rgb(dev, hex_color, pct)
+        except Exception as exc:
+            logger.warning("apply_profile: keyboard RGB update failed: %s", exc)
+
+    return applied
 
 
 def apply_hardware_settings(
@@ -65,25 +120,23 @@ def _apply_hardware_settings_locked(
     prof_val = cfg.get("acpi_profile")
     if prof_val is not None:
         from .acpi import AcpiController, FanProfile
+        from .power_limits import discover_acpi_profiles
 
-        # Only re-apply the persisted profile when the matching model profile is
-        # usable (declares profiles, and consented when experimental). Otherwise
-        # a re-apply is a dead control: the EC may accept the write and ignore it.
-        match = None
+        discovered = {}
         try:
-            match = resolve_model()
+            discovered = discover_acpi_profiles()
         except Exception:
-            match = None
-        if not profile_usable(match, cfg):
-            logger.info("Hardware sync: skipping ACPI profile (no usable model profile)")
+            discovered = {}
+
+        if not discovered:
+            logger.info("Hardware sync: skipping ACPI profile (no ACPI profiles discovered)")
         else:
-            model_ids = set(int(k) for k in match.profile.acpi.profiles.keys())
             try:
                 prof_val_i = int(prof_val)
             except (TypeError, ValueError):
                 prof_val_i = None
-            if prof_val_i is None or prof_val_i not in model_ids:
-                logger.warning("Hardware sync: ignoring acpi_profile %r (not in model set)", prof_val)
+            if prof_val_i is None or prof_val_i not in discovered:
+                logger.warning("Hardware sync: ignoring acpi_profile %r (not in discovered profiles)", prof_val)
             else:
                 # Parse the persisted profile id in its own error domain so a bad value
                 # cannot suppress the system/GPU power sync below.
@@ -161,7 +214,7 @@ def _apply_hardware_settings_locked(
     # ─────────────────────────────────────────────────────────────
     if force_keyboard or cfg.get("startup_apply", DEFAULT_CONFIG["startup_apply"]):
         try:
-            from .protocol import get_keyboard, set_off, set_static
+            from .protocol import get_keyboard, set_off, set_rgb
 
             # On boot/resume, USB devices might need a brief moment to settle
             dev = get_keyboard()
@@ -173,19 +226,20 @@ def _apply_hardware_settings_locked(
                         break
 
             if dev is not None:
-                profile = resolve_active_profile()
-                brightness = int(cfg.get("brightness", DEFAULT_CONFIG["brightness"]))
-                colour = cfg.get("colour", DEFAULT_CONFIG["colour"])
-
-                if brightness == 0:
-                    ok = set_off(dev, profile)
+                if not is_rgb_enabled(cfg):
+                    ok = set_off(dev)
+                    results["keyboard"] = bool(ok)
+                    if ok:
+                        logger.info("Hardware sync: Keyboard lighting turned off")
                 else:
-                    if profile is not None and profile.colour_map and colour not in profile.colour_map:
-                        colour = next(iter(profile.colour_map))
-                    ok = set_static(dev, colour, brightness, profile)
-                results["keyboard"] = bool(ok)
-                if ok:
-                    logger.info(f"Hardware sync: Keyboard lighting set to {colour} (brightness {brightness})")
+                    pct = max(1, effective_brightness_pct(cfg))
+                    hex_color = effective_rgb_hex(cfg)
+                    ok = set_rgb(dev, hex_color, pct)
+                    results["keyboard"] = bool(ok)
+                    if ok:
+                        logger.info(
+                            f"Hardware sync: Keyboard lighting set to {hex_color} (brightness {pct}%)"
+                        )
         except Exception as exc:
             logger.warning(f"Hardware sync failed for keyboard lighting: {exc}")
 

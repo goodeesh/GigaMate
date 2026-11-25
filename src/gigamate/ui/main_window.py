@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import icons
+from .pages.automation_page import AutomationPage
 from .pages.battery_page import BatteryPage
 from .pages.dashboard_page import DashboardPage
 from .pages.gpu_page import GpuPage
@@ -251,7 +252,8 @@ class MainWindow(QMainWindow):
         self.btn_battery = self._add_nav_btn("Battery Care", "battery", 1, sb_layout)
         self.btn_rgb = self._add_nav_btn("RGB Lighting", "keyboard", 2, sb_layout)
         self.btn_gpu = self._add_nav_btn("GPU Tuning", "tune", 3, sb_layout)
-        self.btn_settings = self._add_nav_btn("Settings", "settings", 4, sb_layout)
+        self.btn_automation = self._add_nav_btn("Automation", "bolt", 4, sb_layout)
+        self.btn_settings = self._add_nav_btn("Settings", "settings", 5, sb_layout)
 
         sb_layout.addStretch()
 
@@ -322,6 +324,7 @@ class MainWindow(QMainWindow):
         self.page_battery = BatteryPage()
         self.page_rgb = RgbPage()
         self.page_gpu = GpuPage()
+        self.page_automation = AutomationPage()
         self.page_settings = SettingsPage()
 
         # Each page lives in its own scroll area. Without this, shrinking the
@@ -330,7 +333,7 @@ class MainWindow(QMainWindow):
         # labels — the GPU page alone needs ~913 px. Scrollable pages keep their
         # natural size and simply scroll instead.
         for page in (self.page_dashboard, self.page_battery, self.page_rgb,
-                     self.page_gpu, self.page_settings):
+                     self.page_gpu, self.page_automation, self.page_settings):
             self.stack.addWidget(self._wrap_scrollable(page))
 
         root_layout.addWidget(self.stack)

@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
 
 from ...capabilities import detect_system_capabilities, invalidate_capabilities
 from ...config import load as load_config, update_config
-from ...profiles import profile_usable, resolve_model
 from ...system_power import sync_system_power
 from ...updates import build_terminal_repair_command, repair_command
 from .. import icons
@@ -272,7 +271,7 @@ class SettingsPage(QWidget):
         if caps.keyboard_detected and caps.keyboard_vid_pid:
             vid, pid = caps.keyboard_vid_pid
             kbd_val = f"0x{vid:04X}:0x{pid:04X}"
-            kbd_sub = "(Profile Mapped)" if caps.keyboard_profile_loaded else "(Uncalibrated)"
+            kbd_sub = "(HID LampArray)" if caps.keyboard_lamparray_supported else "(Unsupported — Use v4.5.x)"
         else:
             kbd_val = "Not Detected"
             kbd_sub = "(No RGB Controller)"
@@ -308,16 +307,13 @@ class SettingsPage(QWidget):
             self._make_chip("Charge Limiter", bat_val, "battery", bat_sub)
         )
 
-    def _resolved_model_profile(self):
-        """Resolve the matching model profile (None when unmapped)."""
-        try:
-            return resolve_model()
-        except Exception:
-            return None
-
     def _sync_power_supported(self) -> bool:
-        """Whether system power sync is meaningful (usable model profile)."""
-        return profile_usable(self._resolved_model_profile(), self.cfg)
+        """Whether system power sync is meaningful (discovered power profiles)."""
+        try:
+            caps = detect_system_capabilities()
+            return bool(caps.has_power_profiles or caps.discovered_profiles)
+        except Exception:
+            return False
 
     def _refresh_sync_power_enabled(self) -> None:
         """Update enabled state and tooltip for the system power sync row."""

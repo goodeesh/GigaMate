@@ -35,9 +35,40 @@ from .battery import get_battery_manager
 from .config import DEFAULT_CONFIG, load as load_config, update_config
 from .dgpu_tune import wake_holders as _raw_nvidia_wake_holders
 from .gpu import AMD_VENDOR, NVIDIA_VENDOR, _UMA_APERTURE_MAX_BYTES
-from .profiles import DgpuGateConfig, ModelMatch, resolve_dgpu_gate_profile
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DgpuGateConfig:
+    """ACPI dGPU power-gate method configuration."""
+
+    path: str
+    method: str = "_OFF"
+    on_method: str = "_ON"
+    sta_method: str = "_STA"
+    quirks: List[str] = field(default_factory=list)
+    source: str = "auto"
+
+    @property
+    def effective_on_method(self) -> str:
+        if self.on_method:
+            return self.on_method
+        return "_PS0" if self.method == "_PS3" else "_ON"
+
+    @property
+    def effective_sta_method(self) -> str:
+        return self.sta_method or "_STA"
+
+    def to_dict(self) -> Dict:
+        return {
+            "path": self.path,
+            "method": self.method,
+            "on_method": self.effective_on_method,
+            "sta_method": self.effective_sta_method,
+            "quirks": list(self.quirks),
+            "source": self.source,
+        }
 
 _MANAGED_POWER_DAEMONS = frozenset({"nvidia-powerd"})
 
@@ -1215,15 +1246,62 @@ def _run_helper(args: List[str], timeout: float = _HELPER_TIMEOUT) -> Dict:
         return {"ok": False, "error": "invalid helper output"}
 
 
-def get_gate_config() -> Optional[Tuple[DgpuGateConfig, ModelMatch]]:
-    """Return ``(DgpuGateConfig, ModelMatch)`` for this laptop, or None."""
+_CACHED_GATE_CONFIG: Optional[Tuple[DgpuGateConfig, Optional[object]]] = None
+_GATE_CACHE_POPULATED: bool = False
+_GATE_PROBE_IN_PROGRESS: bool = False
+
+
+def resolve_gate_config(force_refresh: bool = False) -> Optional[Tuple[DgpuGateConfig, Optional[object]]]:
+    """Auto-discover and cache ``(DgpuGateConfig, None)`` via ``probe_dgpu_gate``."""
+    global _CACHED_GATE_CONFIG, _GATE_CACHE_POPULATED, _GATE_PROBE_IN_PROGRESS
+    if _GATE_CACHE_POPULATED and not force_refresh:
+        return _CACHED_GATE_CONFIG
+    if _GATE_PROBE_IN_PROGRESS:
+        return None
+
+    _GATE_PROBE_IN_PROGRESS = True
     try:
-        match = resolve_dgpu_gate_profile()
+        probe = probe_dgpu_gate(live_test=False)
+        candidates = probe.get("candidates") or []
+        if not candidates:
+            _CACHED_GATE_CONFIG = None
+            _GATE_CACHE_POPULATED = True
+            return None
+
+        # Prefer PG00._OFF, then any _OFF, then _PS3, then first candidate.
+        def _rank(cand: Dict) -> Tuple[int, int]:
+            path = str(cand.get("path", "")).upper()
+            method = str(cand.get("method", "")).upper()
+            is_pg00 = 0 if "PG00" in path else 1
+            if method == "_OFF":
+                m_rank = 0
+            elif method == "_PS3":
+                m_rank = 1
+            else:
+                m_rank = 2
+            return (is_pg00, m_rank)
+
+        best = min(candidates, key=_rank)
+        cfg = DgpuGateConfig(
+            path=best["path"],
+            method=best.get("method", "_OFF"),
+            on_method=best.get("on_method", "_ON"),
+            sta_method=best.get("sta_method", "_STA"),
+            quirks=list(best.get("quirks") or []),
+            source=str(best.get("source", "auto")),
+        )
+        _CACHED_GATE_CONFIG = (cfg, None)
+        _GATE_CACHE_POPULATED = True
+        return _CACHED_GATE_CONFIG
     except Exception:  # noqa: BLE001
         return None
-    if match is None or match.profile.acpi is None or match.profile.acpi.dgpu_gate is None:
-        return None
-    return match.profile.acpi.dgpu_gate, match
+    finally:
+        _GATE_PROBE_IN_PROGRESS = False
+
+
+def get_gate_config() -> Optional[Tuple[DgpuGateConfig, Optional[object]]]:
+    """Return ``(DgpuGateConfig, None)`` for this laptop, or None."""
+    return resolve_gate_config()
 
 
 def get_availability(
@@ -1315,7 +1393,7 @@ def probe_dgpu_gate(live_test: bool = False) -> Dict:
     """
     topo = find_dgpu_topology()
     eval_be = acpi_eval_backend()
-    resolved = get_gate_config()
+    resolved = None if _GATE_PROBE_IN_PROGRESS else get_gate_config()
 
     candidates: List[Dict] = []
     seen_keys = set()
@@ -1454,8 +1532,8 @@ def probe_dgpu_gate(live_test: bool = False) -> Dict:
         },
         "profile_match": (
             {
-                "name": resolved[1].clean_name,
-                "source": resolved[1].source,
+                "name": getattr(resolved[1], "clean_name", "Auto-discovered ACPI") if resolved[1] is not None else "Auto-discovered ACPI",
+                "source": getattr(resolved[1], "source", resolved[0].source) if resolved[1] is not None else resolved[0].source,
                 "gate": resolved[0].to_dict(),
             }
             if resolved is not None
@@ -2264,8 +2342,8 @@ def get_status(check_helper: bool = False) -> Dict:
         "last_error": policy_state.get("last_error"),
         "holders": policy_state.get("holders") or [],
         "gate_config": resolved[0].to_dict() if resolved is not None else None,
-        "profile_source": resolved[1].source if resolved is not None else None,
-        "profile_name": resolved[1].clean_name if resolved is not None else None,
-        "experimental": bool(resolved[1].experimental) if resolved is not None else False,
+        "profile_source": (resolved[1].source if resolved[1] is not None else resolved[0].source) if resolved is not None else None,
+        "profile_name": (resolved[1].clean_name if resolved[1] is not None else "Auto-discovered ACPI") if resolved is not None else None,
+        "experimental": False,
         "acpi_sta": acpi_sta,
     }

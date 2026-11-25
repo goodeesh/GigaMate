@@ -3,6 +3,7 @@
 import time
 from typing import Optional
 from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -15,13 +16,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ... import dgpu_gate
+from ... import dgpu_gate, hardware
 from ...acpi import AcpiController, FanProfile, FanState
 from ...capabilities import detect_system_capabilities
-from ...config import load as load_config, update_config
+from ...config import load as load_config, profile_rgb_for, update_config
 from ...gpu import GpuState, get_gpu_state
-from ...power_limits import SystemPowerLimits, discover_power_limits
-from ...profiles import profile_usable, resolve_model
+from ...power_limits import SystemPowerLimits, discover_acpi_profiles, discover_power_limits
 from ...system_power import sync_system_power
 from .. import icons
 from ..theme import THEME
@@ -57,17 +57,19 @@ class DashboardPage(QWidget):
 
     def reload_from_config(self) -> None:
         """Public page-lifecycle hook: refresh telemetry/highlight."""
-        self._cached_profile = None
         self._refresh_telemetry()
 
-    def _model_profile(self):
-        """Resolve the matching model profile (cached; refreshed on reload)."""
-        if self._cached_profile is None:
-            try:
-                self._cached_profile = resolve_model()
-            except Exception:
-                self._cached_profile = None
-        return self._cached_profile
+    def _discovered_profiles(self) -> dict:
+        """Discover ACPI power profiles from sysfs, falling back to controller capabilities."""
+        try:
+            profs = discover_acpi_profiles()
+            if profs:
+                return profs
+        except Exception:
+            pass
+        if getattr(self, "acpi_ctrl", None) is not None and self.acpi_ctrl.available:
+            return dict(getattr(self.acpi_ctrl.capabilities, "discovered_profiles", {}) or {})
+        return {}
 
     def _config(self) -> dict:
         try:
@@ -124,19 +126,6 @@ class DashboardPage(QWidget):
         self.prof_bar = M3SegmentedBar()
         self._btn_ids: list = []
         self._profile_base_labels: dict = {}
-
-        # Shown only for experimental (unconfirmed) models before opt-in.
-        self.btn_enable_experimental = QPushButton("Enable Experimental Profiles")
-        self.btn_enable_experimental.setIcon(
-            icons.make_icon("sparkles", color=THEME.on_primary_container, size=15)
-        )
-        self.btn_enable_experimental.setIconSize(QSize(15, 15))
-        self.btn_enable_experimental.setProperty("class", "TonalButton")
-        self.btn_enable_experimental.setMinimumHeight(38)
-        self.btn_enable_experimental.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_enable_experimental.clicked.connect(self._on_enable_experimental)
-        self.btn_enable_experimental.setVisible(False)
-        prof_layout.addWidget(self.btn_enable_experimental)
 
         prof_layout.addWidget(self.prof_bar)
 
@@ -252,25 +241,11 @@ class DashboardPage(QWidget):
     def _select_profile(self, profile_id: int) -> None:
         """Switch ACPI profile and sync system/GPU power per user preference."""
         self._ensure_acpi_controller()
-        if not profile_usable(self._model_profile(), self._config()):
-            return
         if profile_id in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
             self._refresh_telemetry()
             return
 
-        def _mutate(cfg):
-            cfg["acpi_profile"] = profile_id
-            return cfg
-
-        cfg = update_config(_mutate)
-
-        if self.acpi_ctrl.available:
-            self.acpi_ctrl.set_profile(FanProfile(profile_id))
-
-        # sync_system_power() also synchronizes GPU power (Dynamic Boost /
-        # SmartShift); honour the user's preference like the tray and Settings.
-        if cfg.get("sync_system_power", False):
-            sync_system_power(profile_id)
+        hardware.apply_profile(profile_id, cfg=self._config(), sync_system=True, acpi=self.acpi_ctrl)
 
         btn = self._profile_buttons.get(profile_id)
         if btn is not None:
@@ -278,10 +253,10 @@ class DashboardPage(QWidget):
 
         self._refresh_telemetry()
 
-    def _rebuild_profile_buttons(self, match, usable: bool) -> None:
-        """(Re)build the profile buttons from the model's declared profile set."""
-        names = match.profile.acpi.profiles if (match is not None and match.profile.acpi) else {}
-        ids = sorted(int(k) for k in names.keys())
+    def _rebuild_profile_buttons(self, profiles: dict, usable: bool) -> None:
+        """(Re)build the profile buttons from discovered ACPI profiles."""
+        ids = sorted(int(k) for k in profiles.keys())
+        self.prof_bar.setVisible(bool(ids))
 
         if ids != self._btn_ids:
             for btn in self._profile_buttons.values():
@@ -291,7 +266,7 @@ class DashboardPage(QWidget):
             self._profile_base_labels = {}
             self._btn_ids = []
             for pid in ids:
-                label = (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                label = (profiles.get(pid) or profiles.get(str(pid)) or {}).get("name", f"Profile {pid}")
                 self._profile_base_labels[pid] = label
                 btn = self.prof_bar.add_segment(label, checkable=True, min_height=42)
                 btn.clicked.connect(lambda _, p=pid: self._select_profile(p))
@@ -300,12 +275,27 @@ class DashboardPage(QWidget):
                 self._btn_ids.append(pid)
 
         high_ok = dgpu_gate.high_power_profiles_allowed()
+        cfg = self._config()
+        show_rgb_dot = bool(cfg.get("profile_rgb_enabled", False))
         for pid, btn in self._profile_buttons.items():
             base_label = self._profile_base_labels.get(
-                pid, (names.get(str(pid)) or {}).get("name", f"Profile {pid}")
+                pid, (profiles.get(pid) or profiles.get(str(pid)) or {}).get("name", f"Profile {pid}")
             )
             locked_by_gate = usable and not high_ok and pid in (2, 3)
             btn.setText(base_label)
+            if show_rgb_dot:
+                pm = QPixmap(10, 10)
+                pm.fill(Qt.GlobalColor.transparent)
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setBrush(QColor(profile_rgb_for(cfg, pid)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(1, 1, 8, 8)
+                p.end()
+                btn.setIcon(QIcon(pm))
+                btn.setIconSize(QSize(10, 10))
+            else:
+                btn.setIcon(QIcon())
             if locked_by_gate:
                 btn.setLocked(
                     True,
@@ -322,27 +312,6 @@ class DashboardPage(QWidget):
                 btn.setToolTip("")
         if hasattr(self, "dgpu_profile_lock_notice"):
             self.dgpu_profile_lock_notice.setVisible(bool(usable and not high_ok))
-        self.btn_enable_experimental.setVisible(
-            bool(match is not None and match.experimental and not usable))
-
-    def _on_enable_experimental(self) -> None:
-        """One-time consent prompt for experimental (unconfirmed) profiles."""
-        box = QMessageBox(self)
-        box.setWindowTitle("Enable experimental profiles?")
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText("Profile switching for this model is community-evidenced but "
-                    "unconfirmed — it may do nothing.")
-        box.setInformativeText("Enable it anyway? You can report results with "
-                               "'gigamate profile report'.")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            update_config(lambda c: {**c, "experimental_profiles_enabled": True})
-        except Exception:
-            pass
-        self._cached_profile = None
-        self._refresh_telemetry()
 
     def _refresh_telemetry(self) -> None:
         """Update sensor numbers and highlight active profile."""
@@ -357,20 +326,18 @@ class DashboardPage(QWidget):
 
             # Fan count awareness
             caps = self.acpi_ctrl.capabilities
-            # Profile switching is a per-model contract: build the buttons from
-            # the model's declared set and gate them on consent.
-            match = self._model_profile()
-            usable = profile_usable(match, self._config())
-            self._rebuild_profile_buttons(match, usable)
-            if match is not None:
+            profiles = self._discovered_profiles()
+            usable = bool(profiles)
+            self._rebuild_profile_buttons(profiles, usable)
+            if profiles:
                 self.acpi_warning_box.setVisible(False)
             else:
                 self.acpi_warning_box.setVisible(True)
                 self.acpi_warning_box.set_tone("info", "info")
-                self.wb_title.setText("No profile support for this model")
+                self.wb_title.setText("No Power Profiles Exposed")
                 self.wb_desc.setText(
-                    "Profile switching is only exposed on models with a matching "
-                    "profile. Run 'gigamate calibrate acpi' to generate one.")
+                    "BIOS does not expose WMBD(0xED) power profiles — sensors and fans remain active."
+                )
             fan1_title = self.findChild(QLabel, "stat_fan1_rpm_title")
             fan2_title = self.findChild(QLabel, "stat_fan2_rpm_title")
             if not caps.has_fan_rpm:
@@ -498,7 +465,6 @@ class DashboardPage(QWidget):
 
             for btn in self._profile_buttons.values():
                 btn.setEnabled(False)
-            self.btn_enable_experimental.setVisible(False)
 
             for sub_name in ("stat_cpu_sub", "stat_fan1_sub", "stat_fan2_sub", "stat_duty_sub"):
                 lbl = self.findChild(QLabel, sub_name)
@@ -609,8 +575,7 @@ class DashboardPage(QWidget):
                 item.widget().deleteLater()
 
         default_names = {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
-        match = self._model_profile()
-        decl_profiles = match.profile.acpi.profiles if (match is not None and match.profile.acpi) else {}
+        decl_profiles = self._discovered_profiles()
 
         hdr_metric = QLabel("Power Limit")
         hdr_metric.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -621,7 +586,9 @@ class DashboardPage(QWidget):
         self.compare_grid.addWidget(hdr_metric, 0, 0)
 
         for col_idx, pid in enumerate(valid_pids, start=1):
-            pname = (decl_profiles.get(str(pid)) or {}).get("name", default_names.get(pid, f"Mode {pid}"))
+            pname = (decl_profiles.get(pid) or decl_profiles.get(str(pid)) or {}).get(
+                "name", default_names.get(pid, f"Mode {pid}")
+            )
             hdr_cell = QWidget()
             hdr_cell.setStyleSheet("background: transparent;")
             hdr_lay = QHBoxLayout(hdr_cell)

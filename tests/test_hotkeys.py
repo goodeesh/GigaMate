@@ -150,11 +150,9 @@ class TestHotkeySpec:
 
     def test_aero_x16_profile_signatures(self):
         """Lock the captured Aero X16 signatures to actions."""
-        from gigamate.profiles import load_builtin_profiles
+        from gigamate.hotkeys import DEFAULT_GIGABYTE_HOTKEYS
 
-        profile = load_builtin_profiles().get((0x0414, 0x8105))
-        assert profile is not None
-        specs = specs_for_hotkeys(profile.hotkeys)
+        specs = specs_for_hotkeys(DEFAULT_GIGABYTE_HOTKEYS)
         assert match_action(specs, b"\x04\x00\x00\x84", 2) == ACTION_MODE_SWITCH
         assert match_action(specs, b"\x04\x00\x00\x91", 2) == ACTION_OPEN_CENTER
 
@@ -249,3 +247,59 @@ class TestHotkeyListener:
             # Stop
             listener.stop()
             assert listener.is_running is False
+
+
+from gigamate import hotkeys
+
+
+class TestBatch3Hotkeys:
+    def test_custom_hotkeys_override_precedence(self):
+        profile_hotkeys = {
+            "mode_switch": {"interface": 2, "report_id": 1, "payload": "0011", "key_name": "Profile"},
+            "open_center": {"interface": 2, "report_id": 2, "payload": "0022", "key_name": "Center"},
+        }
+        custom_hotkeys = {
+            "mode_switch": {"interface": 3, "report_id": 4, "payload": "aabb", "key_name": "Custom"},
+        }
+        with patch("gigamate.config.load", return_value={"custom_hotkeys": custom_hotkeys}):
+            listener = hotkeys.HotkeyListener(profile_hotkeys=profile_hotkeys)
+        by_action = {s.action: s for s in listener._specs}
+        assert by_action["mode_switch"].interface == 3
+        assert by_action["mode_switch"].payload == bytes.fromhex("aabb")
+        assert by_action["open_center"].interface == 2
+
+    def test_capture_hardware_hotkey_success_and_close(self):
+        with patch("gigamate.hotkeys.list_hotkey_hidraw", return_value=[(2, "/dev/hidraw9")]), \
+             patch("gigamate.hotkeys.os.open", return_value=42) as mock_open, \
+             patch("gigamate.hotkeys.select.select", return_value=([42], [], [])), \
+             patch("gigamate.hotkeys.os.read", side_effect=[b"\x01\x00\x00", b"\x04\x12\x34"]), \
+             patch("gigamate.hotkeys.os.close") as mock_close:
+            result = hotkeys.capture_hardware_hotkey(timeout_sec=1.0)
+        assert result == {
+            "interface": 2,
+            "report_id": 4,
+            "payload": "1234",
+            "key_name": "HID iface 2 (0x04)",
+        }
+        mock_open.assert_called_once()
+        mock_close.assert_called_once_with(42)
+
+    def test_capture_hardware_hotkey_timeout_returns_none(self):
+        with patch("gigamate.hotkeys.list_hotkey_hidraw", return_value=[(2, "/dev/hidraw9")]), \
+             patch("gigamate.hotkeys.os.open", return_value=42), \
+             patch("gigamate.hotkeys.select.select", return_value=([], [], [])), \
+             patch("gigamate.hotkeys.time.monotonic", side_effect=[0.0, 0.5, 2.0]), \
+             patch("gigamate.hotkeys.os.close") as mock_close:
+            assert hotkeys.capture_hardware_hotkey(timeout_sec=1.0) is None
+        mock_close.assert_called_once_with(42)
+
+    def test_desktop_shortcut_command(self):
+        assert hotkeys.desktop_shortcut_command("open_center") == "gigamate center"
+        assert hotkeys.desktop_shortcut_command("mode_switch") == "gigamate profile next"
+
+    def test_register_desktop_shortcut_fallback(self, monkeypatch):
+        monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
+        with patch("gigamate.hotkeys.shutil.which", return_value=None):
+            ok, msg = hotkeys.register_desktop_shortcut("open_center", "Super+G")
+        assert ok is False
+        assert "Shortcuts settings" in msg

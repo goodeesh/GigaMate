@@ -607,3 +607,45 @@ def test_cmd_battery_parser_help():
 
 
 
+
+
+def test_evaluate_calibration_state_baseline_never_forges_last_full_charge_ts(tmp_path: Path, monkeypatch):
+    """Auto-calibration initializes charge_calibration_baseline_ts and leaves last_full_charge_ts at 0."""
+    import gigamate.battery as battery_module
+    import gigamate.config as config_module
+    from gigamate.battery import BatteryInfo, evaluate_calibration_state
+
+    class FakeMgr:
+        is_available = True
+
+        def get_battery_info(self):
+            return BatteryInfo(present=True, capacity=80, status="Not charging", ac_online=True)
+
+        def is_charge_limit_supported(self):
+            return True
+
+        def set_charge_limit(self, limit):
+            return True
+
+    saved_cfg = {
+        "charge_limit_enabled": True,
+        "charge_limit": 80,
+        "charge_calibration_auto": True,
+        "charge_calibration_interval_days": 30,
+        "charge_calibration_baseline_ts": 0,
+        "last_full_charge_ts": 0,
+        "charge_topup_active": False,
+    }
+
+    def fake_update(fn):
+        nonlocal saved_cfg
+        saved_cfg = fn(dict(saved_cfg))
+        return saved_cfg
+
+    monkeypatch.setattr(config_module, "update_config", fake_update)
+    monkeypatch.setattr(battery_module.time, "time", lambda: 1_700_000_000)
+
+    res = evaluate_calibration_state(mgr=FakeMgr(), cfg=dict(saved_cfg))
+    assert res == {"active": False, "event": "idle"}
+    assert saved_cfg["last_full_charge_ts"] == 0
+    assert saved_cfg["charge_calibration_baseline_ts"] == 1_700_000_000

@@ -82,6 +82,7 @@ class AcpiCapabilities:
     has_power_profiles: bool = False
     fan_count: int = 0
     profile_ids: List[int] = field(default_factory=lambda: [0, 1, 2, 3])
+    discovered_profiles: Dict[int, Dict[str, str]] = field(default_factory=dict)
     backend: str = "none"  # "module", "acpi_call", "mock", "none"
 
 
@@ -192,6 +193,12 @@ class MockBackend(AcpiBackend):
             has_power_profiles=True,
             fan_count=2,
             profile_ids=[0, 1, 2, 3],
+            discovered_profiles={
+                0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+                1: {"name": "Balanced", "description": "Balanced performance and noise"},
+                2: {"name": "Performance", "description": "High performance, more fan noise"},
+                3: {"name": "Gaming", "description": "Maximum GPU power and cooling"},
+            },
             backend="mock",
         )
 
@@ -462,7 +469,12 @@ class ModuleBackend(AcpiBackend):
         if self._read_sysfs_int("pwm1") is not None:
             caps.has_fan_duty = True
         if (GIGAMATE_ACPI_SYSFS / "profile").exists():
-            caps.has_power_profiles = True
+            from .power_limits import discover_acpi_profiles
+
+            caps.discovered_profiles = discover_acpi_profiles()
+            caps.has_power_profiles = len(caps.discovered_profiles) >= 2
+            if caps.discovered_profiles:
+                caps.profile_ids = sorted(caps.discovered_profiles.keys())
 
         if not (caps.has_temperature or caps.has_fan_rpm or caps.has_fan_duty or caps.has_power_profiles):
             return AcpiCapabilities(backend="none")

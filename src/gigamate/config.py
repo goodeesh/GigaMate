@@ -6,7 +6,6 @@ from pathlib import Path
 import threading
 
 from .paths import CONFIG_DIR
-from .profiles import detect_device, resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -48,18 +47,27 @@ def _migrate_old_config():
 DEFAULT_CONFIG = {
     "colour": "light_purple",
     "brightness": 2,
+    "rgb_hex": None,
+    "brightness_pct": None,
+    "rgb_enabled": True,
     # Hardware-mutating behaviours are opt-in; onboarding enables them.
     "startup_apply": False,
-    "profile_id": [0x0414, 0x8105],
     "idle_off_enabled": False,
     "idle_timeout_sec": 60,
+    "idle_keep_on_ac": False,
     "charge_limit": 80,
     "charge_limit_enabled": False,
     "charge_topup_active": False,
     "charge_topup_started_ts": 0,
     "charge_calibration_auto": False,
     "charge_calibration_interval_days": 30,
+    "charge_calibration_baseline_ts": 0,
     "last_full_charge_ts": 0,
+    "profile_rgb_enabled": False,
+    "profile_rgb_map": {"0": "#2563eb", "1": "#00b4a0", "2": "#f59e0b", "3": "#ef4444"},
+    "ac_profile_mode": "off",
+    "ac_profile_id": 1,
+    "battery_profile_id": 0,
     # Discrete-GPU (NVIDIA) sleep-aware undervolt: V/F clock offset in MHz.
     # 0 = stock/off. Applied only while the dGPU is awake (see dgpu_tune.py).
     "dgpu_undervolt_enabled": False,
@@ -74,16 +82,15 @@ DEFAULT_CONFIG = {
     "dgpu_mem_offset_mhz": 0,
     # Discrete GPU power-gate policy ("optimus" | "eco" | "auto").
     "dgpu_power_mode": "optimus",
+    "dgpu_gate_disclaimer_accepted": False,
     "sync_system_power": False,
-    # Opt-in consent for experimental (community-evidenced, unconfirmed) model
-    # profiles. Unconsented experimental profiles are shown but disabled.
-    "experimental_profiles_enabled": False,
     "last_brightness": 2,
     # Set once the first-run setup has been shown (so it never nags again).
     "onboarding_complete": False,
     # Explicit per-user hotkey mappings (action -> spec), merged over the
     # device profile's hotkeys. Opt-in only; see docs/PROFILE_SCHEMA.md.
     "hotkey_overrides": {},
+    "custom_hotkeys": {},
 }
 
 _BRIGHTNESS_LEGACY_MAP = {
@@ -91,6 +98,129 @@ _BRIGHTNESS_LEGACY_MAP = {
     (13, 62): 1,
     (63, 100): 2,
 }
+
+LEGACY_BRIGHTNESS_TO_PCT = {0: 0, 1: 25, 2: 100}
+
+
+def pct_to_legacy_brightness(pct: int) -> int:
+    """Map continuous 0..100% brightness to legacy 0/1/2 levels."""
+    p = max(0, min(100, int(pct)))
+    if p <= 0:
+        return 0
+    if p <= 60:
+        return 1
+    return 2
+
+
+MIN_BRIGHTNESS_PCT = 5
+
+
+def _sanitize_brightness_pct(val):
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        pct = max(0, min(100, int(val)))
+        if 0 < pct < MIN_BRIGHTNESS_PCT:
+            pct = MIN_BRIGHTNESS_PCT
+        return pct
+    except (TypeError, ValueError):
+        return None
+
+
+def _sanitize_rgb_hex(val):
+    if val is None:
+        return None
+    from .lamparray import parse_hex_rgb
+    parsed = parse_hex_rgb(val)
+    if parsed is None:
+        return None
+    return f"#{parsed[0]:02x}{parsed[1]:02x}{parsed[2]:02x}"
+
+
+def _sanitize_profile_rgb_map(value) -> dict:
+    clean = dict(DEFAULT_CONFIG["profile_rgb_map"])
+    if not isinstance(value, dict):
+        return clean
+    for k, v in value.items():
+        key = str(k)
+        sanitized = _sanitize_rgb_hex(v)
+        if sanitized is not None:
+            clean[key] = sanitized
+    return clean
+
+
+def profile_rgb_for(cfg: dict, profile_id: int) -> str:
+    """Return sanitized #rrggbb for profile_id from cfg['profile_rgb_map']."""
+    key = str(profile_id)
+    raw_map = cfg.get("profile_rgb_map") if isinstance(cfg, dict) else None
+    if isinstance(raw_map, dict) and key in raw_map:
+        sanitized = _sanitize_rgb_hex(raw_map[key])
+        if sanitized is not None:
+            return sanitized
+    fallback = DEFAULT_CONFIG["profile_rgb_map"].get(key)
+    if fallback is not None:
+        return fallback
+    return "#ffffff"
+
+
+def _coerce_ac_profile_mode(value) -> str:
+    if value in ("off", "switch", "follow_system"):
+        return value
+    return DEFAULT_CONFIG["ac_profile_mode"]
+
+
+def _coerce_profile_num(value, default: int) -> int:
+    try:
+        v = int(value)
+        return v if 0 <= v <= 3 else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _sanitize_custom_hotkeys(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    clean = {}
+    for action, spec in value.items():
+        if isinstance(action, str) and action and isinstance(spec, dict):
+            clean[action] = dict(spec)
+    return clean
+
+
+def effective_brightness_pct(cfg: dict) -> int:
+    """Return clamped 0..100 brightness_pct from cfg, or map legacy brightness."""
+    pct = _sanitize_brightness_pct(cfg.get("brightness_pct"))
+    if pct is not None:
+        return pct
+    try:
+        legacy = int(cfg.get("brightness", 2))
+    except (TypeError, ValueError):
+        legacy = 2
+    return LEGACY_BRIGHTNESS_TO_PCT.get(legacy, 100)
+
+
+def is_rgb_enabled(cfg: dict) -> bool:
+    """Return False when RGB lighting is explicitly disabled or brightness is 0."""
+    if cfg.get("rgb_enabled") is False:
+        return False
+    if cfg.get("brightness_pct") == 0:
+        return False
+    if cfg.get("brightness_pct") is None:
+        try:
+            if int(cfg.get("brightness", 2)) == 0:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def effective_rgb_hex(cfg: dict) -> str:
+    """Return normalized '#rrggbb' from cfg['rgb_hex'], or fallback to PALETTE_HEX."""
+    norm = _sanitize_rgb_hex(cfg.get("rgb_hex"))
+    if norm is not None:
+        return norm
+    from .lamparray import PALETTE_HEX
+    return PALETTE_HEX.get(cfg.get("colour", "white"), "#ffffff")
 
 
 def _migrate_brightness(val):
@@ -131,8 +261,8 @@ def _migrate_colour(col):
     col = col.lower().replace(" ", "_")
     if col in _LEGACY_COLOUR_MAP:
         return _LEGACY_COLOUR_MAP[col]
-    from .protocol import COLOUR_MAP
-    if col in COLOUR_MAP:
+    from .lamparray import PALETTE
+    if col in PALETTE:
         return col
     old_to_new = {
         "rainbow": DEFAULT_CONFIG["colour"],
@@ -196,29 +326,35 @@ def load():
     if data is None:
         data = _read_json(CONFIG_DIR / "config.json.bak")
 
-    has_stored_profile_id = False
     if data:
         if not isinstance(data, dict):
             logger.warning("config.json is not a JSON object; using defaults")
             return config
-        _migrate_profile_id(data)
-        has_stored_profile_id = "profile_id" in data
-        if "profile_id" in data:
-            data["profile_id"] = _coerce_profile_id(data["profile_id"])
+        data.pop("profile_id", None)
+        data.pop("rgb_legacy_mode", None)
+        data.pop("experimental_profiles_enabled", None)
         if "brightness" in data:
             data["brightness"] = _migrate_brightness(data["brightness"])
         if "last_brightness" in data:
             data["last_brightness"] = _migrate_brightness(data["last_brightness"])
         if "colour" in data:
             data["colour"] = _migrate_colour(data["colour"])
+        if "rgb_hex" in data:
+            data["rgb_hex"] = _sanitize_rgb_hex(data["rgb_hex"])
+        if "brightness_pct" in data:
+            data["brightness_pct"] = _sanitize_brightness_pct(data["brightness_pct"])
+        if "rgb_enabled" in data:
+            data["rgb_enabled"] = bool(data["rgb_enabled"])
+        if "dgpu_gate_disclaimer_accepted" in data:
+            data["dgpu_gate_disclaimer_accepted"] = bool(data["dgpu_gate_disclaimer_accepted"])
         if "idle_timeout_sec" in data:
             data["idle_timeout_sec"] = _migrate_idle_timeout(data["idle_timeout_sec"])
         if "idle_off_enabled" in data:
             data["idle_off_enabled"] = bool(data["idle_off_enabled"])
+        if "idle_keep_on_ac" in data:
+            data["idle_keep_on_ac"] = bool(data["idle_keep_on_ac"])
         if "sync_system_power" in data:
             data["sync_system_power"] = bool(data["sync_system_power"])
-        if "experimental_profiles_enabled" in data:
-            data["experimental_profiles_enabled"] = bool(data["experimental_profiles_enabled"])
         if "startup_apply" in data:
             data["startup_apply"] = bool(data["startup_apply"])
         if "charge_topup_active" in data:
@@ -243,6 +379,26 @@ def load():
                 data["last_full_charge_ts"] = v if v >= 0 else 0
             except (ValueError, TypeError):
                 data["last_full_charge_ts"] = 0
+        if "charge_calibration_baseline_ts" in data:
+            try:
+                v = int(data["charge_calibration_baseline_ts"])
+                data["charge_calibration_baseline_ts"] = v if v >= 0 else 0
+            except (ValueError, TypeError):
+                data["charge_calibration_baseline_ts"] = 0
+        if "profile_rgb_enabled" in data:
+            data["profile_rgb_enabled"] = bool(data["profile_rgb_enabled"])
+        if "profile_rgb_map" in data:
+            data["profile_rgb_map"] = _sanitize_profile_rgb_map(data["profile_rgb_map"])
+        if "ac_profile_mode" in data:
+            data["ac_profile_mode"] = _coerce_ac_profile_mode(data["ac_profile_mode"])
+        if "ac_profile_id" in data:
+            data["ac_profile_id"] = _coerce_profile_num(
+                data["ac_profile_id"], DEFAULT_CONFIG["ac_profile_id"])
+        if "battery_profile_id" in data:
+            data["battery_profile_id"] = _coerce_profile_num(
+                data["battery_profile_id"], DEFAULT_CONFIG["battery_profile_id"])
+        if "custom_hotkeys" in data:
+            data["custom_hotkeys"] = _sanitize_custom_hotkeys(data["custom_hotkeys"])
         if "charge_limit" in data:
             try:
                 cl = int(data["charge_limit"])
@@ -287,10 +443,6 @@ def load():
         config.update(data)
 
     # Prefer the actually-connected keyboard profile unless one was stored.
-    if not has_stored_profile_id:
-        detected = detect_device()
-        if detected is not None:
-            config["profile_id"] = list(detected)
     return config
 
 
@@ -456,11 +608,14 @@ def _write_config(config):
     safe = {
         "colour": _migrate_colour(config.get("colour", DEFAULT_CONFIG["colour"])),
         "brightness": _migrate_brightness(config.get("brightness", DEFAULT_CONFIG["brightness"])),
+        "rgb_hex": _sanitize_rgb_hex(config.get("rgb_hex")),
+        "brightness_pct": _sanitize_brightness_pct(config.get("brightness_pct")),
+        "rgb_enabled": bool(config.get("rgb_enabled", DEFAULT_CONFIG["rgb_enabled"])),
         "startup_apply": bool(config.get("startup_apply", DEFAULT_CONFIG["startup_apply"])),
-        "profile_id": _coerce_profile_id(config.get("profile_id", DEFAULT_CONFIG["profile_id"])),
         "idle_off_enabled": bool(config.get("idle_off_enabled", DEFAULT_CONFIG["idle_off_enabled"])),
         "idle_timeout_sec": _migrate_idle_timeout(
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
+        "idle_keep_on_ac": bool(config.get("idle_keep_on_ac", DEFAULT_CONFIG["idle_keep_on_ac"])),
         "charge_limit": _coerce_charge_limit(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
         "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
         "dgpu_undervolt_enabled": bool(config.get("dgpu_undervolt_enabled", DEFAULT_CONFIG["dgpu_undervolt_enabled"])),
@@ -475,18 +630,26 @@ def _write_config(config):
             config.get("dgpu_mem_offset_mhz", DEFAULT_CONFIG["dgpu_mem_offset_mhz"])),
         "dgpu_power_mode": _coerce_dgpu_power_mode(
             config.get("dgpu_power_mode", DEFAULT_CONFIG["dgpu_power_mode"])),
+        "dgpu_gate_disclaimer_accepted": bool(config.get(
+            "dgpu_gate_disclaimer_accepted", DEFAULT_CONFIG["dgpu_gate_disclaimer_accepted"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
-        "experimental_profiles_enabled": bool(config.get(
-            "experimental_profiles_enabled", DEFAULT_CONFIG["experimental_profiles_enabled"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
         "hotkey_overrides": _sanitize_hotkey_overrides(config.get("hotkey_overrides")),
+        "custom_hotkeys": _sanitize_custom_hotkeys(config.get("custom_hotkeys")),
         "charge_topup_active": bool(config.get("charge_topup_active", DEFAULT_CONFIG["charge_topup_active"])),
         "charge_topup_started_ts": max(0, int(config.get("charge_topup_started_ts", 0) or 0)),
         "charge_calibration_auto": bool(config.get("charge_calibration_auto", DEFAULT_CONFIG["charge_calibration_auto"])),
         "charge_calibration_interval_days": _coerce_calibration_interval(
             config.get("charge_calibration_interval_days", DEFAULT_CONFIG["charge_calibration_interval_days"])),
+        "charge_calibration_baseline_ts": max(0, int(config.get("charge_calibration_baseline_ts", 0) or 0)),
         "last_full_charge_ts": max(0, int(config.get("last_full_charge_ts", 0) or 0)),
+        "profile_rgb_enabled": bool(config.get("profile_rgb_enabled", DEFAULT_CONFIG["profile_rgb_enabled"])),
+        "profile_rgb_map": _sanitize_profile_rgb_map(config.get("profile_rgb_map")),
+        "ac_profile_mode": _coerce_ac_profile_mode(config.get("ac_profile_mode")),
+        "ac_profile_id": _coerce_profile_num(config.get("ac_profile_id"), DEFAULT_CONFIG["ac_profile_id"]),
+        "battery_profile_id": _coerce_profile_num(
+            config.get("battery_profile_id"), DEFAULT_CONFIG["battery_profile_id"]),
     }
     acpi_profile = config.get("acpi_profile")
     if acpi_profile is not None:
@@ -536,27 +699,12 @@ def _write_config(config):
     return True
 
 
-def resolve_active_profile():
-    cfg = load()
-    pid = cfg.get("profile_id")
-    if pid and len(pid) == 2:
-        return resolve_profile(int(pid[0]), int(pid[1]))
-    return None
-
-
 def apply_from_config(dev):
     cfg = load()
     if not cfg.get("startup_apply", DEFAULT_CONFIG["startup_apply"]):
         return False
-    from .protocol import set_static, set_off
-    profile = resolve_active_profile()
-    if profile is None:
-        logger.info("No active keyboard profile resolved; skipping lighting apply")
-        return False
-    brightness = cfg.get("brightness", 2)
-    if brightness == 0:
-        return set_off(dev, profile)
-    colour = cfg.get("colour", DEFAULT_CONFIG["colour"])
-    if profile.colour_map and colour not in profile.colour_map:
-        colour = next(iter(profile.colour_map))
-    return set_static(dev, colour, brightness, profile)
+    from .protocol import set_off, set_rgb
+    if not is_rgb_enabled(cfg):
+        return set_off(dev)
+    pct = max(1, effective_brightness_pct(cfg))
+    return set_rgb(dev, effective_rgb_hex(cfg), pct)

@@ -282,6 +282,20 @@ def run_doctor() -> int:
             label = f"iface {iface}" if iface is not None else "iface ?"
             print(f"    {node}  {label}  {permissions}  {access}")
         print(f"  udev rule    {rule_state()} ({RULE_PATH})")
+        from .lamparray import diagnose_lamparray
+
+        diag = diagnose_lamparray(int(vid), int(pid))
+        status = diag["status"]
+        if status == "supported":
+            rgb_mode = "24-bit HID LampArray"
+        elif status in ("unsupported_firmware", "unsupported_layout"):
+            rgb_mode = "unavailable (unsupported)"
+        else:
+            rgb_mode = "unavailable"
+        print(f"  rgb mode     {rgb_mode}")
+        print(f"  lamparray    {status} — {diag['reason']}")
+        if status in ("unsupported_firmware", "unsupported_layout"):
+            print("  note         GigaMate 5.0+ requires HID LampArray (Usage Page 0x59); for pre-2025 keyboards install GigaMate v4.5.x from GitHub Releases.")
         print()
 
     details, logind = session_details()
@@ -301,6 +315,20 @@ def run_doctor() -> int:
     print(f"  kernel       {status.running_kernel}")
     print(f"  module       {status.summary}")
     print(f"  {status.hint}")
+    try:
+        from .power_limits import discover_acpi_profiles
+
+        discovered = discover_acpi_profiles()
+    except Exception:
+        discovered = {}
+    if discovered:
+        profiles_str = ", ".join(
+            f"{pid}: {info.get('name', f'Profile {pid}')}"
+            for pid, info in sorted(discovered.items())
+        )
+        print(f"  profiles     {profiles_str}")
+    else:
+        print("  profiles     none (WMBD 0xED not found in wmbd_aml)")
     print()
 
     try:
@@ -316,9 +344,9 @@ def run_doctor() -> int:
             print(f"  ac udev rule {'present' if Path('/etc/udev/rules.d/99-gigamate-dgpu-ac.rules').exists() else 'missing'}")
             gcfg = gst.get("gate_config")
             if gcfg:
-                print(f"  gate target  {gcfg['path']}.{gcfg['method']} ({gcfg.get('confidence', 'experimental')})")
+                print(f"  gate target  {gcfg['path']}.{gcfg['method']} ({gcfg.get('source', 'acpi')})")
             else:
-                print("  gate target  none (run 'gigamate calibrate acpi')")
+                print("  gate target  none detected in ACPI")
             print()
     except Exception:
         pass

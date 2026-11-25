@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -42,7 +43,7 @@ from PyQt6.QtWidgets import (
 
 from ... import dgpu_gate, dgpu_tune
 from ...battery import get_battery_manager
-from ...config import load as load_config
+from ...config import load as load_config, update_config
 from ...gpu import get_gpu_state, gpu_status_text
 from .. import icons
 from ..theme import THEME
@@ -88,7 +89,6 @@ class GpuPage(QWidget):
         self._holders_timer.setInterval(100)
         self._holders_timer.timeout.connect(self._collect_holders)
         self._gate_supported: Optional[bool] = None
-        self._gate_experimental: bool = False
         self._gate_buttons: dict[str, QPushButton] = {}
         self._gate_results: queue.Queue = queue.Queue()
         self._gate_busy = False
@@ -851,6 +851,23 @@ class GpuPage(QWidget):
             return
 
         current_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+        if mode in ("eco", "auto") and not load_config().get("dgpu_gate_disclaimer_accepted", False):
+            reply = QMessageBox.warning(
+                self,
+                "dGPU Power Gate",
+                "dGPU Power Gate cuts the discrete GPU PCIe power rail using auto-discovered ACPI methods. "
+                "HDMI/DisplayPort outputs wired to the dGPU stop working while gated, and firmware behavior "
+                "varies by model — use at your own risk. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                for key, btn in self._gate_buttons.items():
+                    btn.blockSignals(True)
+                    btn.setChecked(key == current_mode)
+                    btn.blockSignals(False)
+                return
+            update_config(lambda c: {**c, "dgpu_gate_disclaimer_accepted": True})
         gated_now = dgpu_gate.is_gated_off()
         try:
             policy = dgpu_gate.read_policy_state() or {}
@@ -996,20 +1013,15 @@ class GpuPage(QWidget):
         if recheck_supported or self._gate_supported is None:
             try:
                 self._gate_supported = bool(dgpu_gate.is_supported())
-                if self._gate_supported:
-                    cfg_res = dgpu_gate.get_gate_config()
-                    self._gate_experimental = bool(cfg_res and cfg_res[1].experimental)
-                else:
-                    self._gate_experimental = False
             except Exception:
                 self._gate_supported = False
-                self._gate_experimental = False
 
         self.power_gate_card.setVisible(bool(self._gate_supported))
         if not self._gate_supported:
             return
 
-        self.gate_exp_badge.setVisible(self._gate_experimental)
+        self.gate_exp_badge.setText("Auto-discovered from ACPI")
+        self.gate_exp_badge.setVisible(True)
         try:
             cfg = load_config()
             mode = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()

@@ -528,3 +528,26 @@ class TestDgpuGateFastPaths:
             assert st["gated"] is False
             assert st["bdf"] == "0000:01:00.0"
             assert find_mock.call_count == 1
+
+    def test_dgpu_gate_get_status_with_autodiscovered_gate_config(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        cfg = dgpu_gate.DgpuGateConfig(
+            path="\\_SB.PCI0.GPP9.PG00",
+            method="_OFF",
+            quirks=["remove_before_off"],
+            source="sysfs:power_resource",
+        )
+        topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", vendor="nvidia")
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state", return_value={}), \
+             patch.object(dgpu_gate, "resolve_gate_config", return_value=(cfg, None)), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo):
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gate_config"]["path"] == "\\_SB.PCI0.GPP9.PG00"
+            assert st["gate_config"]["method"] == "_OFF"
+            assert st["profile_source"] == "sysfs:power_resource"
+            assert st["experimental"] is False

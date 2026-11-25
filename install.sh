@@ -222,8 +222,8 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel"
-            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyusb python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel
+            info "Installing: python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel"
+            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel
             sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyqt6 2>/dev/null || \
                 warn "python-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
@@ -248,8 +248,8 @@ install_system_deps() {
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip"
-            sudo dnf install -y python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip
+            info "Installing: python3-gobject gtk3 dkms python3-evdev python3-pip"
+            sudo dnf install -y python3-gobject gtk3 dkms python3-evdev python3-pip
             sudo dnf install -y libayatana-appindicator-gtk3 2>/dev/null || \
                 sudo dnf install -y libappindicator-gtk3 2>/dev/null || true
             sudo dnf install -y python3-pyqt6 2>/dev/null || \
@@ -258,8 +258,8 @@ install_system_deps() {
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         suse|opensuse*|sles)
-            info "Installing: python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip"
-            sudo zypper install -y python3-pyusb python3-gobject gtk3 dkms python3-evdev python3-pip
+            info "Installing: python3-gobject gtk3 dkms python3-evdev python3-pip"
+            sudo zypper install -y python3-gobject gtk3 dkms python3-evdev python3-pip
             sudo zypper install -y typelib-1_0-AyatanaAppIndicator3-0_1 2>/dev/null || \
                 sudo zypper install -y libappindicator3 2>/dev/null || true
             sudo zypper install -y python3-PyQt6 2>/dev/null || \
@@ -270,7 +270,6 @@ install_system_deps() {
         *)
             warn "Unsupported distro: $distro"
             warn "You must manually install:"
-            warn "  - pyusb (Python USB library)"
             warn "  - evdev (Python input monitoring, for keyboard idle auto-off)"
             warn "  - PyGObject + Gtk 3.0 + AppIndicator3"
             warn "  - Linux kernel headers (for ACPI kernel module)"
@@ -1173,7 +1172,7 @@ main() {
     echo "    gigabyte-rgb-tray                Same as gigamate-tray"
     echo
     echo "  To contribute your profile:"
-    echo "    gigamate calibrate all           Generate your model's profile"
+    echo "    gigamate doctor                  Check hardware & driver status"
     echo "    gigamate profile contribute      Guide to create a Pull Request"
     echo
     echo "  Tray app auto-starts on login via systemd."

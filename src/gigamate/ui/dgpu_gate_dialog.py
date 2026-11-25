@@ -40,6 +40,9 @@ from .theme import THEME
 from .widgets import M3Card
 
 
+HOLDERS_REFRESH_INTERVAL_MS = 2000
+
+
 class DgpuGateConfirmDialog(QDialog):
     """Modal confirmation window enumerating dGPU holders before gating off."""
 
@@ -70,6 +73,16 @@ class DgpuGateConfirmDialog(QDialog):
         self._ac_timer.setInterval(1000)
         self._ac_timer.timeout.connect(self._check_ac_returned)
 
+        self._holders_timer = QTimer(self)
+        self._holders_timer.setInterval(HOLDERS_REFRESH_INTERVAL_MS)
+        self._holders_timer.timeout.connect(self._start_holders_refresh)
+
+        self._refresh_queue: queue.Queue = queue.Queue()
+        self._refresh_in_flight = False
+        self._refresh_poll_timer = QTimer(self)
+        self._refresh_poll_timer.setInterval(150)
+        self._refresh_poll_timer.timeout.connect(self._collect_holders_refresh)
+
         self.setWindowTitle("GigaMate — dGPU Power Gate")
         self.setWindowFlags(
             self.windowFlags()
@@ -85,6 +98,13 @@ class DgpuGateConfirmDialog(QDialog):
 
         if start_timers and self.trigger == "auto_ac_unplug":
             self._ac_timer.start()
+        if start_timers and (
+            self.displays or self.closable or self.trigger == "auto_ac_unplug"
+        ):
+            self._holders_timer.start()
+
+    def _is_auto_session(self) -> bool:
+        return self.trigger == "auto_ac_unplug" or self.target_mode == dgpu_gate.MODE_AUTO
 
     def _scan_state(self) -> None:
         self.topo = dgpu_gate.find_dgpu_topology()
@@ -104,13 +124,13 @@ class DgpuGateConfirmDialog(QDialog):
                 "Battery Power Detected — Power Off dGPU?",
                 "AC power was disconnected while GigaMate is in Auto mode. "
                 "Power off the discrete GPU rail now to maximize battery life, or "
-                "revert to Optimus to keep running GPU apps untouched.",
+                "keep the dGPU on for now (stays in Auto mode).",
             )
         if self.trigger == "auto":
             return (
                 "Switch to Auto Mode — Power Off dGPU?",
                 "Laptop is currently on battery. Confirm powering off the "
-                "discrete GPU rail now, or revert to Optimus to keep apps open.",
+                "discrete GPU rail now, or keep the dGPU on for now (stays in Auto mode).",
             )
         return (
             "Switch to ECO Mode — Power Off dGPU?",
@@ -187,9 +207,75 @@ class DgpuGateConfirmDialog(QDialog):
 
         # Holders / blocker section
         self.holders_card = QFrame()
-        holders_lay = QVBoxLayout(self.holders_card)
-        holders_lay.setContentsMargins(16, 14, 16, 14)
-        holders_lay.setSpacing(8)
+        self._holders_lay = QVBoxLayout(self.holders_card)
+        self._holders_lay.setContentsMargins(16, 14, 16, 14)
+        self._holders_lay.setSpacing(8)
+        self._populate_holders_card()
+        root.addWidget(self.holders_card)
+
+        if self.audio_holders or (self.topo.audio_bdf and not self.displays):
+            audio_row = QHBoxLayout()
+            audio_row.setSpacing(6)
+            audio_ico = QLabel()
+            audio_ico.setFixedSize(14, 14)
+            audio_ico.setPixmap(icons.render_icon_pixmap("volume", color=THEME.on_surface_muted, size=14))
+            audio_ico.setStyleSheet("background: transparent;")
+            audio_row.addWidget(audio_ico, alignment=Qt.AlignmentFlag.AlignTop)
+            audio_note = QLabel(
+                "Audio note: Sound may pause briefly (~0.5 s) while detaching the GPU's HDMI audio device."
+            )
+            audio_note.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+            )
+            audio_note.setWordWrap(True)
+            audio_row.addWidget(audio_note, 1)
+            root.addLayout(audio_row)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+        )
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setVisible(False)
+        root.addWidget(self.status_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self.revert_btn = QPushButton("Keep dGPU On for Now")
+        self.revert_btn.setProperty("class", "OutlinedButton")
+        self.revert_btn.setIcon(
+            icons.make_icon("undo", color=THEME.on_surface, size=15)
+        )
+        self.revert_btn.setIconSize(QSize(15, 15))
+        self.revert_btn.setMinimumHeight(40)
+        self.revert_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.revert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.revert_btn.clicked.connect(self._on_revert_clicked)
+        btn_row.addWidget(self.revert_btn)
+
+        btn_row.addStretch()
+
+        self.confirm_btn = QPushButton()
+        self.confirm_btn.setIconSize(QSize(15, 15))
+        self.confirm_btn.setMinimumHeight(40)
+        self.confirm_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self._sync_confirm_btn_state()
+        self.confirm_btn.clicked.connect(self._on_confirm_clicked)
+        btn_row.addWidget(self.confirm_btn)
+
+        root.addLayout(btn_row)
+
+    def _clear_layout(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+
+    def _populate_holders_card(self) -> None:
+        self._clear_layout(self._holders_lay)
+        holders_lay = self._holders_lay
 
         if self.displays:
             self.holders_card.setStyleSheet(
@@ -282,6 +368,16 @@ class DgpuGateConfirmDialog(QDialog):
             list_lay.addStretch()
             scroll.setWidget(list_container)
             holders_lay.addWidget(scroll)
+
+            recheck_note = QLabel(
+                "Re-checking every 2 s — will power off automatically once apps release the dGPU."
+            )
+            recheck_note.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; "
+                f"background: transparent; border: none;"
+            )
+            recheck_note.setWordWrap(True)
+            holders_lay.addWidget(recheck_note)
         else:
             self.holders_card.setStyleSheet(
                 f"QFrame {{ background-color: {THEME.gated_container}; "
@@ -312,66 +408,16 @@ class DgpuGateConfirmDialog(QDialog):
             msg.setWordWrap(True)
             holders_lay.addWidget(msg)
 
-        root.addWidget(self.holders_card)
-
-        if self.audio_holders or (self.topo.audio_bdf and not self.displays):
-            audio_row = QHBoxLayout()
-            audio_row.setSpacing(6)
-            audio_ico = QLabel()
-            audio_ico.setFixedSize(14, 14)
-            audio_ico.setPixmap(icons.render_icon_pixmap("volume", color=THEME.on_surface_muted, size=14))
-            audio_ico.setStyleSheet("background: transparent;")
-            audio_row.addWidget(audio_ico, alignment=Qt.AlignmentFlag.AlignTop)
-            audio_note = QLabel(
-                "Audio note: Sound may pause briefly (~0.5 s) while detaching the GPU's HDMI audio device."
-            )
-            audio_note.setStyleSheet(
-                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
-            )
-            audio_note.setWordWrap(True)
-            audio_row.addWidget(audio_note, 1)
-            root.addLayout(audio_row)
-
-        self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet(
-            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
-        )
-        self.status_lbl.setWordWrap(True)
-        self.status_lbl.setVisible(False)
-        root.addWidget(self.status_lbl)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-        self.revert_btn = QPushButton("Revert to Optimus (Keep Open)")
-        self.revert_btn.setProperty("class", "OutlinedButton")
-        self.revert_btn.setIcon(
-            icons.make_icon("undo", color=THEME.on_surface, size=15)
-        )
-        self.revert_btn.setIconSize(QSize(15, 15))
-        self.revert_btn.setMinimumHeight(40)
-        self.revert_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        self.revert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.revert_btn.clicked.connect(self._on_revert_clicked)
-        btn_row.addWidget(self.revert_btn)
-
-        btn_row.addStretch()
-
+    def _sync_confirm_btn_state(self) -> None:
         if self.closable:
-            self.confirm_btn = QPushButton("Close Apps && Power Off dGPU")
+            self.confirm_btn.setText("Close Apps && Power Off dGPU")
             self.confirm_btn.setProperty("class", "DangerButton")
-            self.confirm_btn.setIcon(
-                icons.make_icon("power_off", color=THEME.on_accent_cta, size=15)
-            )
-            self.confirm_btn.setIconSize(QSize(15, 15))
         else:
-            self.confirm_btn = QPushButton("Power Off dGPU")
+            self.confirm_btn.setText("Power Off dGPU")
             self.confirm_btn.setProperty("class", "SuccessButton")
-            self.confirm_btn.setIcon(
-                icons.make_icon("power_off", color=THEME.on_accent_cta, size=15)
-            )
-            self.confirm_btn.setIconSize(QSize(15, 15))
-        self.confirm_btn.setMinimumHeight(40)
-        self.confirm_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.confirm_btn.setIcon(
+            icons.make_icon("power_off", color=THEME.on_accent_cta, size=15)
+        )
         if self.displays:
             self.confirm_btn.setCursor(Qt.CursorShape.ForbiddenCursor)
             self.confirm_btn.setToolTip(
@@ -380,38 +426,69 @@ class DgpuGateConfirmDialog(QDialog):
             self.confirm_btn.setEnabled(False)
         else:
             self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.confirm_btn.setToolTip("")
             self.confirm_btn.setEnabled(True)
-        self.confirm_btn.clicked.connect(self._on_confirm_clicked)
-        btn_row.addWidget(self.confirm_btn)
 
-        root.addLayout(btn_row)
+    def _stop_all_timers(self) -> None:
+        self._ac_timer.stop()
+        self._holders_timer.stop()
+        self._refresh_poll_timer.stop()
+
+    def _decline_or_dismiss(self) -> None:
+        self._stop_all_timers()
+        if self._user_acted or self._auto_dismissed:
+            return
+        self._user_acted = True
+        if self._is_auto_session():
+            try:
+                dgpu_gate._publish_policy(
+                    mode=dgpu_gate.MODE_AUTO,
+                    pending_off=False,
+                    last_reason="deferred_by_user",
+                    last_error="Kept dGPU on for this battery session (Auto mode stays active).",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            fallback = (
+                self.prev_mode
+                if self.prev_mode in dgpu_gate.VALID_MODES
+                and self.prev_mode != dgpu_gate.MODE_ECO
+                else dgpu_gate.MODE_OPTIMUS
+            )
+            try:
+                dgpu_gate.set_mode(fallback, apply_now=not dgpu_gate.is_gated_off())
+            except Exception:  # noqa: BLE001
+                pass
 
     def _on_revert_clicked(self) -> None:
         if self._busy:
             return
-        self._user_acted = True
-        self._ac_timer.stop()
-        try:
-            dgpu_gate.set_mode(dgpu_gate.MODE_OPTIMUS, apply_now=not dgpu_gate.is_gated_off())
-        except Exception:  # noqa: BLE001
-            pass
+        self._decline_or_dismiss()
         self.reject()
 
-    def _on_confirm_clicked(self) -> None:
+    def _on_confirm_clicked(
+        self, _checked: bool = False, *, auto_triggered: bool = False
+    ) -> None:
         if self._busy or self.displays:
             return
         self._busy = True
-        self._ac_timer.stop()
+        self._stop_all_timers()
         self.revert_btn.setEnabled(False)
         self.confirm_btn.setEnabled(False)
         self.status_lbl.setStyleSheet(
             f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
         )
-        self.status_lbl.setText(
-            "Closing apps holding dGPU and cutting power rail…"
-            if self.closable
-            else "Cutting discrete GPU power rail…"
-        )
+        if auto_triggered:
+            self.status_lbl.setText(
+                "All apps released dGPU — cutting power rail automatically…"
+            )
+        else:
+            self.status_lbl.setText(
+                "Closing apps holding dGPU and cutting power rail…"
+                if self.closable
+                else "Cutting discrete GPU power rail…"
+            )
         self.status_lbl.setVisible(True)
 
         target_mode = self.target_mode
@@ -452,13 +529,68 @@ class DgpuGateConfirmDialog(QDialog):
             else Qt.CursorShape.PointingHandCursor
         )
 
+    def _start_holders_refresh(self) -> None:
+        if (
+            self._busy
+            or self._user_acted
+            or self._auto_dismissed
+            or self._refresh_in_flight
+        ):
+            return
+        self._refresh_in_flight = True
+
+        def _worker() -> None:
+            try:
+                topo = dgpu_gate.find_dgpu_topology()
+                displays = (
+                    dgpu_gate.connected_dgpu_displays(topo.bdf) if topo.bdf else []
+                )
+                closable = dgpu_gate.closable_gpu_holders()
+            except Exception:  # noqa: BLE001
+                displays = self.displays
+                closable = self.closable
+            self._refresh_queue.put((displays, closable))
+
+        threading.Thread(
+            target=_worker, name="gigamate-gate-holders-refresh", daemon=True
+        ).start()
+        self._refresh_poll_timer.start()
+
+    def _collect_holders_refresh(self) -> None:
+        latest = None
+        while True:
+            try:
+                latest = self._refresh_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest is None:
+            return
+        self._refresh_in_flight = False
+        self._refresh_poll_timer.stop()
+        if self._busy or self._user_acted or self._auto_dismissed:
+            return
+
+        new_displays, new_closable = latest
+        changed = new_displays != self.displays or new_closable != self.closable
+        self.displays = new_displays
+        self.closable = new_closable
+
+        if not self.displays and not self.closable:
+            self._holders_timer.stop()
+            self._on_confirm_clicked(auto_triggered=True)
+            return
+
+        if changed:
+            self._populate_holders_card()
+            self._sync_confirm_btn_state()
+
     def _check_ac_returned(self) -> None:
         if self._busy or self._user_acted:
             return
         try:
             if bool(get_battery_manager().is_ac_online()):
                 self._auto_dismissed = True
-                self._ac_timer.stop()
+                self._stop_all_timers()
                 dgpu_gate.sync_policy(reason="confirm_ac_returned")
                 self.reject()
         except Exception:  # noqa: BLE001
@@ -468,32 +600,18 @@ class DgpuGateConfirmDialog(QDialog):
         if self._busy:
             event.ignore()
             return
-        self._ac_timer.stop()
-        if not self._user_acted and not self._auto_dismissed:
-            self._user_acted = True
-            try:
-                dgpu_gate.set_mode(
-                    dgpu_gate.MODE_OPTIMUS,
-                    apply_now=not dgpu_gate.is_gated_off(),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        self._decline_or_dismiss()
         super().closeEvent(event)
 
     def reject(self) -> None:
         if self._busy:
             return
-        self._ac_timer.stop()
-        if not self._user_acted and not self._auto_dismissed:
-            self._user_acted = True
-            try:
-                dgpu_gate.set_mode(
-                    dgpu_gate.MODE_OPTIMUS,
-                    apply_now=not dgpu_gate.is_gated_off(),
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        self._decline_or_dismiss()
         super().reject()
+
+    def accept(self) -> None:
+        self._stop_all_timers()
+        super().accept()
 
 
 def _lock_path() -> Path:

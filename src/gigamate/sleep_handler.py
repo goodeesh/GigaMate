@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from .config import load as load_config, resolve_active_profile
+from .config import load as load_config
 from .hardware import apply_hardware_settings
 from .protocol import get_keyboard, set_off
 
@@ -228,8 +228,7 @@ class SleepHandler:
             try:
                 dev = get_keyboard()
                 if dev is not None:
-                    profile = resolve_active_profile()
-                    set_off(dev, profile)
+                    set_off(dev)
             except Exception as exc:
                 logger.warning(f"Could not turn off RGB on sleep: {exc}")
 
@@ -243,7 +242,7 @@ class SleepHandler:
         try:
             # apply_hardware_settings honours the opt-in flags
             # (startup_apply / charge_limit_enabled / sync_system_power).
-            apply_hardware_settings()
+            apply_hardware_settings(force_keyboard=True)
         except Exception as exc:
             logger.warning(f"Could not restore state via apply_hardware_settings: {exc}")
 

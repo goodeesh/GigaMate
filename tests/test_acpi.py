@@ -297,7 +297,7 @@ class TestAcpiCallBackendDetection:
         assert caps.backend == "module"
         assert caps.has_temperature is True
         assert caps.has_fan_rpm is True
-        assert caps.has_power_profiles is True
+        assert caps.profile_ids == [0, 1, 2, 3]
 
     def test_module_backend_detects_single_fan(self, monkeypatch, tmp_path):
         """Only attributes that actually read are counted (fan_count == 1)."""

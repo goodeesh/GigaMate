@@ -317,3 +317,37 @@ def test_dashboard_clean_absence_hides_missing_or_empty_power_limits(qapp):
         finally:
             page.close()
             page.deleteLater()
+
+
+def test_discover_acpi_profiles_2_3_4_modes_and_missing_marker():
+    """Verify discover_acpi_profiles() handles 2/3/4-mode AML tables and missing 0x0AED."""
+    from gigamate.power_limits import discover_acpi_profiles
+
+    def _make_aml(modes: list[int]) -> bytes:
+        # 0x0AED followed by LEqual(Local0, mode) opcodes matching _MODE_MARKER_RES
+        opcodes = {
+            0: b"\x93\x60\x00",
+            1: b"\x93\x60\x01",
+            2: b"\x93\x60\x0a\x02",
+            3: b"\x93\x60\x0a\x03",
+        }
+        entries = b"".join(opcodes[m] for m in modes)
+        return b"\x00\x00\x0a\xed\x00" + entries + b"\x00\x00"
+
+    p2 = discover_acpi_profiles(aml_bytes=_make_aml([0, 1]))
+    assert set(p2.keys()) == {0, 1}
+
+    p3 = discover_acpi_profiles(aml_bytes=_make_aml([0, 1, 2]))
+    assert set(p3.keys()) == {0, 1, 2}
+    assert p3[0]["name"] == "Eco"
+    assert p3[1]["name"] == "Balanced"
+    assert p3[2]["name"] == "Boost"
+
+    p4 = discover_acpi_profiles(aml_bytes=_make_aml([0, 1, 2, 3]))
+    assert set(p4.keys()) == {0, 1, 2, 3}
+    assert p4[0]["name"] == "Quiet"
+    assert p4[1]["name"] == "Balanced"
+    assert p4[2]["name"] == "Performance"
+    assert p4[3]["name"] == "Gaming"
+
+    assert discover_acpi_profiles(aml_bytes=b"\x00\x01\x02\x03") == {}

@@ -5,7 +5,6 @@ Usage:
     gigamate rgb off                           Turn backlight off
     gigamate rgb detect                        Scan for keyboards
     gigamate rgb cycle                         Cycle colours
-    gigamate rgb calibrate                     Interactive RGB calibration
     gigamate status                            Show hardware status
     gigamate gpu status                        Show discrete GPU power state
     gigamate gpu power <mode|off|on|probe>     dGPU power gate (Optimus / ECO / Auto)
@@ -14,13 +13,11 @@ Usage:
     gigamate profile contribute                Pull Request instructions
     gigamate detect [--acpi]                   Detect hardware
     gigamate doctor                            Diagnose hardware and permissions
-    gigamate calibrate [rgb|acpi|all]        Run calibration
     gigamate version                           Show version
     gigamate update [--check] [--yes]          Check for / install updates
 
 Legacy (still works):
     gigabyte-rgb static purple                 Same as `gigamate rgb static purple`
-    gigabyte-rgb --calibrate                   Same as `gigamate rgb calibrate`
 """
 
 import sys
@@ -31,33 +28,29 @@ from dataclasses import replace
 from typing import Optional, List
 
 from .protocol import (
-    COLOUR_MAP,
-    PROGRAMS,
-    SPEEDS,
-    BRIGHTNESS_LABELS,
+    detect_keyboards,
+    hardware_supports_lamparray,
     get_keyboard,
     print_detect,
+    set_rgb,
     set_static,
     set_off,
 )
-from .profiles import (
-    detect_device,
-    resolve_profile,
-    resolve_model,
-    profile_usable,
-    match_dmi_profile,
-    load_user_dmi_profiles,
-    ModelMatch,
-    calibrate as run_calibrate,
-    save_user_profile,
-    DeviceProfile,
-    DmiConfig,
-    get_dmi_product_name,
-    get_dmi_product_family,
-    get_dmi_vendor,
+from .lamparray import PALETTE_HEX, parse_hex_rgb
+from .power_limits import discover_acpi_profiles
+from .capabilities import (
+    _read_dmi,
     get_dmi_chassis_type,
+    get_dmi_product_name,
+    get_dmi_vendor,
 )
-from .config import load as load_config, save as save_config, update_config
+from .config import (
+    load as load_config,
+    save as save_config,
+    update_config,
+    effective_rgb_hex,
+    effective_brightness_pct,
+)
 from .acpi import (
     AcpiController,
     FanProfile,
@@ -112,36 +105,68 @@ def _print_deprecation() -> None:
 def cmd_rgb_static(args) -> None:
     """Set keyboard to a static colour."""
     colour = args.colour or "light_purple"
-    level = _parse_level(args.level)
-    speed = args.speed or "medium"
+    brightness_raw = getattr(args, "brightness", None)
+    level_raw = brightness_raw if brightness_raw is not None else args.level
 
-    profile = resolve_profile(args.vid, args.pid)
-    dev = get_keyboard(args.vid, args.pid, profile)
+    is_numeric_pct = False
+    pct = 100
+    level = 2
+    if isinstance(level_raw, str) and level_raw.strip().lstrip("-").isdigit():
+        pct = int(level_raw.strip())
+        if pct != 0 and not (5 <= pct <= 100):
+            print("Brightness percentage must be 0 (off) or 5..100", file=sys.stderr)
+            sys.exit(1)
+        is_numeric_pct = True
+        level = 0 if pct == 0 else (1 if pct <= 60 else 2)
+    else:
+        level = _parse_level(level_raw)
+        pct = 0 if level == 0 else (25 if level == 1 else 100)
+
+    parsed_hex = parse_hex_rgb(colour)
+    is_hex = parsed_hex is not None
+
+    dev = get_keyboard(args.vid, args.pid)
     if dev is None:
         vid = args.vid or 0
         pid = args.pid or 0
         print(f"Keyboard not found (VID={vid:04X} PID={pid:04X})")
-        print("Use 'gigamate rgb detect' to scan for compatible keyboards.")
-        sys.exit(1)
-
-    cmap = profile.colour_map if profile is not None else COLOUR_MAP
-    if colour not in cmap:
-        if profile is None:
-            print(f"Colour '{colour}' unknown — no profile loaded for this model.")
-            print("Run 'gigamate rgb calibrate' to set up your model.")
+        if detect_keyboards() and not hardware_supports_lamparray(args.vid, args.pid):
+            print("Note: Non-LampArray pre-2025 keyboards require GigaMate v4.5.x.")
         else:
-            print(f"Unknown colour: {colour}")
-            print(f"Available: {', '.join(sorted(cmap.keys()))}")
+            print("Use 'gigamate rgb detect' to scan for compatible keyboards.")
         sys.exit(1)
 
-    ok = set_static(dev, colour, level, profile, args.interface)
-    label = BRIGHTNESS_LABELS.get(level, f"level-{level}")
-    if ok:
+    if level == 0 or pct == 0:
+        set_off(dev)
         try:
-            update_config(lambda c: {**c, "colour": colour, "brightness": level})
+            update_config(lambda c: {**c, "rgb_enabled": False, "brightness_pct": 0, "brightness": 0})
         except Exception:
             pass
-        print(f"Set to {colour} ({label})")
+        print("Set to off")
+        return
+
+    if is_hex:
+        r, g, b = parsed_hex
+        rgb_hex = f"#{r:02x}{g:02x}{b:02x}"
+    else:
+        if colour not in PALETTE_HEX:
+            print(f"Unknown colour: {colour}")
+            print(f"Available: {', '.join(sorted(PALETTE_HEX.keys()))}")
+            sys.exit(1)
+        rgb_hex = PALETTE_HEX[colour]
+
+    ok = set_rgb(dev, rgb_hex, pct)
+    if ok:
+        try:
+            def _mut(c):
+                out = {**c, "rgb_enabled": True, "brightness_pct": pct, "rgb_hex": rgb_hex}
+                if not is_hex:
+                    out["colour"] = colour
+                return out
+            update_config(_mut)
+        except Exception:
+            pass
+        print(f"Set to {rgb_hex if is_hex else colour} ({pct}%)")
     else:
         print("Failed to send command", file=sys.stderr)
         sys.exit(1)
@@ -149,17 +174,19 @@ def cmd_rgb_static(args) -> None:
 
 def cmd_rgb_off(args) -> None:
     """Turn keyboard backlight off."""
-    profile = resolve_profile(args.vid, args.pid)
-    dev = get_keyboard(args.vid, args.pid, profile)
+    dev = get_keyboard(args.vid, args.pid)
     if dev is None:
         print("Keyboard not found")
+        if detect_keyboards() and not hardware_supports_lamparray(args.vid, args.pid):
+            print("Note: Non-LampArray pre-2025 keyboards require GigaMate v4.5.x.")
         sys.exit(1)
-    set_off(dev, profile)
+    set_off(dev)
     try:
         def _mut(c):
             if int(c.get("brightness", 2)) > 0:
                 c["last_brightness"] = c["brightness"]
             c["brightness"] = 0
+            c["rgb_enabled"] = False
             return c
         update_config(_mut)
     except Exception:
@@ -194,19 +221,18 @@ def cmd_rgb_idle(args) -> None:
 
 def cmd_rgb_cycle(args) -> None:
     """Cycle through all available colours."""
-    profile = resolve_profile(args.vid, args.pid)
-    dev = get_keyboard(args.vid, args.pid, profile)
+    dev = get_keyboard(args.vid, args.pid)
     if dev is None:
         print("Keyboard not found")
         sys.exit(1)
-    cmap = profile.colour_map if profile is not None else COLOUR_MAP
     level = _parse_level(args.level)
+    pct = 25 if level == 1 else 100
     print("Cycling through colours (Ctrl+C to stop)...")
     try:
         while True:
-            for colour_name in cmap:
+            for colour_name, rgb_hex in PALETTE_HEX.items():
                 print(f"  {colour_name}...", end=" ", flush=True)
-                set_static(dev, colour_name, level, profile)
+                set_rgb(dev, rgb_hex, pct)
                 time.sleep(2)
                 print()
     except KeyboardInterrupt:
@@ -222,83 +248,11 @@ def _explain_hidraw_access(path: str, label: str = "hidraw device") -> None:
         print(f"  {line}" if line else "", file=sys.stderr)
 
 
-def cmd_rgb_calibrate(args) -> None:
-    """Interactive keyboard RGB calibration."""
-    if args.vid and args.pid:
-        vid, pid = args.vid, args.pid
-    else:
-        detected = detect_device()
-        if detected is None:
-            print("No Gigabyte USB keyboard detected.")
-            print("Try: lsusb | grep -i gigabyte")
-            sys.exit(1)
-        vid, pid = detected
-    from .lamparray import find_device as find_lamparray, LampArrayDevice, make_profile
-    lamp = find_lamparray(vid, pid, getattr(args, "interface", None))
-    if lamp is not None:
-        try:
-            count = LampArrayDevice(lamp[0]).lamp_count()
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, PermissionError):
-                _explain_hidraw_access(lamp[0], "LampArray keyboard")
-            else:
-                print(f"Cannot access LampArray keyboard {lamp[0]}: {exc}",
-                      file=sys.stderr)
-            sys.exit(1)
-        # LampArray uses direct RGB; the older byte-by-byte calibration is unnecessary.
-        profile = make_profile(vid, pid, lamp[1])
-        existing = resolve_profile(vid, pid)
-        if existing is not None:
-            profile = replace(existing, rgb_protocol=profile.rgb_protocol,
-                              interfaces=profile.interfaces,
-                              control_interface=profile.control_interface,
-                              colour_map=profile.colour_map)
-        path = save_user_profile(profile)
-        print(f"HID LampArray: {lamp[0]}, interface {lamp[1]}, {count} lamp(s).")
-        print("Direct RGB supported; colour calibration is unnecessary.")
-        print(f"Profile saved: {path}")
-        print("Try: gigamate rgb static light_purple")
-        print("Reload profiles or restart GigaMate to enable the keyboard controls.")
-        return
-    existing = resolve_profile(vid, pid)
-    if existing is not None:
-        print(f"Model already supported: {existing.name}")
-        ans = input("Re-run calibration anyway? [y/N] ").strip().lower()
-        if ans != "y":
-            return
-    dev = get_keyboard(vid, pid, interfaces=[])
-    if dev is None:
-        print(f"Keyboard not found (VID={vid:04X} PID={pid:04X})")
-        sys.exit(1)
-    new_profile = run_calibrate(dev, vid, pid, interface=getattr(args, "interface", None))
-    if new_profile is None:
-        print("Calibration cancelled.")
-        return
-    path = save_user_profile(new_profile)
-    print(f"\nProfile saved: {path}")
-    print()
-    print("To use right now:")
-    print(f"  gigamate rgb static <colour>")
-    print()
-    print("To enable in the tray app:")
-    print("  Open the tray menu and click 'Reload profiles'")
-    print()
-    print("To contribute to the community:")
-    print("  gigamate profile contribute")
-    print(f"  (attach: {path})")
-
-
-# ────────────────────────────────────────────
-# Status command
-# ────────────────────────────────────────────
-
-
 def cmd_status(args) -> None:
     """Show full hardware status (keyboard + ACPI)."""
     # Keyboard info
-    profile = resolve_profile(args.vid, args.pid)
-    detected = detect_device()
-    vid, pid = (detected or (0, 0)) if detected else (0, 0)
+    detected = detect_keyboards()
+    vid, pid = detected[0] if detected else (0, 0)
 
     print("╔══════════════════════════════════╗")
     print("║        GigaMate — Status        ║")
@@ -307,9 +261,7 @@ def cmd_status(args) -> None:
 
     # Model name
     dmi_model = get_dmi_product_name()
-    if profile is not None:
-        print(f"  Model: {profile.name}  ({vid:04X}:{pid:04X})")
-    elif detected:
+    if detected:
         name = dmi_model or "Unknown"
         print(f"  Model: {name}  ({vid:04X}:{pid:04X})")
     elif dmi_model:
@@ -318,14 +270,16 @@ def cmd_status(args) -> None:
         print(f"  Model: Not detected")
 
     # Keyboard info
-    if profile is not None and profile.has_rgb:
+    if detected and hardware_supports_lamparray(vid, pid):
         cfg = load_config()
-        colour = cfg.get("colour", "?")
-        brightness = cfg.get("brightness", "?")
-        bname = {0: "Off", 1: "Dim", 2: "Full"}.get(brightness, str(brightness))
-        print(f"  Keyboard: {colour} ({bname})")
+        if cfg.get("rgb_enabled", True):
+            rgb_hex = effective_rgb_hex(cfg)
+            pct = effective_brightness_pct(cfg)
+            print(f"  Keyboard: {rgb_hex} ({pct}%)")
+        else:
+            print("  Keyboard: Off")
     elif detected:
-        print(f"  Keyboard: Detected (run 'gigamate rgb calibrate')")
+        print("  Keyboard: Detected (non-LampArray; use GigaMate v4.5.x for legacy 0x08)")
     else:
         print(f"  Keyboard: Not detected (no USB RGB)")
 
@@ -365,7 +319,7 @@ def cmd_status(args) -> None:
 
             # Profile
             if state.profile is not None:
-                pname = _profile_name(state.profile, profile)
+                pname = _profile_name(state.profile, discover_acpi_profiles())
                 print(f"  ── Power Profile ──")
                 print(f"     {pname}  ({state.profile.value})")
                 try:
@@ -720,13 +674,13 @@ def cmd_gpu_power(args) -> None:
         print(f"  Eval backend: {st['eval_backend']}")
         gcfg = st.get("gate_config")
         if gcfg:
-            conf = gcfg.get("confidence", "experimental")
+            source = gcfg.get("source", "acpi")
             quirks = ", ".join(gcfg.get("quirks") or []) or "none"
-            print(f"  Gate method:  {gcfg['path']}.{gcfg['method']} ({conf}; quirks: {quirks})")
+            print(f"  Gate method:  {gcfg['path']}.{gcfg['method']} ({source}; quirks: {quirks})")
             if st.get("acpi_sta") is not None:
                 print(f"  ACPI status:  {st['acpi_sta']}")
         else:
-            print("  Gate method:  none configured (run 'gigamate gpu power probe' or 'gigamate calibrate acpi')")
+            print("  Gate method:  none configured (run 'gigamate gpu power probe')")
         if st.get("displays"):
             print(f"  Attached:     {', '.join(st['displays'])} (blocks power-off)")
         if st.get("pending_off"):
@@ -874,82 +828,50 @@ def cmd_gpu_power(args) -> None:
 # ────────────────────────────────────────────
 
 
-def _profile_name(profile: FanProfile, device_profile: Optional[DeviceProfile] = None) -> str:
+def _profile_name(profile: FanProfile, profiles_map: Optional[dict] = None) -> str:
     """Get the human-readable name for a FanProfile value."""
-    if device_profile is not None and device_profile.acpi:
-        names = device_profile.acpi.profiles
-        entry = names.get(str(profile.value), {})
+    if profiles_map:
+        entry = profiles_map.get(profile.value) or profiles_map.get(str(profile.value), {})
         if "name" in entry:
             return entry["name"]
     return profile.name.capitalize()
 
 
-_PROFILE_UNVERIFIED_HINT = (
-    "Power profiles are not enabled for this model. GigaMate only exposes profile\n"
-    "switching when a matching model profile declares a profile set (built-in or\n"
-    "created via 'gigamate calibrate acpi')."
-)
-
-_EXPERIMENTAL_NOTICE = (
-    "Note: profile switching is EXPERIMENTAL on this model "
-    "(community-evidenced, unconfirmed) — it may do nothing."
-)
-
-
-def _model_match(args) -> Optional[ModelMatch]:
-    """Resolve the model profile that gates profile switching."""
-    try:
-        return resolve_model(getattr(args, "vid", None), getattr(args, "pid", None))
-    except Exception:
-        return None
-
-
 def _open_profiles(args):
     """Shared gate for profile commands.
 
-    Returns ``(ctrl, match, cfg)`` when profile switching may proceed; otherwise
-    prints why and exits. Experimental models require the one-time opt-in.
+    Returns ``(ctrl, profiles_map, cfg)`` when profile switching may proceed.
     """
     ctrl = AcpiController()
     if not ctrl.available:
         print("ACPI not available. No power profile control.")
         sys.exit(1)
-    match = _model_match(args)
-    if match is None:
-        print("Power profiles: not enabled for this model.")
-        print()
-        print(_PROFILE_UNVERIFIED_HINT)
+    profiles_map = discover_acpi_profiles()
+    if not profiles_map and getattr(ctrl, "capabilities", None) is not None:
+        profiles_map = getattr(ctrl.capabilities, "discovered_profiles", {}) or {}
+    if not profiles_map:
+        print("No power profiles exposed by BIOS.")
         sys.exit(1)
     cfg = load_config()
-    if not profile_usable(match, cfg):
-        print("Power profiles: EXPERIMENTAL and not enabled for this model.")
-        print()
-        print("These profiles are community-evidenced but unconfirmed on this unit.")
-        print("Enable them with:")
-        print("  gigamate profile experimental on")
-        sys.exit(1)
-    if match.experimental:
-        print(_EXPERIMENTAL_NOTICE)
-        print()
-    return ctrl, match, cfg
+    return ctrl, profiles_map, cfg
 
 
-def _profile_set_for(profile: Optional[DeviceProfile]):
-    """Return ``(pids, profiles_map)`` for a profile that declares profiles."""
-    if profile is not None and profile.has_acpi and profile.acpi:
-        pids = sorted(int(k) for k in profile.acpi.profiles.keys())
-        return pids, profile.acpi.profiles
+def _profile_set_for(profiles_map: Optional[dict]):
+    """Return ``(pids, profiles_map)`` for discovered profiles."""
+    if profiles_map:
+        pids = sorted(int(k) for k in profiles_map.keys())
+        return pids, profiles_map
     return None, None
 
 
 def cmd_profile_show(args) -> None:
     """Show current power profile."""
-    ctrl, match, _cfg = _open_profiles(args)
+    ctrl, profiles_map, _cfg = _open_profiles(args)
     profile_val = ctrl.get_profile()
     if profile_val is None:
         print("Current power profile: Unknown")
         return
-    pname = _profile_name(profile_val, match.profile)
+    pname = _profile_name(profile_val, profiles_map)
     print(f"Power Profile: {pname}  ({profile_val.value})")
 
 
@@ -968,9 +890,8 @@ def _record_profile_and_sync(val: int) -> None:
 
 def cmd_profile_set(args, name: str) -> None:
     """Set power profile by name or number."""
-    ctrl, match, _cfg = _open_profiles(args)
-    profile = match.profile
-    pids, _p_data = _profile_set_for(profile)
+    ctrl, profiles_map, _cfg = _open_profiles(args)
+    pids, _p_data = _profile_set_for(profiles_map)
 
     # Try parsing as number first
     try:
@@ -987,7 +908,7 @@ def cmd_profile_set(args, name: str) -> None:
             from . import dgpu_gate
 
             if not dgpu_gate.high_power_profiles_allowed():
-                pname = _profile_name(fp, profile)
+                pname = _profile_name(fp, profiles_map)
                 print(
                     f"Profile '{pname}' ({val}) is unavailable while the discrete GPU is powered off (ECO / gated).",
                     file=sys.stderr,
@@ -995,7 +916,7 @@ def cmd_profile_set(args, name: str) -> None:
                 sys.exit(1)
         if ctrl.set_profile(fp):
             _record_profile_and_sync(val)
-            pname = _profile_name(fp, profile)
+            pname = _profile_name(fp, profiles_map)
             print(f"Power profile set to: {pname}  ({val})")
             return
         else:
@@ -1017,7 +938,7 @@ def cmd_profile_set(args, name: str) -> None:
         from . import dgpu_gate
 
         if not dgpu_gate.high_power_profiles_allowed():
-            pname = _profile_name(fp, profile)
+            pname = _profile_name(fp, profiles_map)
             print(
                 f"Profile '{pname}' ({fp.value}) is unavailable while the discrete GPU is powered off (ECO / gated).",
                 file=sys.stderr,
@@ -1025,7 +946,7 @@ def cmd_profile_set(args, name: str) -> None:
             sys.exit(1)
     if ctrl.set_profile(fp):
         _record_profile_and_sync(fp.value)
-        pname = _profile_name(fp, profile)
+        pname = _profile_name(fp, profiles_map)
         print(f"Power profile set to: {pname}  ({fp.value})")
         return
     else:
@@ -1035,8 +956,8 @@ def cmd_profile_set(args, name: str) -> None:
 
 def cmd_profile_cycle(args) -> None:
     """Cycle to the next power profile and show OSD."""
-    ctrl, match, _cfg = _open_profiles(args)
-    pids, p_data = _profile_set_for(match.profile)
+    ctrl, profiles_map, _cfg = _open_profiles(args)
+    pids, p_data = _profile_set_for(profiles_map)
     from . import dgpu_gate
 
     if not dgpu_gate.high_power_profiles_allowed():
@@ -1068,54 +989,22 @@ def cmd_profile_cycle(args) -> None:
         sys.exit(1)
 
 
-def cmd_profile_experimental(args) -> None:
-    """Show or change consent for experimental (unconfirmed) model profiles."""
-    value = (getattr(args, "value", "status") or "status").lower()
-
-    if value == "status":
-        cfg = load_config()
-        match = _model_match(args)
-        enabled = bool(cfg.get("experimental_profiles_enabled", False))
-        print("GigaMate — experimental profiles")
-        print()
-        print(f"  enabled:  {'on' if enabled else 'off'}")
-        if match is None:
-            print("  model:    no matching model profile")
-        else:
-            kind = "experimental (unconfirmed)" if match.experimental else "verified"
-            print(f"  model:    {match.clean_name}  [{match.source}] — {kind}")
-        return
-
-    if value in ("on", "true", "yes", "enable", "enabled"):
-        update_config(lambda c: {**c, "experimental_profiles_enabled": True})
-        print("Experimental profiles: ON — unconfirmed profile controls are now enabled.")
-        return
-
-    if value in ("off", "false", "no", "disable", "disabled"):
-        update_config(lambda c: {**c, "experimental_profiles_enabled": False})
-        print("Experimental profiles: OFF — experimental controls are hidden again.")
-        return
-
-    print("Invalid value: use 'on', 'off', or 'status'")
-    sys.exit(2)
-
-
 def cmd_profile_report(args) -> None:
-    """Print a paste-able summary to help confirm an experimental model."""
+    """Print a paste-able summary of auto-discovered hardware capabilities."""
     from . import __version__
     from .battery import get_battery_manager  # noqa: F401 (kept side-effect free)
 
     cfg = load_config()
-    match = _model_match(args)
     ctrl = AcpiController()
     caps = ctrl.capabilities if ctrl.available else None
+    discovered = discover_acpi_profiles()
 
     print("GigaMate — model report")
     print()
     print(f"  GigaMate version:   {__version__}")
     print(f"  DMI vendor:         {get_dmi_vendor() or '-'}")
     print(f"  DMI product_name:   {get_dmi_product_name() or '-'}")
-    print(f"  DMI product_family: {get_dmi_product_family() or '-'}")
+    print(f"  DMI product_family: {_read_dmi('product_family') or '-'}")
     chassis = get_dmi_chassis_type()
     print(f"  DMI chassis:        {chassis if chassis is not None else '-'}")
     if caps is not None:
@@ -1127,28 +1016,23 @@ def cmd_profile_report(args) -> None:
         status = acpi_module_status()
         print("  ACPI backend:       none")
         print(f"  ACPI module:        {status.summary}")
-    if match is None:
-        print("  Model profile:      none")
-    else:
-        profiles = match.profile.acpi.profiles if match.profile.acpi else {}
+    if discovered:
         names = ", ".join(
-            f"{k}={v.get('name', '?')}" for k, v in sorted(profiles.items(), key=lambda kv: int(kv[0]))
+            f"{k}={v.get('name', '?')}" for k, v in sorted(discovered.items(), key=lambda kv: int(kv[0]))
         )
-        print(f"  Model profile:      {match.clean_name}")
-        print(f"  Profile source:     {match.source}")
-        print(f"  Confidence:         {'experimental (unconfirmed)' if match.experimental else 'verified'}")
-        print(f"  Profiles:           {names or '-'}")
-    print(f"  Experimental opt-in: {bool(cfg.get('experimental_profiles_enabled', False))}")
+        print(f"  Discovered profiles: {names}")
+    else:
+        print("  Discovered profiles: none")
     print(f"  Selected profile:    {cfg.get('acpi_profile')}")
     try:
         from . import dgpu_gate
 
         gst = dgpu_gate.get_status(check_helper=False)
-        gcfg = gst.get("gate_config")
+        gcfg = gst.get("gate_config") or dgpu_gate.resolve_gate_config()
         if gcfg:
             print(
                 f"  dGPU power gate:     {gcfg['path']}.{gcfg['method']} "
-                f"({gcfg.get('confidence', 'experimental')}; quirks={gcfg.get('quirks') or []})"
+                f"({gcfg.get('source', 'acpi')}; quirks={gcfg.get('quirks') or []})"
             )
         else:
             print("  dGPU power gate:     none")
@@ -1173,80 +1057,30 @@ def cmd_profile_report(args) -> None:
 
 
 def cmd_profile_contribute(args) -> None:
-    """Show Pull Request instructions for contributing a profile."""
-    detected = detect_device()
+    """Show instructions for sharing hardware reports with the community."""
+    detected = detect_keyboards()
     dmi_model = get_dmi_product_name()
     ctrl = AcpiController()
 
-    profile_dir = CONFIG_DIR / "profiles"
-    candidates = []
-    if detected is not None:
-        candidates.append(profile_dir / f"{detected[0]:04X}_{detected[1]:04X}.json")
-    if profile_dir.is_dir():
-        candidates.extend(sorted(profile_dir.glob("dmi_*.json")))
-
-    existing = next((p for p in candidates if p.exists()), None)
-
-    if existing is None:
-        # Nothing generated yet — guide the user instead of dead-ending on the
-        # fork/cp steps for a file that does not exist.
-        print()
-        if dmi_model:
-            print(f"  Model: {dmi_model}")
-        if detected is None and not ctrl.available:
-            print("No Gigabyte hardware detected on this system.")
-            print("Run this on the laptop you want to add support for.")
-            sys.exit(1)
-        print()
-        print("  No profile has been generated yet — create one first:")
-        print()
-        step = 1
-        if detected is not None:
-            print(f"    {step}. gigamate calibrate rgb      # map the keyboard colours (if RGB)")
-            step += 1
-        print(f"    {step}. gigamate calibrate acpi     # generate the model profile")
-        print(f"    {step + 1}. gigamate profile contribute # then follow the PR steps")
-        print()
-        return
-
-    profile_path_str = str(existing)
-    # Header metadata: USB key when known, otherwise the DMI model name.
-    if detected is not None:
-        name = f"{detected[0]:04X}:{detected[1]:04X}"
-        key_line = f"  VID:PID: {detected[0]:04X}:{detected[1]:04X}"
-    else:
-        name = dmi_model or "Gigabyte Laptop"
-        key_line = f"  DMI:     {dmi_model or '-'}"
+    if not detected and not ctrl.available:
+        print("No Gigabyte hardware detected on this system.")
+        print("Run this on the laptop you want to report.")
+        sys.exit(1)
 
     print()
-    print("🌟  Share your model profile with the community!")
+    print("GigaMate 5.0 auto-discovers ACPI profiles, LampArray RGB, and dGPU gates.")
+    if dmi_model:
+        print(f"  Model: {dmi_model}")
+    if detected:
+        vid, pid = detected[0]
+        print(f"  Keyboard: {vid:04X}:{pid:04X}")
     print()
-    print(f"  Model:   {name}")
-    print(key_line)
-    print(f"  Profile: {profile_path_str}")
+    print("  To share a hardware report or issue, run:")
+    print("    gigamate profile report")
+    print("    gigamate doctor")
     print()
-    print("  To contribute this profile as a Pull Request:")
-    print()
-    print(f"  1. Fork the repository:")
-    print(f"     https://github.com/goodeesh/GigaMate/fork")
-    print()
-    print(f"  2. Clone your fork and add the profile:")
-    print(f"     git clone https://github.com/YOUR_USERNAME/GigaMate.git")
-    print(f"     cd GigaMate")
-    print(f"     cp {profile_path_str} src/gigamate/profile_data/")
-    print(f"     git add src/gigamate/profile_data/")
-    print(f'     git commit -m "Add support for {name}"')
-    print(f"     git push")
-    print()
-    print(f"  3. Create a Pull Request:")
-    print(f"     https://github.com/goodeesh/GigaMate/pulls")
-    print()
-    print("  Or with GitHub CLI:")
-    print(f"     gh pr create --repo goodeesh/GigaMate "
-          f"--title \"Add support for {name}\"")
-    print()
-    print("  If your unit is unconfirmed, mark the profile's acpi.confidence as")
-    print("  \"experimental\" so it ships as Experimental until a user verifies it.")
+    print("  Then paste the output at:")
+    print("    https://github.com/goodeesh/GigaMate/issues")
     print()
 
 
@@ -1257,26 +1091,22 @@ def cmd_profile_contribute(args) -> None:
 
 def cmd_detect(args) -> None:
     """Show all detected hardware (keyboard + ACPI)."""
-    detected = detect_device()
-    profile = resolve_profile(args.vid, args.pid)
+    detected = detect_keyboards()
     dmi_model = get_dmi_product_name()
 
     print("GigaMate — Hardware Detection")
     print()
 
     # Model
-    if profile is not None:
-        print(f"  Model:    {profile.name}")
-    elif dmi_model:
+    if dmi_model:
         print(f"  Model:    {dmi_model}")
 
     # Keyboard
     if detected:
-        vid, pid = detected
-        if profile is not None:
-            print(f"  Keyboard: {profile.name}  ({vid:04X}:{pid:04X})")
-        else:
-            print(f"  Keyboard: Unknown model  ({vid:04X}:{pid:04X})")
+        vid, pid = detected[0]
+        lamparray = hardware_supports_lamparray(vid, pid)
+        rgb_label = "HID LampArray" if lamparray else "USB HID"
+        print(f"  Keyboard: {rgb_label}  ({vid:04X}:{pid:04X})")
     else:
         print(f"  Keyboard: Not detected (no USB RGB)")
     print()
@@ -1293,13 +1123,22 @@ def cmd_detect(args) -> None:
             backend_name = {"module": "kernel module", "acpi_call": "acpi_call", "mock": "mock"}.get(
                 caps.backend, caps.backend
             )
+            discovered = discover_acpi_profiles()
             print(f"  ACPI:   ✅ {backend_name} backend")
-            print(f"          Temperature:  {'✅' if caps.has_temperature else '❌'}")
-            print(f"          Fan RPM:      {'✅' if caps.has_fan_rpm else '❌'}")
-            print(f"          Fan Duty:     {'✅' if caps.has_fan_duty else '❌'}")
-            print(f"          Power Profiles: {'⚠️ unverified' if caps.has_power_profiles else '❌'}")
+            print(f"          Temperature:    {'✅' if caps.has_temperature else '❌'}")
+            print(f"          Fan RPM:        {'✅' if caps.has_fan_rpm else '❌'}")
+            print(f"          Fan Duty:       {'✅' if caps.has_fan_duty else '❌'}")
+            print(f"          Power Profiles: {'✅' if discovered else '❌'}")
+            try:
+                from . import dgpu_gate
+                gcfg = dgpu_gate.resolve_gate_config()
+                if gcfg:
+                    print(f"          dGPU Gate:      ✅ {gcfg['path']}.{gcfg['method']} ({gcfg.get('source', 'acpi')})")
+            except Exception:
+                pass
             print()
             print("  For detailed probe: gigamate detect --acpi")
+            print("  For full diagnostics: gigamate doctor")
         else:
             print(f"  ACPI:   ❌ Not available")
 
@@ -1333,19 +1172,18 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
     print(f"  Temperature: {'✅ Detected' if caps.has_temperature else '❌ Not available'}")
     print(f"  Fan RPM:    {'✅ Detected' if caps.has_fan_rpm else '❌ Not available'}")
     print(f"  Fan Duty:   {'✅ Detected' if caps.has_fan_duty else '❌ Not available'}")
-    if caps.has_power_profiles:
-        print("  Profiles:   ⚠️ Interface detected, but unverified for this model")
-        print("              Profile switching is only enabled by a matching model profile.")
-        print("              Run 'gigamate calibrate acpi' to generate one.")
+    discovered = discover_acpi_profiles()
+    if discovered:
+        names = ", ".join(
+            f"{k}={v.get('name', '?')}" for k, v in sorted(discovered.items(), key=lambda kv: int(kv[0]))
+        )
+        print(f"  Profiles:   ✅ Auto-discovered ({names})")
+    elif caps.has_power_profiles:
+        print("  Profiles:   ⚠️ Interface detected, no profiles discovered (run 'gigamate doctor')")
     else:
         print("  Profiles:   ❌ Not available")
     if caps.fan_count > 0:
         print(f"  Fans:       {caps.fan_count}")
-    print()
-
-    if caps.backend in ("module", "acpi_call"):
-        print("  To generate a model profile (sensors auto-detected, profiles opt-in):")
-        print("  Run 'gigamate calibrate acpi'")
     print()
 
 
@@ -1356,33 +1194,26 @@ def _print_acpi_caps(caps: AcpiCapabilities) -> None:
 
 def cmd_hotkeys_list(args) -> None:
     """Show the hotkey mappings configured for a keyboard."""
+    from . import protocol
     from .config import load as load_config
-    from .hotkeys import merge_hotkey_specs
-    from .profiles import detect_device, load_builtin_profiles, resolve_profile
+    from .hotkeys import DEFAULT_GIGABYTE_HOTKEYS, merge_hotkey_specs
 
-    detected = detect_device()
-    if detected is None and args.vid is None and args.pid is None:
+    detected = protocol.detect_keyboards()
+    if not detected and args.vid is None and args.pid is None:
         print("No supported keyboard detected.")
         sys.exit(1)
-    vid = args.vid if args.vid is not None else detected[0]
-    pid = args.pid if args.pid is not None else detected[1]
-    profile = resolve_profile(vid, pid)
-    builtin = load_builtin_profiles().get((vid, pid))
+    vid = args.vid if args.vid is not None else detected[0][0]
+    pid = args.pid if args.pid is not None else detected[0][1]
     cfg = load_config()
-    raw_overrides = cfg.get("hotkey_overrides")
-    overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
     specs = merge_hotkey_specs(
-        overrides,
-        profile.hotkeys if profile is not None else {},
-        builtin.hotkeys if builtin is not None else {},
+        cfg.get("custom_hotkeys") or {},
+        cfg.get("hotkey_overrides") or {},
+        DEFAULT_GIGABYTE_HOTKEYS,
     )
 
     print("GigaMate — Hotkey mappings")
     print()
-    if profile is not None:
-        print(f"  Keyboard: {profile.name}  ({vid:04X}:{pid:04X})")
-    else:
-        print(f"  Keyboard: Unknown model  ({vid:04X}:{pid:04X})")
+    print(f"  Keyboard: {vid:04X}:{pid:04X}")
     if not specs:
         print("  No hotkey mappings for this keyboard.")
         print("  Run 'gigamate hotkeys watch' and press the buttons to capture signatures.")
@@ -1399,18 +1230,22 @@ def cmd_hotkeys_watch(args) -> None:
     import os
     import select
     import time
+    from . import protocol
     from .config import load as load_config
     from .hotkeys import (
-        format_report, list_hotkey_hidraw, match_spec, merge_hotkey_specs,
+        DEFAULT_GIGABYTE_HOTKEYS,
+        format_report,
+        list_hotkey_hidraw,
+        match_spec,
+        merge_hotkey_specs,
     )
-    from .profiles import detect_device, load_builtin_profiles, resolve_profile
 
-    detected = detect_device()
-    if detected is None and args.vid is None and args.pid is None:
+    detected = protocol.detect_keyboards()
+    if not detected and args.vid is None and args.pid is None:
         print("No supported keyboard detected.")
         sys.exit(1)
-    vid = args.vid if args.vid is not None else detected[0]
-    pid = args.pid if args.pid is not None else detected[1]
+    vid = args.vid if args.vid is not None else detected[0][0]
+    pid = args.pid if args.pid is not None else detected[0][1]
 
     nodes = list_hotkey_hidraw(vid, pid)
     if args.interface is not None:
@@ -1419,20 +1254,15 @@ def cmd_hotkeys_watch(args) -> None:
         print(f"No hidraw interfaces for keyboard {vid:04X}:{pid:04X}.")
         sys.exit(1)
 
-    profile = resolve_profile(vid, pid)
-    builtin = load_builtin_profiles().get((vid, pid))
     cfg = load_config()
-    raw_overrides = cfg.get("hotkey_overrides")
-    overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
     specs = merge_hotkey_specs(
-        overrides,
-        profile.hotkeys if profile is not None else {},
-        builtin.hotkeys if builtin is not None else {},
+        cfg.get("custom_hotkeys") or {},
+        cfg.get("hotkey_overrides") or {},
+        DEFAULT_GIGABYTE_HOTKEYS,
     )
 
     print("GigaMate — hotkey capture (Ctrl-C to stop)", flush=True)
-    print("  Keyboard "
-          f"{profile.name + '  ' if profile is not None else ''}({vid:04X}:{pid:04X})", flush=True)
+    print(f"  Keyboard ({vid:04X}:{pid:04X})", flush=True)
     print("  Listening on: " + ", ".join(f"iface {i} ({n})" for i, n in nodes), flush=True)
     print("  Press the buttons whose signatures you want to capture.", flush=True)
 
@@ -1486,191 +1316,6 @@ def cmd_hotkeys_watch(args) -> None:
                 os.close(fd)
             except OSError:
                 pass
-
-
-def cmd_calibrate_rgb(args) -> None:
-    """Run keyboard RGB calibration."""
-    # Delegate to the existing rgb calibrate command
-    cmd_rgb_calibrate(args)
-
-
-# Documented ACPI profile layouts, keyed by DMI product family. These come from
-# community reverse-engineering (e.g. the gigabyte-laptop-wmi driver family):
-# Aero/AORUS use four fan-curve profiles, while Gigabyte Gaming models (e.g.
-# A16) expose eco/balanced/boost that program the NVIDIA platform controller
-# for GPU TGP. They are *hypotheses* to seed a candidate profile — never
-# evidence that a given unit honours them.
-_ACPI_PROFILE_TEMPLATES = {
-    "AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
-    "AORUS": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
-    "GIGABYTE AERO": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
-    "GIGABYTE EAGLE": {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"},
-    "GIGABYTE GAMING": {0: "eco", 1: "balanced", 2: "boost"},
-}
-
-
-def _family_acpi_template() -> Optional[dict]:
-    """Return the documented profile-name template for the DMI product family, if any."""
-    family = (get_dmi_product_family() or "").upper()
-    for key, tpl in _ACPI_PROFILE_TEMPLATES.items():
-        if key in family:
-            return dict(tpl)
-    return None
-
-
-def cmd_calibrate_acpi(args) -> None:
-    """Probe ACPI capabilities and generate/update a model profile.
-
-    USB-keyed when a Gigabyte keyboard is present; DMI-keyed otherwise (ACPI-only
-    laptops, e.g. GAMING A16) so those models can be supported and contributed.
-    """
-    print("GigaMate — ACPI Calibration")
-    print()
-    print("Probing ACPI capabilities...")
-    caps = probe_acpi_capabilities()
-    _print_acpi_caps(caps)
-
-    if caps.backend == "none":
-        print("No ACPI interface found. Nothing to save.")
-        return
-
-    detected = detect_device()
-    dmi_model = get_dmi_product_name()
-
-    if detected is not None:
-        vid, pid = detected
-        print(f"Detected keyboard: {vid:04X}:{pid:04X}")
-        profile = resolve_profile(vid, pid)
-        if profile is None:
-            profile = DeviceProfile(
-                vid=vid, pid=pid, name=dmi_model or f"{vid:04X}:{pid:04X}",
-                version=3, interfaces=[], control_interface=0,
-            )
-            print(f"Creating a new ACPI-only profile for: {profile.name}")
-        else:
-            print(f"Updating existing profile: {profile.name}")
-    elif dmi_model:
-        # No Gigabyte USB keyboard: key the profile on DMI (ACPI-only laptops).
-        print(f"No USB keyboard detected — keying the profile on DMI: {dmi_model}")
-        profile = match_dmi_profile(load_user_dmi_profiles())
-        if profile is None:
-            profile = DeviceProfile(
-                vid=0, pid=0, name=dmi_model, version=3,
-                interfaces=[], control_interface=0,
-                dmi=DmiConfig(product_names=[dmi_model]),
-            )
-            print(f"Creating a new DMI-keyed profile for: {profile.name}")
-        else:
-            print(f"Updating existing profile: {profile.name}")
-    else:
-        print("No Gigabyte USB device and no DMI model name detected — nothing can be saved on this system.")
-        return
-
-    # Build the ACPI section from what the probe actually detected. Sensors are
-    # reliably detectable; power-profile semantics are not, so profile support
-    # stays off by default and only gets enabled with explicit, informed consent.
-    from .profiles import AcpiConfig
-
-    fan_labels = []
-    if caps.fan_count >= 1:
-        fan_labels.append("Fan 1")
-    if caps.fan_count >= 2:
-        fan_labels.append("Fan 2")
-
-    sensor_labels = {}
-    if caps.has_temperature:
-        sensor_labels["temp_cpu"] = "CPU Temp"
-        sensor_labels["temp_socket"] = "Socket Temp"
-
-    profiles_map = {}
-    template = _family_acpi_template()
-    if caps.has_power_profiles and template:
-        print()
-        print("The AMW0 interface answers, and this machine's DMI product family matches")
-        print("a documented layout. We can seed profile names from community knowledge:")
-        print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(template.items())))
-        print()
-        print("⚠️  These controls are NOT verified on your specific unit. On some EC")
-        print("    firmwares, profile writes are accepted but do nothing. Enabling this")
-        print("    shows profile controls that may have no effect.")
-        ans = input("Enable power profiles for this model? [y/N] ").strip().lower()
-        if ans in ("y", "yes"):
-            profiles_map = {str(k): {"name": v, "desc": ""} for k, v in template.items()}
-    elif caps.has_power_profiles:
-        print()
-        print("The AMW0 interface answers sensor reads, but no documented profile layout is")
-        print("known for this model family, so power-profile switching stays DISABLED.")
-        print()
-
-    # A newly generated profile is unverified by definition. Re-running
-    # calibration on an existing profile that already declares working
-    # profiles must not downgrade a verified model.
-    existing_acpi = profile.acpi
-    if (
-        existing_acpi is not None
-        and existing_acpi.has_power_profiles
-        and existing_acpi.profiles
-    ):
-        confidence = existing_acpi.confidence
-    else:
-        confidence = "experimental"
-
-    dgpu_gate_cfg = existing_acpi.dgpu_gate if existing_acpi is not None else None
-    try:
-        from . import dgpu_gate
-        from .profiles import DgpuGateConfig
-
-        probe_res = dgpu_gate.probe_dgpu_gate(live_test=False)
-        rec = probe_res.get("recommended")
-        if probe_res.get("supported") and rec is not None:
-            print()
-            print("Discrete GPU Power Gate discovery:")
-            print(f"  Candidate: {rec['path']}.{rec['method']} (quirks: {rec.get('quirks') or []})")
-            print("  ⚠️  This configuration is experimental. HDMI/DP ports wired to the dGPU")
-            print("     do not work while the dGPU is gated off.")
-            ans_gate = input("Include experimental dGPU power-gate config in this profile? [y/N] ").strip().lower()
-            if ans_gate in ("y", "yes"):
-                dgpu_gate_cfg = DgpuGateConfig.from_dict(rec)
-                profile.version = max(profile.version, 4)
-    except (EOFError, Exception):
-        pass
-
-    profile.acpi = AcpiConfig(
-        has_fan_control=caps.has_fan_rpm or caps.has_fan_duty,
-        has_temperature=caps.has_temperature,
-        has_power_profiles=bool(profiles_map),
-        fan_count=caps.fan_count,
-        fan_labels=fan_labels,
-        sensor_labels=sensor_labels,
-        profiles=profiles_map,
-        backend=caps.backend,
-        confidence=confidence,
-        dgpu_gate=dgpu_gate_cfg,
-    )
-
-    path = save_user_profile(profile)
-    print(f"\n✅ Profile saved: {path}")
-    print()
-    if profiles_map:
-        print("Profile switching is now enabled for this model.")
-    else:
-        print("Profile switching stays disabled for this model.")
-    print()
-    print("To share with the community:")
-    print("  gigamate profile contribute")
-
-
-# ────────────────────────────────────────────
-# Other commands
-# ────────────────────────────────────────────
-
-
-def cmd_version(args) -> None:
-    """Show version information."""
-    from . import __version__
-    print(f"GigaMate v{__version__}")
-    print("Gigabyte laptop management for Linux")
-    print()
 
 
 def cmd_doctor(args) -> None:
@@ -1808,11 +1453,10 @@ def cmd_legacy(args) -> None:
     level = _parse_level(args.level)
 
     if args.calibrate:
-        cmd_rgb_calibrate(args)
+        print("RGB calibration was removed in GigaMate 5.0 (LampArray HID auto-detects RGB).")
         return
     if args.list:
-        profile = resolve_profile(args.vid, args.pid)
-        list_options(profile)
+        list_options()
         return
     if args.reset:
         cmd_rgb_reset(args)
@@ -1840,8 +1484,7 @@ def cmd_legacy(args) -> None:
 
 def cmd_rgb_reset(args) -> None:
     """Re-attach kernel keyboard drivers."""
-    profile = resolve_profile(args.vid, args.pid)
-    dev = get_keyboard(args.vid, args.pid, profile)
+    dev = get_keyboard(args.vid, args.pid)
     if dev is None:
         print("Keyboard not found")
         sys.exit(1)
@@ -1853,27 +1496,26 @@ def cmd_rgb_reset(args) -> None:
     print("Keyboard drivers re-attached for interfaces 0/2/4. Typing should work.")
 
 
-def list_options(profile=None):
+def list_options():
     """List available RGB options."""
-    cmap = profile.colour_map if profile is not None else COLOUR_MAP
-    print("Available effects (static is the only working one for backlight;")
-    print("others may break the keyboard and require a USB reset to recover):")
-    for name, val in sorted(PROGRAMS.items(), key=lambda x: x[1]):
-        print(f"  {name:15s} (0x{val:02X})")
+    print("Available effects: static, off, cycle")
     print()
-    print("Available colours:")
-    for name in sorted(cmap.keys()):
-        print(f"  {name}")
+    print("Available palette colours (or any #RRGGBB hex):")
+    for name in sorted(PALETTE_HEX.keys()):
+        print(f"  {name:15s} (#{PALETTE_HEX[name]})")
     print()
-    print("Brightness levels: off, dim, full")
-    print("Available speeds:")
-    for name, val in sorted(SPEEDS.items(), key=lambda x: x[1]):
-        print(f"  {name:10s} (0x{val:02X})")
+    print("Brightness: 0-100% (or legacy: off, dim, full)")
 
 
 # ────────────────────────────────────────────
 # Main
 # ────────────────────────────────────────────
+
+
+def cmd_version(args) -> None:
+    """Show GigaMate version."""
+    from . import __version__
+    print(f"GigaMate {__version__}")
 
 
 def main() -> None:
@@ -2078,7 +1720,8 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
 
     # rgb static
     static_parser = rgb_sub.add_parser("static", help="Set static colour")
-    static_parser.add_argument("colour", nargs="?", default="light_purple", help="Colour name")
+    static_parser.add_argument("colour", nargs="?", default="light_purple", help="Colour name or #RRGGBB")
+    static_parser.add_argument("brightness", nargs="?", default=None, help="Brightness: off/dim/full or 0, 5..100")
     static_parser.add_argument("--level", "-l", default="full", help="Brightness: off/dim/full")
     static_parser.add_argument("--speed", "-s", default="medium", help="Speed: fastest/slowest or 1-10")
     static_parser.add_argument("--interface", "-i", type=int, default=3, help="USB interface")
@@ -2104,13 +1747,6 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     reset_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     reset_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
 
-    # rgb calibrate
-    cal_rgb_parser = rgb_sub.add_parser("calibrate", help="Interactive RGB calibration")
-    cal_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
-    cal_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
-    cal_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
-                                help="USB RGB control interface (default: auto-detect)")
-
     # rgb idle
     idle_parser = rgb_sub.add_parser(
         "idle", help="Keyboard backlight idle auto-off timeout")
@@ -2131,9 +1767,9 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     profile_parser = sub.add_parser("profile", help="Power profile control")
     profile_parser.add_argument("action", nargs="?", default=None,
                                 help="'show', 'cycle', 'contribute', 'report', "
-                                     "'experimental [on|off|status]', or a profile name/number to set")
+                                     "or a profile name/number to set")
     profile_parser.add_argument("name", nargs="?", default=None,
-                                help="Profile name/number (for 'set') or on/off/status (for 'experimental')")
+                                help="Profile name/number (for 'set')")
     profile_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     profile_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
 
@@ -2142,27 +1778,6 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
     detect_parser.add_argument("--acpi", action="store_true", help="Detailed ACPI probe")
     detect_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     detect_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
-
-    # --- calibrate subcommand ---
-    calibrate_parser = sub.add_parser("calibrate", help="Calibrate hardware")
-    calibrate_sub = calibrate_parser.add_subparsers(dest="calibrate_action", help="Calibration type")
-
-    calibrate_rgb_parser = calibrate_sub.add_parser("rgb", help="Keyboard RGB calibration")
-    calibrate_rgb_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
-    calibrate_rgb_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
-    calibrate_rgb_parser.add_argument("--interface", "-i", type=int, default=None,
-                                      help="USB RGB control interface (default: auto-detect)")
-
-    calibrate_acpi_parser = calibrate_sub.add_parser("acpi", help="ACPI capabilities probe")
-    calibrate_acpi_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
-    calibrate_acpi_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
-
-    # calibrate --all (combined)
-    calibrate_all_parser = calibrate_sub.add_parser("all", help="RGB + ACPI calibration")
-    calibrate_all_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
-    calibrate_all_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
-    calibrate_all_parser.add_argument("--interface", "-i", type=int, default=None,
-                                      help="USB RGB control interface (default: auto-detect)")
 
     # --- doctor subcommand ---
     sub.add_parser("doctor", help="Diagnose hardware and permissions")
@@ -2345,12 +1960,10 @@ def _dispatch_rgb(args) -> None:
         cmd_rgb_cycle(args)
     elif action == "reset":
         cmd_rgb_reset(args)
-    elif action == "calibrate":
-        cmd_rgb_calibrate(args)
     elif action == "idle":
         cmd_rgb_idle(args)
     else:
-        print("RGB actions: static, off, detect, cycle, reset, calibrate, idle")
+        print("RGB actions: static, off, detect, cycle, reset, idle")
         print("Example: gigamate rgb static purple")
         sys.exit(1)
 
@@ -2374,8 +1987,8 @@ def _dispatch_profile(args) -> None:
     elif action == "report":
         cmd_profile_report(args)
     elif action == "experimental":
-        args.value = args.name or "status"
-        cmd_profile_experimental(args)
+        print("Experimental profile mode was removed in GigaMate 5.0.")
+        sys.exit(1)
     elif action == "show" or action == "":
         cmd_profile_show(args)
     elif action == "set":
@@ -2401,35 +2014,9 @@ def _dispatch_hotkeys(args) -> None:
 
 
 def _dispatch_calibrate(args) -> None:
-    """Dispatch to the correct calibration handler."""
-    action = args.calibrate_action
-    if action == "rgb":
-        cmd_calibrate_rgb(args)
-    elif action == "acpi":
-        cmd_calibrate_acpi(args)
-    elif action == "all":
-        # Run both calibrations; a missing RGB keyboard must not abort the
-        # ACPI half (and vice-versa).
-        print("=== RGB Calibration ===")
-        try:
-            cmd_calibrate_rgb(args)
-        except SystemExit as exc:
-            if exc.code not in (0, None):
-                print("Skipping RGB calibration (no compatible keyboard detected).", file=sys.stderr)
-        print()
-        print("=== ACPI Calibration ===")
-        try:
-            cmd_calibrate_acpi(args)
-        except SystemExit as exc:
-            if exc.code not in (0, None):
-                print("Skipping ACPI calibration.", file=sys.stderr)
-        print()
-        print("Combined calibration complete.")
-        print("Run 'gigamate profile contribute' to share your profile.")
-    elif action is None:
-        print("Calibration types: rgb, acpi, all")
-        print("Example: gigamate calibrate rgb")
-        sys.exit(1)
+    """Handle removed calibration subcommand."""
+    print("Calibration was removed in GigaMate 5.0 (ACPI profiles and LampArray RGB are auto-discovered).")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

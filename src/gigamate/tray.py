@@ -33,17 +33,29 @@ except Exception:
 
 from pathlib import Path
 
-from .protocol import set_static, set_off, get_keyboard
-from .profiles import (
-    detect_device, resolve_profile, save_user_profile, DeviceProfile,
-    get_dmi_product_name, load_builtin_profiles,
-    resolve_model, profile_usable, ModelMatch,
+from .protocol import (
+    detect_keyboards,
+    hardware_supports_lamparray,
+    get_keyboard,
+    set_off,
+    set_rgb,
+    supports_full_rgb,
 )
-from .config import CONFIG_FILE, load as load_config, update_config
+from .lamparray import LampArrayDevice, PALETTE_HEX
+from .capabilities import get_dmi_product_name
+from .power_limits import discover_acpi_profiles
+from .config import (
+    CONFIG_FILE,
+    load as load_config,
+    update_config,
+    effective_brightness_pct,
+    is_rgb_enabled,
+    effective_rgb_hex,
+)
 from .acpi import (
     AcpiController, FanProfile, FanState, AcpiCapabilities,
 )
-from .hotkeys import HotkeyListener, merge_hotkey_specs
+from .hotkeys import HotkeyListener, resolve_hotkey_specs
 from .gpu import gpu_icon_key
 from .paths import ICON_PATHS, get_runtime_ipc_paths
 from .idle import (
@@ -57,7 +69,14 @@ from .idle import (
     nearest_idle_step as _nearest_idle_step,
 )
 from .osd import show_profile_osd
-from .system_power import sync_system_power, is_system_power_available
+from .system_power import (
+    SYSTEM_TO_GIGAMATE_PROFILE,
+    SystemPowerManager,
+    detect_power_managers,
+    is_system_power_available,
+    power_config_mtime_token,
+    sync_system_power,
+)
 from .gpu import get_gpu_state, gpu_short_status_text
 import subprocess
 import shutil
@@ -69,6 +88,7 @@ from .battery import (
     cancel_topup,
 )
 from .sleep_handler import get_sleep_handler
+from . import hardware
 from .hardware import apply_hardware_settings
 from . import dgpu_gate
 from . import updates as update_checker
@@ -102,7 +122,7 @@ class GigaMateTrayApp:
         self._icon_key: Optional[str] = None
 
         # Keyboard state
-        self._profile: Optional[DeviceProfile] = None
+        self._has_lamparray = False
         self._unsupported = False
         self._no_keyboard = False
         self._keyboard_retry_timer_id: Optional[int] = None
@@ -114,6 +134,10 @@ class GigaMateTrayApp:
         self._brightness_items: Dict[int, Gtk.RadioMenuItem] = {}
         self._current_colour = self._config.get("colour", "light_purple")
         self._current_brightness = self._config.get("brightness", 2)
+        self._current_rgb_hex = self._config.get("rgb_hex")
+        self._current_brightness_pct = effective_brightness_pct(self._config)
+        self._rgb_enabled = is_rgb_enabled(self._config)
+        self._full_rgb = False
         self._startup_item: Optional[Gtk.CheckMenuItem] = None
         self._startup_apply = self._config.get("startup_apply", False)
         self._sync_system_power = self._config.get("sync_system_power", False)
@@ -136,7 +160,6 @@ class GigaMateTrayApp:
         # ACPI state
         self._acpi_controller: Optional[AcpiController] = None
         self._acpi_caps: Optional[AcpiCapabilities] = None
-        self._model: Optional[ModelMatch] = None
         self._profile_items: Dict[int, Gtk.RadioMenuItem] = {}
         self._status_items: List[Gtk.MenuItem] = []
         self._current_acpi_profile: Optional[int] = self._config.get("acpi_profile")
@@ -152,6 +175,9 @@ class GigaMateTrayApp:
             self._config.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC))
         self._idle_dimmed = False
         self._idle_monitor: Optional[IdleMonitor] = None
+        self._last_ac_online: Optional[bool] = None
+        self._last_seen_system_profile: Optional[str] = None
+        self._profile_sync_until: float = 0.0
         self._idle_fallback_timer_id: Optional[int] = None
         self._idle_parent_item: Optional[Gtk.MenuItem] = None
         self._idle_timeout_items: Dict[int, Gtk.RadioMenuItem] = {}
@@ -168,7 +194,6 @@ class GigaMateTrayApp:
         self._building = True
         self._detect_on_startup()
         self._init_acpi()
-        self._resolve_model()
         self._init_hotkeys()
         self._build_menu()
         self._building = False
@@ -186,25 +211,24 @@ class GigaMateTrayApp:
     # ────────────────────────────────────────────
 
     def _detect_on_startup(self) -> None:
-        """Detect keyboard hardware and load profile."""
-        detected = detect_device()
-        if detected is None:
+        """Detect keyboard hardware via HID LampArray."""
+        detected = detect_keyboards()
+        if not detected:
             self._no_keyboard = True
-            return
-        self._detected_vid, self._detected_pid = detected
-        profile = resolve_profile(self._detected_vid, self._detected_pid)
-        if profile is not None:
-            self._profile = profile
+            self._has_lamparray = False
+            self._full_rgb = False
             self._unsupported = False
-            colours = self._profile.colour_names
-            if colours:
-                self._current_colour = self._config.get("colour", colours[0])
-        else:
-            self._profile = None
-            self._unsupported = True
+            return
+        self._no_keyboard = False
+        self._detected_vid, self._detected_pid = detected[0]
+        self._has_lamparray = hardware_supports_lamparray(
+            self._detected_vid, self._detected_pid
+        )
+        self._full_rgb = self._has_lamparray
+        self._unsupported = not self._has_lamparray
 
     def _init_acpi(self) -> None:
-        """Initialise ACPI controller (from profile, or auto-detected)."""
+        """Initialise ACPI controller (auto-detected)."""
         ctrl = AcpiController()
         if ctrl.available:
             self._acpi_controller = ctrl
@@ -213,56 +237,21 @@ class GigaMateTrayApp:
             self._acpi_controller = None
             self._acpi_caps = None
 
-    def _resolve_model(self) -> None:
-        """Resolve the model profile that gates power-profile switching.
-
-        USB-keyed profiles first, then DMI-keyed (ACPI-only laptops). Carries the
-        experimental flag and consent state via :func:`profile_usable`.
-        """
-        try:
-            if self._detected_vid:
-                self._model = resolve_model(self._detected_vid, self._detected_pid)
-            else:
-                self._model = resolve_model()
-        except Exception:
-            self._model = None
-
     def _resolve_hotkey_specs(self):
-        """Hotkey specs, strictly model-scoped (no cross-model spillover).
-
-        Precedence: explicit ``hotkey_overrides`` from config.json, then the
-        active profile's ``hotkeys``, then the built-in profile's ``hotkeys``
-        for the same VID:PID. Models without any of these get no listener.
-        """
-        overrides: Dict = {}
+        """Resolve hotkey specs using DEFAULT_GIGABYTE_HOTKEYS + config overrides."""
         try:
-            cfg_overrides = self._config.get("hotkey_overrides")
-            if isinstance(cfg_overrides, dict):
-                overrides = cfg_overrides
+            return resolve_hotkey_specs(cfg=self._config)
         except Exception:
-            overrides = {}
-        profile_hotkeys: Dict = {}
-        builtin_hotkeys: Dict = {}
-        try:
-            vid = self._profile.vid if self._profile else (self._detected_vid or 0x0414)
-            pid = self._profile.pid if self._profile else (self._detected_pid or 0x8105)
-            if self._profile is not None and isinstance(self._profile.hotkeys, dict):
-                profile_hotkeys = self._profile.hotkeys
-            builtin = load_builtin_profiles().get((vid, pid))
-            if builtin is not None and isinstance(builtin.hotkeys, dict):
-                builtin_hotkeys = builtin.hotkeys
-        except Exception:
-            pass
-        return merge_hotkey_specs(overrides, profile_hotkeys, builtin_hotkeys)
+            return {}
 
     def _init_hotkeys(self) -> None:
-        """Initialise and start background hotkey listener (model-scoped)."""
+        """Initialise and start background hotkey listener."""
         if self._hotkey_listener is not None:
             self._hotkey_listener.stop()
             self._hotkey_listener = None
 
-        vid = self._profile.vid if self._profile else (self._detected_vid or 0x0414)
-        pid = self._profile.pid if self._profile else (self._detected_pid or 0x8105)
+        vid = self._detected_vid or 0x0414
+        pid = self._detected_pid or 0x8105
 
         specs = self._resolve_hotkey_specs()
         if not specs:
@@ -315,12 +304,13 @@ class GigaMateTrayApp:
         self._last_config_mtime = mtime
 
         new_cfg = load_config()
-        old_experimental = bool(getattr(self, "_config", {}).get("experimental_profiles_enabled", False))
         self._config = new_cfg
-        new_experimental = bool(new_cfg.get("experimental_profiles_enabled", False))
 
         new_colour = new_cfg.get("colour")
         new_bright = new_cfg.get("brightness")
+        new_rgb_hex = new_cfg.get("rgb_hex")
+        new_bright_pct = effective_brightness_pct(new_cfg)
+        new_rgb_enabled = is_rgb_enabled(new_cfg)
         new_profile = new_cfg.get("acpi_profile")
         new_idle_off = new_cfg.get("idle_off_enabled", False)
         new_idle_sec = new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
@@ -340,11 +330,22 @@ class GigaMateTrayApp:
 
             if new_bright is not None and new_bright != self._current_brightness:
                 self._current_brightness = new_bright
-                if new_bright in self._brightness_items:
+                if not getattr(self, "_full_rgb", False) and new_bright in self._brightness_items:
                     self._brightness_items[new_bright].set_active(True)
+
+            self._current_rgb_hex = new_rgb_hex
+            self._rgb_enabled = new_rgb_enabled
+            if new_bright_pct != getattr(self, "_current_brightness_pct", None):
+                self._current_brightness_pct = new_bright_pct
+            if getattr(self, "_full_rgb", False):
+                target_pct = 0 if not new_rgb_enabled else new_bright_pct
+                if target_pct in self._brightness_items:
+                    self._brightness_items[target_pct].set_active(True)
 
             if new_profile is not None and new_profile != self._current_acpi_profile:
                 self._current_acpi_profile = new_profile
+                if new_sync_power:
+                    self._mark_profile_synced(new_profile)
                 if new_profile in self._profile_items:
                     self._profile_items[new_profile].set_active(True)
 
@@ -385,12 +386,6 @@ class GigaMateTrayApp:
             self._last_topup_active = new_topup
             self._rebuild_menu()
 
-        # Consent changed externally (e.g. `gigamate profile experimental on`):
-        # re-resolve the model and rebuild so the controls appear/disappear.
-        if new_experimental != old_experimental:
-            self._resolve_model()
-            self._rebuild_menu()
-
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
     # ────────────────────────────────────────────
@@ -405,7 +400,7 @@ class GigaMateTrayApp:
         self._idle_dimmed = False
         if not self._idle_enabled:
             return
-        if self._no_keyboard and self._profile is None:
+        if self._no_keyboard and not getattr(self, "_has_lamparray", False):
             # No backlight to manage; polling fallback is pointless.
             return
         monitor = IdleMonitor(
@@ -449,11 +444,13 @@ class GigaMateTrayApp:
             return
         if self._current_brightness == 0:
             return  # user already wants it off
+        if self._config.get("idle_keep_on_ac", False) and get_battery_manager().is_ac_online():
+            return
         dev = self._get_keyboard()
         if dev is None:
             return
         try:
-            set_off(dev, self._profile)
+            set_off(dev)
             self._idle_dimmed = True
         except Exception:
             pass
@@ -470,8 +467,7 @@ class GigaMateTrayApp:
             return
         try:
             self._sync_from_external_config()
-            set_static(dev, self._current_colour,
-                       self._current_brightness, self._profile)
+            self._apply_current_rgb(dev)
         except Exception:
             pass
 
@@ -516,8 +512,7 @@ class GigaMateTrayApp:
         dev = self._get_keyboard()
         if dev is not None and self._current_brightness != 0:
             try:
-                set_static(dev, self._current_colour,
-                           self._current_brightness, self._profile)
+                self._apply_current_rgb(dev)
             except Exception:
                 pass
 
@@ -538,7 +533,7 @@ class GigaMateTrayApp:
 
     def _append_idle_section(self, menu: Optional[Gtk.Menu] = None) -> None:
         """Add idle auto-off submenu (Off/10s/30s/1m/2m, RGB menus only)."""
-        if self._profile is None or not self._profile.has_rgb:
+        if not getattr(self, "_has_lamparray", False):
             return
         target = menu if menu is not None else self._menu
         target.append(Gtk.SeparatorMenuItem())
@@ -830,20 +825,20 @@ class GigaMateTrayApp:
 
     def _build_acpi_only_menu(self) -> None:
         """Menu when ACPI is available but keyboard is not found."""
-        self._append_center_item()
-        dmi_model = get_dmi_product_name()
-        if dmi_model:
-            header = Gtk.MenuItem(label=dmi_model)
-            header.set_sensitive(False)
-            self._menu.append(header)
+        self._dgpu_power_parent_item = None
+        self._colour_items = {}
+        self._brightness_items = {}
 
+        self._append_center_item()
         self._append_status_section()
         self._append_power_profile_section()
-        self._add_separator()
-        self._append_battery_section()
-        self._append_dgpu_power_section()
-        self._add_separator()
-        self._append_settings_section()
+
+        if self._update_available and self._latest_version:
+            self._add_separator()
+            upd_item = Gtk.MenuItem(label=update_checker.menu_item_label(True))
+            upd_item.connect("activate", self._on_update_clicked)
+            self._menu.append(upd_item)
+
         self._append_quit()
 
     def _build_unsupported_menu(self) -> None:
@@ -876,11 +871,11 @@ class GigaMateTrayApp:
         self._append_quit()
 
     def _build_supported_menu(self) -> None:
-        """Full menu: live status, power profiles, then grouped flyouts.
+        """Full menu: Open Center, live status, power profiles, optional update, Quit."""
+        self._dgpu_power_parent_item = None
+        self._colour_items = {}
+        self._brightness_items = {}
 
-        Deliberately short: Plasma renders SNI menus in extra columns when
-        they are taller than the screen (see ``_make_submenu``).
-        """
         # ── Open GigaMate Center ──
         self._append_center_item()
 
@@ -890,18 +885,69 @@ class GigaMateTrayApp:
         # ── Power Profile section (ACPI) — primary action, one click away ──
         self._append_power_profile_section()
 
-        # ── Grouped flyouts: Keyboard (RGB + idle), Battery, dGPU Power, Settings ──
-        self._add_separator()
-        self._append_keyboard_section()
-        self._append_battery_section()
-        self._append_dgpu_power_section()
-        self._append_settings_section()
+        # ── Backlight submenu ──
+        self._append_backlight_section()
+
+        if self._update_available and self._latest_version:
+            self._add_separator()
+            upd_item = Gtk.MenuItem(label=update_checker.menu_item_label(True))
+            upd_item.connect("activate", self._on_update_clicked)
+            self._menu.append(upd_item)
 
         self._append_quit()
 
     # ────────────────────────────────────────────
     # Section builders
     # ────────────────────────────────────────────
+
+    def _append_backlight_section(self) -> None:
+        """Add compact Backlight submenu (Off/5%/50%/100% for LampArray full RGB)."""
+        if not getattr(self, "_has_lamparray", False):
+            return
+        self._add_separator()
+        parent = self._make_submenu("Backlight")
+        sub = parent.get_submenu()
+        group = None
+
+        rgb_enabled = bool(self._config.get("rgb_enabled", True))
+        pct = int(self._config.get("brightness_pct", 100) or 0)
+        active_pct = 0 if not rgb_enabled else pct
+        steps = [("Off", 0), ("5%", 5), ("50%", 50), ("100%", 100)]
+        for label, val in steps:
+            item = Gtk.RadioMenuItem(group=group, label=label)
+            if group is None:
+                group = item
+            if (val == 0 and active_pct == 0) or (val > 0 and active_pct == val):
+                item.set_active(True)
+            item.connect("toggled", self._on_backlight_full_rgb_selected, val)
+            sub.append(item)
+            self._brightness_items[val] = item
+
+    def _on_backlight_full_rgb_selected(self, item: Gtk.RadioMenuItem, pct: int) -> None:
+        if not item.get_active() or self._building:
+            return
+        dev = self._get_keyboard()
+        if pct == 0:
+            self._config["rgb_enabled"] = False
+            self._save_config()
+            if dev is not None:
+                try:
+                    set_off(dev)
+                except Exception:
+                    pass
+        else:
+            self._config["rgb_enabled"] = True
+            self._config["brightness_pct"] = pct
+            self._save_config()
+            if dev is not None:
+                try:
+                    set_rgb(
+                        dev,
+                        effective_rgb_hex(self._config),
+                        pct,
+                    )
+                except Exception:
+                    pass
 
     def _dgpu_power_labels(self, gst=None):
         """Return (parent_label, status_label) for the dGPU Power Gate flyout."""
@@ -1227,7 +1273,7 @@ class GigaMateTrayApp:
 
     def _append_keyboard_section(self) -> None:
         """Add the Keyboard flyout: colour, brightness and idle auto-off."""
-        if self._profile is None or not self._profile.has_rgb:
+        if not getattr(self, "_has_lamparray", False):
             return
         parent = self._make_submenu("Keyboard")
         submenu = parent.get_submenu()
@@ -1237,7 +1283,7 @@ class GigaMateTrayApp:
         submenu.append(colour_header)
 
         colour_group = None
-        for cname in self._profile.colour_names:
+        for cname in PALETTE_HEX.keys():
             label = cname.replace("_", " ").title()
             item = Gtk.RadioMenuItem(group=colour_group, label=label)
             if colour_group is None:
@@ -1255,45 +1301,67 @@ class GigaMateTrayApp:
         submenu.append(brightness_header)
 
         bright_group = None
-        for level, label in enumerate(BRIGHTNESS_NAMES):
-            item = Gtk.RadioMenuItem(group=bright_group, label=label)
-            if bright_group is None:
-                bright_group = item
-            if level == self._current_brightness:
-                item.set_active(True)
-            item.connect("toggled", self._on_brightness_changed, level)
-            submenu.append(item)
-            self._brightness_items[level] = item
+        if getattr(self, "_full_rgb", False):
+            full_rgb_levels = [
+                (0, "Off"),
+                (5, "5%"),
+                (15, "15%"),
+                (40, "40%"),
+                (100, "100%"),
+            ]
+            current_pct = getattr(self, "_current_brightness_pct", 100)
+            if not getattr(self, "_rgb_enabled", True):
+                nearest_pct = 0
+            else:
+                nearest_pct = min(
+                    (p for p, _ in full_rgb_levels if p > 0),
+                    key=lambda p: abs(p - current_pct),
+                )
+            for pct, label in full_rgb_levels:
+                item = Gtk.RadioMenuItem(group=bright_group, label=label)
+                if bright_group is None:
+                    bright_group = item
+                if pct == nearest_pct:
+                    item.set_active(True)
+                item.connect("toggled", self._on_brightness_pct_changed, pct)
+                submenu.append(item)
+                self._brightness_items[pct] = item
+        else:
+            for level, label in enumerate(BRIGHTNESS_NAMES):
+                item = Gtk.RadioMenuItem(group=bright_group, label=label)
+                if bright_group is None:
+                    bright_group = item
+                if level == self._current_brightness:
+                    item.set_active(True)
+                item.connect("toggled", self._on_brightness_changed, level)
+                submenu.append(item)
+                self._brightness_items[level] = item
 
         self._append_idle_section(submenu)
 
-    def _append_power_profile_section(self) -> None:
-        """Add Power Profile radio group (verified models, experimental after opt-in).
+    def _get_discovered_profiles(self) -> Dict[int, Dict[str, str]]:
+        """Return discovered ACPI power profiles, falling back to cached caps."""
+        profiles = discover_acpi_profiles()
+        if not profiles and self._acpi_caps is not None:
+            profiles = getattr(self._acpi_caps, "discovered_profiles", {}) or {}
+        return profiles
 
-        Profile switching is a per-model contract: it is only shown when a
-        matching model profile declares a profile set. Experimental (unconfirmed)
-        models are shown but disabled until the user opts in.
-        """
+    def _append_power_profile_section(self) -> None:
+        """Add Power Profile radio group from discovered ACPI profiles."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
-        match = self._model
-        if match is None or match.profile.acpi is None:
-            return
 
-        profile_names = match.profile.acpi.profiles
-        if not profile_names:
-            return
-
-        usable = profile_usable(match, self._config)
-        experimental = match.experimental
-
+        profile_names = self._get_discovered_profiles()
         self._add_separator()
-        title = "Power Profile"
-        if experimental:
-            title += " (experimental)" if usable else " (experimental — disabled)"
-        header = Gtk.MenuItem(label=title)
+        header = Gtk.MenuItem(label="Power Profile")
         header.set_sensitive(False)
         self._menu.append(header)
+
+        if not profile_names:
+            empty_item = Gtk.MenuItem(label="No power profiles exposed by BIOS")
+            empty_item.set_sensitive(False)
+            self._menu.append(empty_item)
+            return
 
         group = None
         self._profile_items = {}
@@ -1302,49 +1370,20 @@ class GigaMateTrayApp:
         self._high_power_allowed_cache = high_ok
 
         for pid_int in sorted(int(k) for k in profile_names.keys()):
-            pid_str = str(pid_int)
-            entry = profile_names.get(pid_str, {})
+            entry = profile_names.get(pid_int) or profile_names.get(str(pid_int), {})
             label = entry.get("name", f"Profile {pid_int}")
             self._profile_base_labels[pid_int] = label
-            allowed = usable and (high_ok or pid_int not in (2, 3))
-            disp_label = f"{label} (dGPU off)" if (usable and not high_ok and pid_int in (2, 3)) else label
+            allowed = high_ok or pid_int not in (2, 3)
+            disp_label = f"{label} (dGPU off)" if (not high_ok and pid_int in (2, 3)) else label
             item = Gtk.RadioMenuItem(group=group, label=disp_label)
             if group is None:
                 group = item
-            if usable and self._current_acpi_profile == pid_int:
+            if self._current_acpi_profile == pid_int:
                 item.set_active(True)
             item.set_sensitive(allowed)
             item.connect("toggled", self._on_profile_changed, pid_int)
             self._menu.append(item)
             self._profile_items[pid_int] = item
-
-        if experimental and not usable:
-            enable = Gtk.MenuItem(label="Enable experimental profiles…")
-            enable.connect("activate", self._on_enable_experimental)
-            self._menu.append(enable)
-
-    def _on_enable_experimental(self, *args) -> None:
-        """One-time consent dialog for experimental (unconfirmed) profiles."""
-        dlg = Gtk.MessageDialog(
-            transient_for=None, flags=0, message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.YES_NO, text="Enable experimental profiles?")
-        dlg.format_secondary_text(
-            "Profile switching for this model is community-evidenced but "
-            "unconfirmed — it may do nothing. Enable it anyway?\n\n"
-            "You can report what it does with 'gigamate profile report'.")
-        response = dlg.run()
-        dlg.destroy()
-        if response != Gtk.ResponseType.YES:
-            return
-        try:
-            update_config(lambda c: {**c, "experimental_profiles_enabled": True})
-        except Exception:
-            pass
-        try:
-            self._config = load_config()
-        except Exception:
-            pass
-        self._rebuild_menu()
 
     def _append_status_section(self) -> None:
         """Add a single-line live status display (ACPI sensors and/or dGPU state)."""
@@ -1372,7 +1411,7 @@ class GigaMateTrayApp:
         target = menu if menu is not None else self._menu
         # System power-profile sync only makes sense when a usable model
         # profile exists to map from; without one there is nothing to sync.
-        if is_system_power_available() and profile_usable(self._model, self._config):
+        if is_system_power_available() and self._get_discovered_profiles():
             self._sync_power_item = Gtk.CheckMenuItem(label="Sync system power profile")
             self._sync_power_item.set_active(self._sync_system_power)
             self._sync_power_item.connect("toggled", self._on_sync_power_toggled)
@@ -1383,20 +1422,13 @@ class GigaMateTrayApp:
         self._startup_item.connect("toggled", self._on_startup_toggled)
         target.append(self._startup_item)
 
-        reload_item = Gtk.MenuItem(label="Reload profiles")
+        reload_item = Gtk.MenuItem(label="Reload hardware")
         reload_item.connect("activate", self._on_reload)
         target.append(reload_item)
 
         setup_item = Gtk.MenuItem(label="Set up GigaMate…")
         setup_item.connect("activate", self._on_run_setup)
         target.append(setup_item)
-
-        # Offer calibration whenever a keyboard controller was detected but may
-        # not yet be mapped (or to re-calibrate an existing model).
-        if self._detected_vid is not None:
-            calib_item = Gtk.MenuItem(label="Calibrate keyboard...")
-            calib_item.connect("activate", self._on_calibrate_rgb)
-            target.append(calib_item)
 
         target.append(Gtk.SeparatorMenuItem())
         check_item = Gtk.MenuItem(
@@ -1742,7 +1774,6 @@ class GigaMateTrayApp:
         self._acpi_controller = ctrl
         self._acpi_caps = ctrl.capabilities
         self._last_status_text = None
-        self._resolve_model()
         try:
             self._rebuild_menu()
         except Exception:
@@ -1783,10 +1814,9 @@ class GigaMateTrayApp:
                     parts.append(f"{state.duty_cpu}%")
 
                 # Profile
-                if state.profile is not None and self._model is not None \
-                        and self._model.profile.acpi:
-                    profiles = self._model.profile.acpi.profiles
-                    entry = profiles.get(str(state.profile.value), {})
+                if state.profile is not None:
+                    profiles = self._get_discovered_profiles()
+                    entry = profiles.get(state.profile.value) or profiles.get(str(state.profile.value), {})
                     pname = entry.get("name", str(state.profile.value))
                     parts.append(f"Profile: {pname}")
 
@@ -1820,6 +1850,23 @@ class GigaMateTrayApp:
 
         self._sync_status_poll_interval(ac_online, from_timer=_from_timer)
 
+        # Restore idle-dimmed backlight immediately when AC comes online
+        if (
+            self._idle_dimmed
+            and ac_online is True
+            and self._last_ac_online is False
+            and self._config.get("idle_keep_on_ac", False)
+        ):
+            self._on_idle_active()
+
+        # AC / Battery & Follow-System profile automation (timer ticks only, never
+        # re-entrantly inside a manual click or hotkey callback)
+        if _from_timer:
+            self._run_profile_automation(ac_online)
+
+        if ac_online is not None:
+            self._last_ac_online = ac_online
+
         text = "  |  ".join(parts) if parts else "Status: N/A"
 
         # Only touch GTK when the text actually changed (each set is a DBus
@@ -1839,17 +1886,126 @@ class GigaMateTrayApp:
 
         return True  # keep timer alive
 
+    def _mark_profile_synced(self, profile_id: int, grace_sec: float = 4.0) -> None:
+        """Record a GigaMate-initiated profile switch and hold follow_system briefly.
+
+        ``tlp-pd`` spawns detached ``tlp`` asynchronously on ``Set(ActiveProfile)``
+        so ``Get(ActiveProfile)`` can return the previous profile for ~0.5-2 s.
+        Holding ``follow_system`` for a short settle window prevents reacting to
+        that stale value and snapping the profile/RGB back.
+        """
+        from .system_power import DEFAULT_PROFILE_MAP
+
+        mapped = DEFAULT_PROFILE_MAP.get(int(profile_id))
+        if mapped is not None:
+            self._last_seen_system_profile = mapped
+        self._profile_sync_until = time.monotonic() + grace_sec
+
+    def _run_profile_automation(self, ac_online: Optional[bool]) -> None:
+        """Apply AC/Battery or Follow-System power profile automation on transitions."""
+        cfg = load_config()
+        self._config = cfg
+        ac_profile_mode = cfg.get("ac_profile_mode", "off")
+        target: Optional[int] = None
+        sync_sys = True
+
+        if ac_profile_mode == "switch":
+            token = power_config_mtime_token()
+            if token != getattr(self, "_last_power_cfg_token", None) or not hasattr(self, "_cached_power_info"):
+                self._last_power_cfg_token = token
+                self._cached_power_info = detect_power_managers()
+
+            power_info = self._cached_power_info
+            conflicts = power_info.get("conflicts", [])
+            notified = getattr(self, "_notified_ac_conflicts", None)
+            if notified is None:
+                notified = set()
+                self._notified_ac_conflicts = notified
+
+            if conflicts:
+                conflict_ids = {c["id"] for c in conflicts if "id" in c}
+                new_ids = conflict_ids - notified
+                if new_ids:
+                    notified.update(new_ids)
+                    try:
+                        if shutil.which("notify-send"):
+                            subprocess.Popen(
+                                [
+                                    "notify-send",
+                                    "GigaMate — External Power Manager Detected",
+                                    "An external power manager re-enabled AC auto-switching. "
+                                    "OS profile pushes are paused until resolved in Automation.",
+                                ],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                    except Exception:
+                        pass
+            else:
+                notified.clear()
+
+            prev = self._last_ac_online
+            if prev is not None and ac_online is not None and ac_online != prev:
+                target = int(
+                    cfg.get("ac_profile_id", 1)
+                    if ac_online
+                    else cfg.get("battery_profile_id", 0)
+                )
+                has_ext = power_info.get("has_external_ac_switching", False)
+                sync_sys = not has_ext
+        elif ac_profile_mode == "follow_system":
+            try:
+                sys_prof = SystemPowerManager().get_active_profile()
+            except Exception:
+                sys_prof = None
+            if not sys_prof:
+                return
+            now = time.monotonic()
+            if now < getattr(self, "_profile_sync_until", 0.0):
+                if sys_prof == self._last_seen_system_profile:
+                    self._profile_sync_until = 0.0
+                return
+            if self._last_seen_system_profile is None:
+                self._last_seen_system_profile = sys_prof
+                return
+            if sys_prof != self._last_seen_system_profile:
+                self._last_seen_system_profile = sys_prof
+                mapped = SYSTEM_TO_GIGAMATE_PROFILE.get(sys_prof)
+                # Both Performance (2) and Gaming (3) map to system "performance";
+                # never snap an explicit Gaming selection back to Performance.
+                already_matches = (
+                    mapped == self._current_acpi_profile
+                    or (sys_prof == "performance" and self._current_acpi_profile in (2, 3))
+                )
+                if mapped is not None and not already_matches:
+                    target = int(mapped)
+                    sync_sys = False
+
+        if target in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
+            target = None
+
+        if target is not None:
+            try:
+                hardware.apply_profile(target, cfg=cfg, sync_system=sync_sys)
+                self._current_acpi_profile = target
+                item = getattr(self, "_profile_items", {}).get(target)
+                if item is not None:
+                    old_b = self._building
+                    self._building = True
+                    try:
+                        item.set_active(True)
+                    finally:
+                        self._building = old_b
+            except Exception:
+                pass
+
     # ────────────────────────────────────────────
     # Callbacks: RGB
     # ────────────────────────────────────────────
 
     def _get_keyboard(self):
-        """Get USB keyboard device handle."""
-        if self._profile is not None:
-            dev = get_keyboard(
-                vid=self._profile.vid, pid=self._profile.pid, profile=self._profile
-            )
-        elif self._detected_vid and self._detected_pid:
+        """Get HID LampArray keyboard device handle."""
+        if self._detected_vid and self._detected_pid:
             dev = get_keyboard(vid=self._detected_vid, pid=self._detected_pid)
         else:
             dev = get_keyboard()
@@ -1878,23 +2034,23 @@ class GigaMateTrayApp:
     def _retry_keyboard(self) -> bool:
         """Try to re-detect keyboard. Returns False (single-shot timer)."""
         self._keyboard_retry_timer_id = None
-        detected = detect_device()
-        if detected is not None:
+        detected = detect_keyboards()
+        if detected:
             self._no_keyboard = False
             try:
                 self._indicator.set_label("", APP_ID)
             except Exception:
                 pass
-            self._detected_vid, self._detected_pid = detected
-            profile = resolve_profile(self._detected_vid, self._detected_pid)
-            if profile is not None:
-                self._profile = profile
-                self._unsupported = False
-                self._resolve_model()
-                self._init_hotkeys()
-                self._rebuild_menu()
-                self._apply_on_startup()
-                self._init_idle()
+            self._detected_vid, self._detected_pid = detected[0]
+            self._has_lamparray = hardware_supports_lamparray(
+                self._detected_vid, self._detected_pid
+            )
+            self._full_rgb = self._has_lamparray
+            self._unsupported = not self._has_lamparray
+            self._init_hotkeys()
+            self._rebuild_menu()
+            self._apply_on_startup()
+            self._init_idle()
         return False
 
     def _apply_colour(self) -> None:
@@ -1906,22 +2062,42 @@ class GigaMateTrayApp:
         dev = self._get_keyboard()
         if dev is None:
             return
-        if self._current_brightness == 0:
-            set_off(dev, self._profile)
-        else:
-            set_static(dev, self._current_colour, self._current_brightness, self._profile)
+        self._apply_current_rgb(dev)
         self._save_config()
+
+    def _apply_current_rgb(self, dev) -> None:
+        if not getattr(self, "_rgb_enabled", True):
+            set_off(dev)
+            return
+        pct = max(1, getattr(self, "_current_brightness_pct", 100))
+        rgb_hex = self._current_rgb_hex or PALETTE_HEX.get(self._current_colour, "#ffffff")
+        set_rgb(dev, rgb_hex, pct)
 
     def _on_colour_changed(self, item: Gtk.RadioMenuItem, cname: str) -> None:
         if not item.get_active() or self._building:
             return
         self._current_colour = cname
+        self._current_rgb_hex = PALETTE_HEX.get(cname)
+        self._rgb_enabled = True
         self._apply_colour()
 
     def _on_brightness_changed(self, item: Gtk.RadioMenuItem, level: int) -> None:
         if not item.get_active() or self._building:
             return
         self._current_brightness = level
+        self._rgb_enabled = level > 0
+        if level > 0:
+            self._current_brightness_pct = {1: 25, 2: 100}.get(level, 100)
+        self._apply_colour()
+
+    def _on_brightness_pct_changed(self, item: Gtk.RadioMenuItem, pct: int) -> None:
+        if not item.get_active() or self._building:
+            return
+        if pct <= 0:
+            self._rgb_enabled = False
+        else:
+            self._rgb_enabled = True
+            self._current_brightness_pct = pct
         self._apply_colour()
 
     # ────────────────────────────────────────────
@@ -1930,9 +2106,8 @@ class GigaMateTrayApp:
 
     def _update_profile_items_sensitivity(self, gst=None) -> None:
         items = getattr(self, "_profile_items", {})
-        if not items or self._model is None:
+        if not items:
             return
-        usable = profile_usable(self._model, self._config)
         if gst is not None and "high_power_profiles_allowed" in gst:
             high_ok = bool(gst["high_power_profiles_allowed"])
         else:
@@ -1942,9 +2117,9 @@ class GigaMateTrayApp:
         self._high_power_allowed_cache = high_ok
         base_labels = getattr(self, "_profile_base_labels", {})
         for pid, item in items.items():
-            allowed = usable and (high_ok or pid not in (2, 3))
+            allowed = high_ok or pid not in (2, 3)
             base = base_labels.get(pid, f"Profile {pid}")
-            lbl = f"{base} (dGPU off)" if (usable and not high_ok and pid in (2, 3)) else base
+            lbl = f"{base} (dGPU off)" if (not high_ok and pid in (2, 3)) else base
             try:
                 item.set_sensitive(allowed)
                 item.set_label(lbl)
@@ -1957,8 +2132,6 @@ class GigaMateTrayApp:
             return
         if self._acpi_controller is None:
             return
-        if not profile_usable(self._model, self._config):
-            return
         if profile_id in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
             prev = self._current_acpi_profile
             if prev in self._profile_items:
@@ -1970,11 +2143,12 @@ class GigaMateTrayApp:
                     self._building = old_b
             return
         try:
-            self._acpi_controller.set_profile(FanProfile(profile_id))
+            hardware.apply_profile(
+                profile_id, cfg=None, sync_system=self._sync_system_power
+            )
             self._current_acpi_profile = profile_id
             if self._sync_system_power:
-                sync_system_power(profile_id)
-            self._save_config()
+                self._mark_profile_synced(profile_id)
             self._update_status()
         except Exception:
             pass
@@ -1983,12 +2157,12 @@ class GigaMateTrayApp:
         """Handle hardware hotkey (e.g. the Mode key): cycle profile and show OSD."""
         if self._acpi_controller is None or not self._acpi_controller.available:
             return
-        if not profile_usable(self._model, self._config):
-            return
 
         # Get available profiles
-        pids = sorted(int(k) for k in self._model.profile.acpi.profiles.keys())
-        p_data = self._model.profile.acpi.profiles
+        p_data = self._get_discovered_profiles()
+        if not p_data:
+            return
+        pids = sorted(int(k) for k in p_data.keys())
         if not dgpu_gate.high_power_profiles_allowed():
             filtered = [p for p in pids if p not in (2, 3)]
             if filtered:
@@ -2013,11 +2187,12 @@ class GigaMateTrayApp:
         fp = FanProfile(next_profile_id)
 
         try:
-            if self._acpi_controller.set_profile(fp):
+            if hardware.apply_profile(
+                next_profile_id, cfg=None, sync_system=self._sync_system_power
+            ):
                 self._current_acpi_profile = next_profile_id
                 if self._sync_system_power:
-                    sync_system_power(next_profile_id)
-                self._save_config()
+                    self._mark_profile_synced(next_profile_id)
 
                 # Update the active RadioMenuItem in GUI without triggering redundant callbacks
                 item = self._profile_items.get(next_profile_id)
@@ -2055,158 +2230,36 @@ class GigaMateTrayApp:
         self._startup_apply = item.get_active()
         self._save_config()
 
-    def _on_calibrate_rgb(self, *args) -> None:
-        """Launch keyboard RGB calibration in a terminal."""
-        from .updates import detect_default_terminal
-
-        inner = "gigamate calibrate rgb; exec bash"
-        dashdash = ("gnome-terminal", "mate-terminal", "ptyxis")
-        argv = None
-
-        try:
-            found = detect_default_terminal()
-        except Exception:
-            found = None
-        if found:
-            binary, exec_arg = found
-            if os.path.basename(binary).lower() in dashdash:
-                argv = [binary, "--", "bash", "-c", inner]
-            else:
-                argv = [binary, exec_arg, "bash", "-c", inner]
-
-        if argv is None:
-            # Fallback: pick an installed terminal (by availability, not by a
-            # fragile desktop-name substring match).
-            desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-            preferred = None
-            for key, term in (("kde", "konsole"), ("plasma", "konsole"),
-                              ("gnome", "gnome-terminal"), ("xfce", "xfce4-terminal"),
-                              ("lxde", "lxterminal"), ("lxqt", "lxterminal")):
-                if key in desktop:
-                    preferred = term
-                    break
-            candidates = ["konsole", "gnome-terminal", "xfce4-terminal",
-                          "lxterminal", "xterm", "x-terminal-emulator"]
-            if preferred:
-                candidates.insert(0, preferred)
-            for term in candidates:
-                path = shutil.which(term)
-                if not path:
-                    continue
-                if os.path.basename(path).lower() in dashdash:
-                    argv = [path, "--", "bash", "-c", inner]
-                else:
-                    argv = [path, "-e", "bash", "-c", inner]
-                break
-
-        if argv is None:
-            self._show_calibrate_fallback()
-            return
-        try:
-            pid, *_ = GLib.spawn_async(
-                argv,
-                flags=GLib.SpawnFlags.SEARCH_PATH | GLib.SpawnFlags.DO_NOT_REAP_CHILD,
-            )
-            GLib.child_watch_add(pid, self._on_calibrate_done)
-        except GLib.GError:
-            self._show_calibrate_fallback()
-
-    def _on_calibrate_done(self, pid: int, status: int) -> None:
-        if status == 0:
-            self._on_reload()
-
-    def _show_calibrate_fallback(self) -> None:
-        dlg = Gtk.MessageDialog(
-            transient_for=None,
-            flags=0,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK,
-            text="Calibration launcher",
-        )
-        dlg.format_secondary_text(
-            "Could not open a terminal automatically.\n\n"
-            "Please open a terminal and run:\n"
-            "  gigamate calibrate rgb\n\n"
-            "Then click 'Reload profiles' in the tray menu."
-        )
-        dlg.run()
-        dlg.destroy()
-
     def _on_reload(self, *args) -> None:
-        """Reload profiles and re-detect hardware."""
-        # Re-detect keyboard
-        if self._no_keyboard:
-            detected = detect_device()
-            if detected is None:
-                return
-            self._no_keyboard = False
-            self._detected_vid, self._detected_pid = detected
-
-        if self._unsupported or self._no_keyboard:
-            detected = detect_device()
-            if detected is not None:
-                self._detected_vid, self._detected_pid = detected
-
-        profile = resolve_profile(self._detected_vid, self._detected_pid) \
-            if self._detected_vid else resolve_profile()
-
-        if profile is not None:
-            self._profile = profile
-            self._unsupported = False
-            self._no_keyboard = False
-            colours = self._profile.colour_names
-            if colours:
-                self._current_colour = self._config.get("colour", colours[0])
-            # Re-init ACPI & Hotkeys (profile may have changed)
-            self._init_acpi()
-            self._resolve_model()
-            self._init_hotkeys()
-            self._rebuild_menu()
+        """Re-detect hardware and rebuild menu."""
+        self._detect_on_startup()
+        self._init_acpi()
+        self._init_hotkeys()
+        self._rebuild_menu()
+        if not self._no_keyboard:
             try:
                 self._indicator.set_label("", APP_ID)
             except Exception:
                 pass
-            self._init_idle()
-        elif self._unsupported:
-            # Re-init ACPI anyway (may work without profile)
-            if self._acpi_controller is None:
-                ctrl = AcpiController()
-                if ctrl.available:
-                    self._acpi_controller = ctrl
-                    self._acpi_caps = ctrl.capabilities
-            self._resolve_model()
-            self._init_hotkeys()
-            self._rebuild_menu()
-        else:
-            self._profile = None
-            self._unsupported = True
-            self._acpi_controller = None
-            self._acpi_caps = None
-            self._model = None
-            self._init_hotkeys()
-            self._rebuild_menu()
-
+        self._init_idle()
         self._apply_on_startup()
 
     def _on_about(self, *args) -> None:
         """Show the About dialog."""
         version = __import__('gigamate', fromlist=['']).__version__
 
-        dmi_model = get_dmi_product_name()
-
-        if self._profile is not None:
+        if self._has_lamparray:
             secondary = (
                 f"Version {version}\n\n"
-                f"Profile: {self._profile.name}\n\n"
+                "Keyboard: HID LampArray\n\n"
                 "GigaMate — Gigabyte laptop management for Linux.\n"
                 "Keyboard RGB, fan monitoring, power profiles.\n\n"
                 "MIT License - use at your own risk."
             )
         elif self._acpi_controller is not None and self._acpi_controller.available:
-            model_name = dmi_model or "Gigabyte Laptop"
             secondary = (
                 f"Version {version}\n\n"
-                f"Model: {model_name} (ACPI)\n\n"
+                "ACPI hardware detected\n\n"
                 "GigaMate — Gigabyte laptop management for Linux.\n"
                 "Fan monitoring, power profiles, and GPU management.\n\n"
                 "MIT License - use at your own risk."
@@ -2214,13 +2267,10 @@ class GigaMateTrayApp:
         elif self._unsupported:
             vid = self._detected_vid or 0
             pid = self._detected_pid or 0
-            model_str = f"{dmi_model}\n" if dmi_model else ""
             secondary = (
                 f"Version {version}\n\n"
-                f"{model_str}"
-                f"Your keyboard (VID={vid:04X} PID={pid:04X})\n"
-                "isn't in our profile database yet.\n\n"
-                "Run Calibrate... to add support."
+                f"Keyboard (VID={vid:04X} PID={pid:04X}) does not expose HID LampArray.\n"
+                "For pre-2025 legacy 0x08 keyboards, use GigaMate v4.5.x.\n"
             )
         else:
             secondary = (
@@ -2263,8 +2313,7 @@ class GigaMateTrayApp:
             try:
                 dev = self._get_keyboard()
                 if dev is not None and self._current_brightness != 0:
-                    set_static(dev, self._current_colour,
-                               self._current_brightness, self._profile)
+                    self._apply_current_rgb(dev)
             except Exception:
                 pass
         self._stop_idle()
@@ -2311,6 +2360,9 @@ class GigaMateTrayApp:
             pairs = (
                 ("colour", self._current_colour, self._config.get("colour")),
                 ("brightness", self._current_brightness, self._config.get("brightness")),
+                ("rgb_hex", getattr(self, "_current_rgb_hex", self._config.get("rgb_hex")), self._config.get("rgb_hex")),
+                ("brightness_pct", getattr(self, "_current_brightness_pct", self._config.get("brightness_pct")), self._config.get("brightness_pct")),
+                ("rgb_enabled", getattr(self, "_rgb_enabled", self._config.get("rgb_enabled", True)), self._config.get("rgb_enabled", True)),
                 ("startup_apply", self._startup_apply, self._config.get("startup_apply")),
                 ("sync_system_power", self._sync_system_power, self._config.get("sync_system_power")),
                 ("idle_off_enabled", self._idle_enabled, self._config.get("idle_off_enabled")),
