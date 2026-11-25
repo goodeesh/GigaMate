@@ -713,6 +713,9 @@ def test_nvidia_sync_power_skips_powerd_when_dgpu_gate_pauses_tuning(tmp_path):
 
 
 def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power():
+    import pytest
+
+    pytest.importorskip("gi")
     from gigamate import dgpu_gate, tray as tray_module
 
     app = tray_module.GigaMateTrayApp.__new__(tray_module.GigaMateTrayApp)

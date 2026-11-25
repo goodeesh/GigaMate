@@ -1026,8 +1026,15 @@ class DashboardPage(QWidget):
         self.power_battery_notice.setVisible(show_bat_notice)
 
         gpu_gated = bool(gpu is not None and (gpu.gated_off or gpu.status == "gated_off"))
-        enabled_map = enabled_acpi_profiles(self._discovered_profiles(), self._config())
-        enabled_ids = tuple(sorted(enabled_map.keys()))
+        discovered = self._discovered_profiles()
+        if discovered:
+            enabled_map = enabled_acpi_profiles(discovered, self._config())
+            enabled_ids = tuple(sorted(enabled_map.keys()))
+            filtered_profiles = [r for r in prof_list if r.profile_id in enabled_map]
+        else:
+            disabled_ids = {int(x) for x in (self._config().get("disabled_profiles") or [])}
+            filtered_profiles = [r for r in prof_list if r.profile_id not in disabled_ids]
+            enabled_ids = tuple(sorted(r.profile_id for r in filtered_profiles))
         matrix_key = (
             active_prof_id,
             limits.on_battery,
@@ -1042,7 +1049,6 @@ class DashboardPage(QWidget):
             return
         self._last_limits_key = matrix_key
 
-        filtered_profiles = [r for r in prof_list if r.profile_id in enabled_map]
         if filtered_profiles:
             self._rebuild_compare_matrix(filtered_profiles, active_prof_id, gpu_gated=gpu_gated)
 

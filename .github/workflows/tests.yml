@@ -47,20 +47,6 @@ jobs:
         run: |
           /usr/bin/python3 -c "import gi; gi.require_version('Gtk','3.0'); import sys; sys.path.insert(0,'src'); import gigamate.tray; print('tray imports OK')"
 
-  validate-profiles:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install package and test deps
-        run: |
-          pip install pytest
-          pip install -e .
-      - name: Validate all built-in profiles
-        run: python -m pytest tests/ -v -k "TestValidate"
-
   lint:
     runs-on: ubuntu-latest
     steps:

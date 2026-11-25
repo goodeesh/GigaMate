@@ -112,6 +112,8 @@ def test_detect_power_managers_with_tlp_and_powerdevil(tmp_path, monkeypatch):
 def test_follow_system_ignores_stale_tlp_pd_during_settle_window(monkeypatch):
     """After GigaMate switches profile, follow_system must not revert on stale tlp-pd Get()."""
     from unittest.mock import MagicMock, patch
+    import pytest
+    pytest.importorskip("gi")
     from gigamate import tray as tray_mod
 
     app = tray_mod.GigaMateTrayApp.__new__(tray_mod.GigaMateTrayApp)
@@ -273,6 +275,8 @@ def test_tlp_deactivate_and_restore_pkexec(tmp_path, monkeypatch):
 def test_tray_dgpu_gate_and_one_shot_drift_notification():
     """Tray _run_profile_automation blocks high-power profile when dGPU gated and notifies once on drift."""
     from unittest.mock import MagicMock, patch
+    import pytest
+    pytest.importorskip("gi")
     from gigamate import tray as tray_mod
 
     app = tray_mod.GigaMateTrayApp.__new__(tray_mod.GigaMateTrayApp)

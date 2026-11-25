@@ -2132,7 +2132,7 @@ def test_rgb_brightness_debounce_persists_and_apply_profile_preserves(qapp):
 def test_tray_backlight_full_rgb_persists_brightness_atomically(qapp):
     from unittest.mock import MagicMock
     from gigamate.config import load as load_config
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
 
     tray = GigaMateTrayApp()
     tray._building = False
@@ -2168,7 +2168,9 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
     page, ctrl = _dashboard_with_profiles(caps, profiles, qapp)
     assert sorted(page._profile_buttons.keys()) == [0, 1, 2, 3]
 
-    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles):
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.settings_page.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.dashboard_page.discover_acpi_profiles", return_value=profiles):
         settings_page = SettingsPage()
         # Toggle off Gaming (3)
         settings_page._profile_enable_checks[3].setChecked(False)
@@ -2205,8 +2207,14 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
 def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
     from unittest.mock import MagicMock, patch
     from gigamate.config import update_config
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
 
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
     update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
     with patch("gigamate.tray.dgpu_gate.high_power_profiles_allowed", return_value=True), \
          patch("gigamate.tray.hardware.apply_profile") as mock_apply:
@@ -2214,6 +2222,7 @@ def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
         tray._acpi_controller = MagicMock()
         tray._acpi_controller.available = True
         tray._current_acpi_profile = 1
+        tray._get_discovered_profiles = MagicMock(return_value=discovered)
 
         tray._on_hotkey_cycle_profile()
         mock_apply.assert_called_once()
@@ -2223,7 +2232,7 @@ def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
 def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
     from unittest.mock import MagicMock, patch
     from gigamate.config import update_config
-    from gigamate.tray import GigaMateTrayApp
+    GigaMateTrayApp = _import_tray_app()
 
     discovered = {
         0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
