@@ -306,6 +306,10 @@ class GigaMateTrayApp:
             return
         self._last_config_mtime = mtime
 
+        old_cfg = getattr(self, "_config", {}) or {}
+        old_custom_hotkeys = old_cfg.get("custom_hotkeys")
+        old_hotkey_overrides = old_cfg.get("hotkey_overrides")
+
         new_cfg = load_config()
         self._config = new_cfg
 
@@ -393,6 +397,12 @@ class GigaMateTrayApp:
         if new_disabled != getattr(self, "_disabled_profiles", []):
             self._disabled_profiles = new_disabled
             self._build_menu()
+
+        if (
+            new_cfg.get("custom_hotkeys") != old_custom_hotkeys
+            or new_cfg.get("hotkey_overrides") != old_hotkey_overrides
+        ):
+            self._init_hotkeys()
 
     # ────────────────────────────────────────────
     # Keyboard idle auto-off
@@ -1902,7 +1912,7 @@ class GigaMateTrayApp:
                     pass
             if self._indicator is not None:
                 try:
-                    self._indicator.set_title(f"GigaMate 3.0\n{text}")
+                    self._indicator.set_title(f"GigaMate\n{text}")
                 except Exception:
                     pass
 
@@ -2013,6 +2023,37 @@ class GigaMateTrayApp:
                     target = sorted(int(k) for k in enabled.keys())[0]
                 else:
                     target = None
+
+        if ac_online is False:
+            self._pending_ac_profile_target = None
+            if target in (2, 3) and dgpu_gate.configured_mode() in (
+                dgpu_gate.MODE_AUTO,
+                dgpu_gate.MODE_ECO,
+            ):
+                enabled = enabled_acpi_profiles(self._get_discovered_profiles(), cfg)
+                if 0 in enabled:
+                    target = 0
+                elif 1 in enabled:
+                    target = 1
+                else:
+                    safe = [int(k) for k in sorted(enabled.keys()) if int(k) not in (2, 3)]
+                    target = safe[0] if safe else None
+        elif ac_online is True:
+            pending = getattr(self, "_pending_ac_profile_target", None)
+            if (
+                ac_profile_mode == "switch"
+                and target in (2, 3)
+                and not dgpu_gate.high_power_profiles_allowed()
+            ):
+                self._pending_ac_profile_target = (target, sync_sys, time.monotonic() + 20.0)
+                target = None
+            elif target is None and pending is not None:
+                p_target, p_sync, p_deadline = pending
+                if time.monotonic() > p_deadline:
+                    self._pending_ac_profile_target = None
+                elif dgpu_gate.high_power_profiles_allowed():
+                    self._pending_ac_profile_target = None
+                    target, sync_sys = p_target, p_sync
 
         if target in (2, 3) and not dgpu_gate.high_power_profiles_allowed():
             target = None

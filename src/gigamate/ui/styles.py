@@ -6,12 +6,18 @@ using Warm Obsidian tonal surfaces, pill controls, and crisp typography.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from ..paths import resolve_icon
-from .theme import THEME, rgba
+from .theme import THEME, accent_tokens, rgba
 
 _CHECKBOX_ICON_URL = resolve_icon("checkbox-checked").replace("\\", "/")
 
-DARK_THEME = f"""
+
+def build_stylesheet(accent_hex: Optional[str] = None) -> str:
+    """Return the Aero Instrument QSS stylesheet for the given accent color."""
+    t = accent_tokens(accent_hex or THEME.primary)
+    return f"""
 /* ────────────────────────────────────────────
  * Base Window, Dialogs & Controls
  * ──────────────────────────────────────────── */
@@ -99,7 +105,12 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 
 QWidget#Sidebar {{
     background-color: {THEME.surface_container_low};
-    border-right: 1px solid #24201C;
+    border-right: 1px solid {THEME.outline_variant};
+}}
+
+QFrame#TopInstrumentBar {{
+    background-color: {THEME.surface_container_low};
+    border-bottom: 1px solid {THEME.outline_variant};
 }}
 
 QWidget#BrandHeader {{
@@ -114,7 +125,7 @@ QLabel#AppTitle {{
 }}
 
 QLabel#AppSubtitle {{
-    color: {THEME.primary};
+    color: {t['accent']};
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.5px;
@@ -124,30 +135,32 @@ QLabel#AppSubtitle {{
 QPushButton.NavButton {{
     background-color: transparent;
     color: {THEME.on_surface_variant};
-    text-align: left;
-    min-height: 20px;
-    padding: 9px 14px;
-    border-radius: 17px;
-    font-size: 13px;
+    text-align: center;
+    min-height: 54px;
+    padding: 0px;
+    border-radius: 12px;
+    font-size: 11px;
     font-weight: 600;
-    margin: 2px 10px;
-    border: none;
+    margin: 2px 2px;
+    border: 1px solid transparent;
 }}
 
 QPushButton.NavButton:hover {{
     background-color: {rgba(THEME.on_surface, 0.06)};
+    border: 1px solid {THEME.outline_variant};
     color: {THEME.on_surface};
 }}
 
 QPushButton.NavButton:checked {{
-    background-color: {THEME.primary_container};
-    color: {THEME.on_primary_container};
-    font-weight: 600;
+    background-color: {t['accent_container']};
+    color: {t['on_accent_container']};
+    border: 1px solid {t['accent']};
+    font-weight: 700;
 }}
 
 QWidget#SidebarFooter {{
     border-top: 1px solid {THEME.divider};
-    padding: 14px 16px;
+    padding: 8px 0px 0px 0px;
     background-color: transparent;
 }}
 
@@ -157,15 +170,32 @@ QWidget#SidebarFooter {{
 
 QFrame.Card, QFrame.M3Card {{
     background-color: {THEME.surface_container};
-    border: none;
+    border: 1px solid {THEME.outline_variant};
     border-radius: {THEME.radius_card}px;
     padding: 0px;
 }}
 
 QFrame.MetricTile, QFrame.StatusChip {{
     background-color: {THEME.surface_container_high};
-    border: none;
+    border: 1px solid {THEME.outline_variant};
     border-radius: {THEME.radius_tile}px;
+}}
+
+QPushButton.LinkPillButton {{
+    background-color: {THEME.surface_container_high};
+    color: {THEME.on_surface_variant};
+    border: 1px solid {THEME.outline_variant};
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-family: {THEME.mono_family};
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+QPushButton.LinkPillButton:hover {{
+    background-color: {THEME.surface_container_highest};
+    color: {THEME.on_surface};
+    border-color: {t['accent']};
 }}
 
 QLabel.CardTitle {{
@@ -250,14 +280,14 @@ QPushButton.M3SegmentButton:hover {{
 }}
 
 QPushButton.M3SegmentButton:checked {{
-    background-color: {THEME.primary_container};
-    color: {THEME.on_primary_container};
+    background-color: {t['accent_container']};
+    color: {t['on_accent_container']};
     font-weight: 600;
 }}
 
 QPushButton.M3SegmentButton:checked:hover {{
-    background-color: {THEME.primary_hover};
-    color: {THEME.on_primary_container};
+    background-color: {t['accent_soft']};
+    color: {t['on_accent_container']};
 }}
 
 QFrame.M3SegmentedBar:disabled {{
@@ -273,7 +303,7 @@ QPushButton.M3SegmentButton[locked="true"] {{
 }}
 
 QPushButton.M3SegmentButton:checked:disabled {{
-    background-color: #2B201A;
+    background-color: {THEME.surface_container_highest};
     color: {THEME.on_surface_disabled};
 }}
 
@@ -306,16 +336,16 @@ QPushButton:disabled {{
 }}
 
 QPushButton.PrimaryButton {{
-    background-color: {THEME.accent_cta};
-    color: {THEME.on_accent_cta};
+    background-color: {t['accent']};
+    color: {t['on_accent']};
 }}
 
 QPushButton.PrimaryButton:hover {{
-    background-color: {THEME.accent_cta_hover};
+    background-color: {t['accent_hover']};
 }}
 
 QPushButton.PrimaryButton:pressed {{
-    background-color: {THEME.accent_cta_pressed};
+    background-color: {t['accent_pressed']};
 }}
 
 QPushButton.PrimaryButton:disabled {{
@@ -325,12 +355,12 @@ QPushButton.PrimaryButton:disabled {{
 }}
 
 QPushButton.TonalButton {{
-    background-color: {THEME.primary_container};
-    color: {THEME.on_primary_container};
+    background-color: {t['accent_container']};
+    color: {t['on_accent_container']};
 }}
 
 QPushButton.TonalButton:hover {{
-    background-color: {THEME.primary_hover};
+    background-color: {t['accent_soft']};
 }}
 
 QPushButton.TonalButton:disabled {{
@@ -423,9 +453,9 @@ QPushButton.SegmentButton:hover {{
 QPushButton.PresetButton:checked,
 QPushButton.ProfileButton:checked,
 QPushButton.SegmentButton:checked {{
-    background-color: {THEME.primary_container};
-    color: {THEME.on_primary_container};
-    border: 1px solid {THEME.primary};
+    background-color: {t['accent_container']};
+    color: {t['on_accent_container']};
+    border: 1px solid {t['accent']};
     font-weight: 600;
 }}
 
@@ -436,7 +466,7 @@ QPushButton.PresetButton:disabled {{
 }}
 
 QPushButton.PresetButton:checked:disabled {{
-    background-color: #2B201A;
+    background-color: {THEME.surface_container_highest};
     color: {THEME.on_surface_disabled};
     border-color: {THEME.divider};
 }}
@@ -471,7 +501,7 @@ QSlider::groove:horizontal {{
 }}
 
 QSlider::sub-page:horizontal {{
-    background: {THEME.accent_cta};
+    background: {t['accent']};
     height: 6px;
     border-radius: 3px;
 }}
@@ -481,7 +511,7 @@ QSlider::sub-page:horizontal:disabled {{
 }}
 
 QSlider::handle:horizontal {{
-    background: {THEME.primary};
+    background: {t['accent']};
     border: none;
     width: 18px;
     height: 18px;
@@ -526,9 +556,9 @@ QLabel.ValueReadoutPill {{
     color: {THEME.on_surface};
     border: 1px solid {THEME.outline_variant};
     border-radius: 10px;
-    padding: 5px 12px;
+    padding: 4px 10px;
     font-family: {THEME.mono_family};
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
 }}
 
@@ -537,8 +567,8 @@ QComboBox QAbstractItemView {{
     color: {THEME.on_surface};
     border: 1px solid {THEME.outline_variant};
     border-radius: {THEME.radius_control}px;
-    selection-background-color: {THEME.primary_container};
-    selection-color: {THEME.on_primary_container};
+    selection-background-color: {t['accent_container']};
+    selection-color: {t['on_accent_container']};
     padding: 4px;
 }}
 
@@ -556,8 +586,8 @@ QCheckBox::indicator {{
 }}
 
 QCheckBox::indicator:checked {{
-    background-color: {THEME.accent_cta};
-    border-color: {THEME.accent_cta};
+    background-color: {t['accent']};
+    border-color: {t['accent']};
     image: url("{_CHECKBOX_ICON_URL}");
 }}
 
@@ -577,15 +607,19 @@ QToolTip {{
 """
 
 
+DARK_THEME = build_stylesheet()
+
+
 def dialog_stylesheet() -> str:
     """Return the Warm Obsidian stylesheet for standalone dialogs."""
     return DARK_THEME
 
 
-def build_dark_palette():
+def build_dark_palette(accent_hex: Optional[str] = None):
     """Return the Warm Obsidian :class:`QPalette` that backs the stylesheet."""
     from PyQt6.QtGui import QColor, QPalette
 
+    t = accent_tokens(accent_hex or THEME.primary)
     bg = QColor(THEME.surface)
     surface = QColor(THEME.surface_container)
     text = QColor(THEME.on_surface)
@@ -600,9 +634,9 @@ def build_dark_palette():
         QPalette.ColorRole.Text: text,
         QPalette.ColorRole.Button: QColor(THEME.surface_container_high),
         QPalette.ColorRole.ButtonText: text,
-        QPalette.ColorRole.BrightText: QColor(THEME.accent_cta),
-        QPalette.ColorRole.Link: QColor(THEME.primary),
-        QPalette.ColorRole.Highlight: QColor(THEME.accent_cta),
+        QPalette.ColorRole.BrightText: QColor(t['accent']),
+        QPalette.ColorRole.Link: QColor(t['accent']),
+        QPalette.ColorRole.Highlight: QColor(t['accent']),
         QPalette.ColorRole.HighlightedText: QColor("#FFFFFF"),
         QPalette.ColorRole.ToolTipBase: QColor(THEME.surface_container_highest),
         QPalette.ColorRole.ToolTipText: text,
@@ -637,7 +671,7 @@ def build_dark_palette():
     return palette
 
 
-def apply_theme(app) -> None:
+def apply_theme(app, accent_hex: Optional[str] = None) -> None:
     """Apply GigaMate's Warm Obsidian M3 theme independently of desktop settings."""
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QStyleFactory
@@ -651,5 +685,5 @@ def apply_theme(app) -> None:
     if set_color_scheme is not None:
         set_color_scheme(Qt.ColorScheme.Dark)
 
-    app.setPalette(build_dark_palette())
-    app.setStyleSheet(DARK_THEME)
+    app.setPalette(build_dark_palette(accent_hex))
+    app.setStyleSheet(build_stylesheet(accent_hex))

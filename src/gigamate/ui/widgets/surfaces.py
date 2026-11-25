@@ -169,6 +169,11 @@ class M3Banner(QFrame):
 
         self.set_tone(tone, icon=icon)
 
+    def set_body(self, text: str) -> None:
+        """Update banner body copy and toggle visibility based on non-empty text."""
+        self.body_lbl.setText(text)
+        self.body_lbl.setVisible(bool(text))
+
     def set_tone(self, tone: str, icon: Optional[str] = None) -> None:
         self._tone = tone
         if icon is not None:

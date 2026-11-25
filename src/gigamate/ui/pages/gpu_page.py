@@ -29,7 +29,7 @@ import threading
 import time
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -48,23 +48,29 @@ from ...gpu import get_gpu_state, gpu_status_text
 from .. import icons
 from ..theme import THEME
 from ..widgets import (
+    LinkPillButton,
     M3Card,
     M3IconHelpButton,
     M3PageHeader,
+    M3ResponsiveGrid,
     M3SegmentButton,
     M3SegmentedBar,
     M3Slider,
     M3StatusPill,
+    VfCurveWidget,
 )
 
 
 class GpuPage(QWidget):
     """dGPU undervolt, max-clock and memory-clock controls (apply only awake)."""
 
+    navigate_requested = pyqtSignal(str)
     _POLL_TICKS = 8  # refresh the applied state roughly every ~12 s (8 * 1.5 s)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._accent_hex = THEME.primary
+        self._woke_from_auto = False
         self._tick_count = 0
         self._hw: dict = {}
         self._observed_ceiling = 0
@@ -203,67 +209,112 @@ class GpuPage(QWidget):
             self._read_published()
         self._refresh()
 
+    def set_accent(self, accent_hex: str) -> None:
+        self._accent_hex = accent_hex
+        self._update_vf_curve()
+        if hasattr(self, "apply_bar"):
+            self._update_apply_bar_style(dirty=bool(self._staged_controls()) and not self._is_gated)
+
+    def _update_vf_curve(self) -> None:
+        if not hasattr(self, "vf_curve"):
+            return
+        max_clk = (
+            self.max_slider.value()
+            if self.max_slider.value() < self._observed_ceiling
+            else None
+        )
+        self.vf_curve.set_curve(
+            self.uv_slider.value(),
+            max_clk,
+            self._observed_ceiling,
+            self._accent_hex,
+        )
+
     # ── UI ──
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(16)
-        layout.addWidget(
-            M3PageHeader(
-                "GPU Tuning",
-                "Discrete GPU power gating & sleep-aware NVIDIA clock tuning",
-            )
-        )
-        layout.addWidget(self._build_state_card())
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(12)
+
+        header = M3PageHeader("GPU", "Power gate & sleep-aware NVIDIA V/F tuning")
+        pills_box = QWidget()
+        pills_row = QHBoxLayout(pills_box)
+        pills_row.setContentsMargins(0, 0, 0, 0)
+        pills_row.setSpacing(8)
+        self.auto_gate_link_pill = LinkPillButton("Battery Auto-Gate: OFF ↗", "automation:dgpu_gate")
+        self.auto_gate_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        self.boot_apply_link_pill = LinkPillButton("Boot Apply: ON ↗", "automation:boot_apply")
+        self.boot_apply_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        pills_row.addWidget(self.auto_gate_link_pill)
+        pills_row.addWidget(self.boot_apply_link_pill)
+        header.set_trailing_widget(pills_box)
+        layout.addWidget(header)
+
         layout.addWidget(self._build_power_gate_card())
         layout.addWidget(self._build_core_clock_card())
-        layout.addWidget(self._build_mem_clock_card())
         layout.addWidget(self._build_apply_bar())
         layout.addStretch()
 
     def _build_power_gate_card(self) -> M3Card:
         self.power_gate_card = M3Card()
         box = QVBoxLayout(self.power_gate_card)
-        box.setContentsMargins(20, 18, 20, 18)
-        box.setSpacing(12)
+        box.setContentsMargins(18, 16, 18, 16)
+        box.setSpacing(10)
 
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
-        title = QLabel("dGPU Power Gate (AI Power Gear III)")
-        title.setProperty("class", "CardTitle")
-        hdr.addWidget(title)
-        self.gate_exp_badge = M3StatusPill("Experimental", tone="warning")
+        self._gpu_icon_lbl = QLabel()
+        self._gpu_icon_lbl.setFixedSize(18, 18)
+        self._gpu_icon_lbl.setPixmap(icons.render_icon_pixmap("gpu", color=THEME.primary, size=18))
+        self._gpu_icon_lbl.setStyleSheet("background: transparent;")
+        hdr.addWidget(self._gpu_icon_lbl)
+
+        t = QLabel("DISCRETE GPU")
+        t.setProperty("class", "SectionLabel")
+        hdr.addWidget(t)
+
+        self.gpu_state_lbl = QLabel("—")
+        self.gpu_state_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+        )
+        hdr.addWidget(self.gpu_state_lbl)
+
+        self.gpu_meta_lbl = M3StatusPill("", tone="neutral")
+        self.gpu_meta_lbl.setVisible(False)
+        hdr.addWidget(self.gpu_meta_lbl)
+
+        self.gate_exp_badge = M3StatusPill("Auto-discovered ACPI", tone="success")
         self.gate_exp_badge.setVisible(False)
         hdr.addWidget(self.gate_exp_badge)
+
         hdr.addStretch()
         self.gate_rail_pill = M3StatusPill("", tone="neutral")
         hdr.addWidget(self.gate_rail_pill)
         box.addLayout(hdr)
 
-        desc = QLabel(
-            "Cut the discrete GPU power rail via ACPI and remove its PCI device "
-            "(~0 W draw); saved tuning re-applies automatically on wake."
+        self.gpu_holders_lbl = QLabel("")
+        self.gpu_holders_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
         )
-        desc.setProperty("class", "CardSubtitle")
-        desc.setWordWrap(True)
-        box.addWidget(desc)
+        self.gpu_holders_lbl.setWordWrap(True)
+        self.gpu_holders_lbl.setVisible(False)
+        box.addWidget(self.gpu_holders_lbl)
 
         self.gate_bar = M3SegmentedBar()
         self.gate_btn_group = QButtonGroup(self)
         self.gate_btn_group.setExclusive(True)
         for mode_key, label, tip in (
-            ("optimus", "Optimus", "Default: kernel RTD3 runtime PM manages D3cold"),
-            ("eco", "ECO (dGPU Off)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
-            ("auto", "Auto (Battery)", "Prompt to gate off when AC unplugs; restore automatically on AC"),
+            ("optimus", "dGPU On · Optimus", "Default: kernel RTD3 runtime PM manages D3cold"),
+            ("eco", "dGPU Off · Battery Only (~0 W)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
         ):
-            btn = self.gate_bar.add_segment(label, tooltip=tip, checkable=True, min_height=40)
+            btn = self.gate_bar.add_segment(label, tooltip=tip, checkable=True, min_height=38)
             btn.clicked.connect(lambda _checked=False, m=mode_key: self._on_gate_mode_clicked(m))
             self.gate_btn_group.addButton(btn)
             self._gate_buttons[mode_key] = btn
         box.addWidget(self.gate_bar)
 
         self.gate_info_lbl = QLabel(
-            "Optimus: runtime D3cold  ·  ECO: rail off (~0 W)  ·  Auto: prompt on unplug, restore on AC"
+            "Optimus: runtime D3cold  ·  Battery Only: rail off (~0 W); saved tuning re-applies on wake"
         )
         self.gate_info_lbl.setStyleSheet(
             f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
@@ -316,54 +367,16 @@ class GpuPage(QWidget):
         self._sync_power_gate_card(recheck_supported=True)
         return self.power_gate_card
 
-    def _build_state_card(self) -> M3Card:
-        state_card = M3Card()
-        sc = QVBoxLayout(state_card)
-        sc.setContentsMargins(18, 12, 18, 12)
-        sc.setSpacing(6)
-
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        self._gpu_icon_lbl = QLabel()
-        self._gpu_icon_lbl.setFixedSize(18, 18)
-        self._gpu_icon_lbl.setPixmap(icons.render_icon_pixmap("gpu", color=THEME.primary, size=18))
-        self._gpu_icon_lbl.setStyleSheet("background: transparent;")
-        top.addWidget(self._gpu_icon_lbl)
-
-        t = QLabel("DISCRETE GPU")
-        t.setProperty("class", "SectionLabel")
-        top.addWidget(t)
-
-        self.gpu_state_lbl = QLabel("—")
-        self.gpu_state_lbl.setStyleSheet(
-            f"color: {THEME.on_surface}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
-        )
-        top.addWidget(self.gpu_state_lbl)
-        top.addStretch()
-
-        self.gpu_meta_lbl = M3StatusPill("", tone="neutral")
-        self.gpu_meta_lbl.setVisible(False)
-        top.addWidget(self.gpu_meta_lbl)
-        sc.addLayout(top)
-
-        self.gpu_holders_lbl = QLabel("")
-        self.gpu_holders_lbl.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
-        )
-        self.gpu_holders_lbl.setWordWrap(True)
-        self.gpu_holders_lbl.setVisible(False)
-        sc.addWidget(self.gpu_holders_lbl)
-        return state_card
-
     def _build_core_clock_card(self) -> M3Card:
         card = M3Card()
         box = QVBoxLayout(card)
-        box.setContentsMargins(20, 18, 20, 18)
-        box.setSpacing(12)
+        box.setContentsMargins(18, 13, 18, 13)
+        box.setSpacing(8)
+        box.setSpacing(10)
 
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
-        title = QLabel("Core Clock Tuning")
+        title = QLabel("V/F & Clock Tuning")
         title.setProperty("class", "CardTitle")
         hdr.addWidget(title)
         hdr.addStretch()
@@ -373,7 +386,8 @@ class GpuPage(QWidget):
                 "• Curve Offset (Overclock / Undervolt): Shifts the V/F curve upward so the core "
                 "reaches higher clock speeds at lower voltages, reducing heat and power draw.\n"
                 "• Boost Clock Cap (Flattening): Capping the max clock flattens the top of the "
-                "curve, keeping efficiency gains while preventing peak-boost instability."
+                "curve, keeping efficiency gains while preventing peak-boost instability.\n"
+                "• VRAM Clock: Independent memory frequency offset."
             )
         )
         box.addLayout(hdr)
@@ -385,184 +399,198 @@ class GpuPage(QWidget):
         self.uv_support_lbl.setWordWrap(True)
         box.addWidget(self.uv_support_lbl)
 
-        # ── Sub-section 1: V/F Curve Offset ──
-        uv_sub_title = QLabel("1. V/F Curve Offset")
+        self.vf_curve = VfCurveWidget()
+        box.addWidget(self.vf_curve)
+
+        grid = M3ResponsiveGrid(wide_cols=3, narrow_cols=1, breakpoint=560, h_spacing=12, v_spacing=12)
+
+        # ── Column 1: V/F Curve Offset ──
+        uv_col = QFrame()
+        uv_col.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
+        )
+        uv_box = QVBoxLayout(uv_col)
+        uv_box.setContentsMargins(12, 10, 12, 10)
+        uv_box.setSpacing(6)
+        uv_sub_title = QLabel("1. Core V/F Offset")
         uv_sub_title.setStyleSheet(
             f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
-            f"margin-top: 2px; background: transparent;"
+            f"border: none; background: transparent;"
         )
-        box.addWidget(uv_sub_title)
+        uv_box.addWidget(uv_sub_title)
+        uv_val_row = QHBoxLayout()
+        uv_val_row.setContentsMargins(0, 0, 0, 0)
+        self.uv_val = QLabel("+0 MHz")
+        self.uv_val.setProperty("class", "ValueReadoutPill")
+        self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        uv_val_row.addWidget(self.uv_val)
+        uv_val_row.addStretch()
+        uv_box.addLayout(uv_val_row)
 
-        uv_sub_desc = QLabel(
-            "Shift frequency up across all voltage points (0 to +255 MHz) to lower voltage at any clock."
-        )
-        uv_sub_desc.setStyleSheet(
-            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
-        )
-        uv_sub_desc.setWordWrap(True)
-        box.addWidget(uv_sub_desc)
-
-        uv_row = QHBoxLayout()
-        uv_row.setSpacing(10)
         self.uv_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.uv_slider.setMinimum(0)
         self.uv_slider.setMaximum(dgpu_tune.MAX_OFFSET_MHZ)
         self.uv_slider.setSingleStep(5)
         self.uv_slider.setValue(0)
         self.uv_slider.valueChanged.connect(self._on_uv_slider)
-        self.uv_val = QLabel("+0 MHz")
-        self.uv_val.setProperty("class", "ValueReadoutPill")
-        self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.uv_val.setMinimumWidth(86)
+        uv_box.addWidget(self.uv_slider)
+
+        uv_foot = QHBoxLayout()
+        self.uv_status_lbl = QLabel("")
+        self.uv_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.uv_status_lbl.setWordWrap(True)
+        uv_foot.addWidget(self.uv_status_lbl, 1)
         self.uv_reset_btn = QPushButton("Reset")
         self.uv_reset_btn.setProperty("class", "OutlinedButton")
         self.uv_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
         self.uv_reset_btn.setIconSize(QSize(14, 14))
         self.uv_reset_btn.setToolTip("Return the V/F offset to stock (0 MHz) now")
         self.uv_reset_btn.clicked.connect(lambda: self._reset_uv())
-        uv_row.addWidget(self.uv_slider, 1)
-        uv_row.addWidget(self.uv_val)
-        uv_row.addWidget(self.uv_reset_btn)
-        box.addLayout(uv_row)
+        uv_foot.addWidget(self.uv_reset_btn)
+        uv_box.addLayout(uv_foot)
+        grid.addWidget(uv_col)
 
-        self.uv_status_lbl = QLabel("")
-        self.uv_status_lbl.setStyleSheet(
-            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        # ── Column 2: Max Boost Clock Cap ──
+        mc_col = QFrame()
+        mc_col.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
         )
-        box.addWidget(self.uv_status_lbl)
-
-        # Divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet(
-            f"background-color: {THEME.divider}; max-height: 1px; border: none; margin: 4px 0;"
-        )
-        box.addWidget(divider)
-
-        # ── Sub-section 2: Max Clock Cap (Curve Flattening) ──
-        mc_sub_title = QLabel("2. Max Boost Clock Cap")
+        mc_box = QVBoxLayout(mc_col)
+        mc_box.setContentsMargins(12, 10, 12, 10)
+        mc_box.setSpacing(6)
+        mc_sub_title = QLabel("2. Max Boost Cap")
         mc_sub_title.setStyleSheet(
-            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"border: none; background: transparent;"
         )
-        box.addWidget(mc_sub_title)
+        mc_box.addWidget(mc_sub_title)
+        mc_val_row = QHBoxLayout()
+        mc_val_row.setContentsMargins(0, 0, 0, 0)
+        self.max_val = QLabel("Stock (unlocked)")
+        self.max_val.setProperty("class", "ValueReadoutPill")
+        self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mc_val_row.addWidget(self.max_val)
+        mc_val_row.addStretch()
+        mc_box.addLayout(mc_val_row)
 
-        mc_sub_desc = QLabel(
-            "Upper-bound the boost clock; top of slider is Stock (unlocked). Lowering flattens the top of the curve."
-        )
-        mc_sub_desc.setStyleSheet(
-            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
-        )
-        mc_sub_desc.setWordWrap(True)
-        box.addWidget(mc_sub_desc)
-
-        mc_row = QHBoxLayout()
-        mc_row.setSpacing(10)
         self.max_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.max_slider.setRange(self._normal_min, self._normal_max)
         self.max_slider.setSingleStep(25)
         self.max_slider.setValue(self._normal_max)
         self.max_slider.valueChanged.connect(self._on_max_slider)
-        self.max_val = QLabel("Stock (unlocked)")
-        self.max_val.setProperty("class", "ValueReadoutPill")
-        self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.max_val.setMinimumWidth(156)
+        mc_box.addWidget(self.max_slider)
+
+        mc_foot = QHBoxLayout()
+        self.max_status_lbl = QLabel("")
+        self.max_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.max_status_lbl.setWordWrap(True)
+        mc_foot.addWidget(self.max_status_lbl, 1)
         self.max_reset_btn = QPushButton("Reset")
         self.max_reset_btn.setProperty("class", "OutlinedButton")
         self.max_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
         self.max_reset_btn.setIconSize(QSize(14, 14))
         self.max_reset_btn.setToolTip("Unlock the boost clock now")
         self.max_reset_btn.clicked.connect(lambda: self._reset_max())
-        mc_row.addWidget(self.max_slider, 1)
-        mc_row.addWidget(self.max_val)
-        mc_row.addWidget(self.max_reset_btn)
-        box.addLayout(mc_row)
+        mc_foot.addWidget(self.max_reset_btn)
+        mc_box.addLayout(mc_foot)
+        grid.addWidget(mc_col)
 
-        self.max_status_lbl = QLabel("")
-        self.max_status_lbl.setStyleSheet(
-            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
-        )
-        box.addWidget(self.max_status_lbl)
+        # ── Column 3: Memory Clock (VRAM) ──
+        grid.addWidget(self._build_mem_clock_card())
 
+        box.addWidget(grid)
         return card
 
-    def _build_mem_clock_card(self) -> M3Card:
-        card = M3Card()
-        box = QVBoxLayout(card)
-        box.setContentsMargins(20, 18, 20, 18)
-        box.setSpacing(10)
-
-        hdr = QHBoxLayout()
-        hdr.setSpacing(8)
-        title = QLabel("Memory Clock (VRAM)")
-        title.setProperty("class", "CardTitle")
-        hdr.addWidget(title)
-        hdr.addStretch()
-        hdr.addWidget(
-            M3IconHelpButton(
-                "Independent memory frequency offset. Positive values overclock VRAM to increase "
-                "memory bandwidth; negative values underclock; 0 is stock. The GPU driver "
-                "automatically validates supported offsets."
-            )
+    def _build_mem_clock_card(self) -> QFrame:
+        self.mem_card = QFrame()
+        self.mem_card.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
         )
-        box.addLayout(hdr)
+        box = QVBoxLayout(self.mem_card)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(6)
 
-        self.mem_support_lbl = QLabel("")
-        self.mem_support_lbl.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        title = QLabel("3. VRAM Clock")
+        title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"border: none; background: transparent;"
         )
-        self.mem_support_lbl.setWordWrap(True)
-        box.addWidget(self.mem_support_lbl)
+        box.addWidget(title)
+        mem_val_row = QHBoxLayout()
+        mem_val_row.setContentsMargins(0, 0, 0, 0)
+        self.mem_val = QLabel("+0 MHz")
+        self.mem_val.setProperty("class", "ValueReadoutPill")
+        self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mem_val_row.addWidget(self.mem_val)
+        mem_val_row.addStretch()
+        box.addLayout(mem_val_row)
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
         self.mem_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.mem_slider.setRange(dgpu_tune.MEM_OFFSET_MIN_MHZ, dgpu_tune.MEM_OFFSET_MAX_MHZ)
         self.mem_slider.setSingleStep(25)
         self.mem_slider.setPageStep(100)
         self.mem_slider.setValue(0)
         self.mem_slider.valueChanged.connect(self._on_mem_slider)
-        self.mem_val = QLabel("+0 MHz")
-        self.mem_val.setProperty("class", "ValueReadoutPill")
-        self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mem_val.setMinimumWidth(120)
+        box.addWidget(self.mem_slider)
+
+        self.mem_support_lbl = QLabel("")
+        self.mem_support_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; border: none; background: transparent;"
+        )
+        self.mem_support_lbl.setWordWrap(True)
+        self.mem_support_lbl.setVisible(False)
+        box.addWidget(self.mem_support_lbl)
+
+        foot = QHBoxLayout()
+        self.mem_status_lbl = QLabel("")
+        self.mem_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.mem_status_lbl.setWordWrap(True)
+        foot.addWidget(self.mem_status_lbl, 1)
         self.mem_reset_btn = QPushButton("Reset")
         self.mem_reset_btn.setProperty("class", "OutlinedButton")
         self.mem_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
         self.mem_reset_btn.setIconSize(QSize(14, 14))
         self.mem_reset_btn.setToolTip("Return the memory clock offset to stock now")
         self.mem_reset_btn.clicked.connect(lambda: self._reset_mem())
-        row.addWidget(self.mem_slider, 1)
-        row.addWidget(self.mem_val)
-        row.addWidget(self.mem_reset_btn)
-        box.addLayout(row)
-
-        self.mem_status_lbl = QLabel("")
-        self.mem_status_lbl.setStyleSheet(
-            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
-        )
-        box.addWidget(self.mem_status_lbl)
-        return card
+        foot.addWidget(self.mem_reset_btn)
+        box.addLayout(foot)
+        return self.mem_card
 
     def _build_apply_bar(self) -> QFrame:
         """The single commit point for all three controls."""
-        bar = QFrame()
-        bar.setStyleSheet(
-            f"QFrame {{ background-color: {THEME.surface_container_high}; "
-            f"border-radius: 16px; border: none; }}"
-        )
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(18, 14, 18, 14)
-        row.setSpacing(14)
+        self.apply_bar = QFrame()
+        self._update_apply_bar_style(dirty=False)
+        row = QHBoxLayout(self.apply_bar)
+        row.setContentsMargins(16, 12, 16, 12)
+        row.setSpacing(12)
         self.apply_btn = QPushButton("Apply Tuning")
         self.apply_btn.setProperty("class", "PrimaryButton")
         self.apply_btn.setIcon(
             icons.make_icon("check", color=THEME.on_accent_cta, size=16)
         )
         self.apply_btn.setIconSize(QSize(16, 16))
-        self.apply_btn.setMinimumHeight(40)
+        self.apply_btn.setMinimumHeight(38)
         self.apply_btn.setToolTip("Apply the core offset, boost clock cap and memory offset together")
         self.apply_btn.clicked.connect(self._apply_all)
         row.addWidget(self.apply_btn)
+
+        self.discard_btn = QPushButton("Discard")
+        self.discard_btn.setProperty("class", "OutlinedButton")
+        self.discard_btn.setMinimumHeight(38)
+        self.discard_btn.setToolTip("Revert staged slider changes back to saved settings")
+        self.discard_btn.setVisible(False)
+        self.discard_btn.clicked.connect(self._discard_staged)
+        row.addWidget(self.discard_btn)
+
         self.apply_hint_lbl = QLabel("")
         self.apply_hint_lbl.setStyleSheet(
             f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; "
@@ -570,16 +598,54 @@ class GpuPage(QWidget):
         )
         self.apply_hint_lbl.setWordWrap(True)
         row.addWidget(self.apply_hint_lbl, 1)
-        return bar
+        return self.apply_bar
+
+    def _update_apply_bar_style(self, dirty: bool) -> None:
+        if not hasattr(self, "apply_bar"):
+            return
+        if dirty:
+            self.apply_bar.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.surface_container_high}; "
+                f"border-radius: 14px; border: 1px solid {self._accent_hex}; }}"
+            )
+        else:
+            self.apply_bar.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.surface_container_high}; "
+                f"border-radius: 14px; border: 1px solid {THEME.outline_variant}; }}"
+            )
+
+    def _discard_staged(self) -> None:
+        if self._uv_cfg_key is not None:
+            self.uv_slider.blockSignals(True)
+            self.uv_slider.setValue(int(self._uv_cfg_key[1]))
+            self.uv_slider.blockSignals(False)
+            self.uv_val.setText(f"+{self.uv_slider.value()} MHz")
+        if self._max_cfg_key is not None:
+            saved_en, saved_val = self._max_cfg_key
+            target = int(saved_val) if saved_en else self._normal_max
+            self.max_slider.blockSignals(True)
+            self.max_slider.setValue(target)
+            self.max_slider.blockSignals(False)
+            self._update_max_readout(target)
+        if self._mem_offset_cfg_key is not None:
+            self.mem_slider.blockSignals(True)
+            self.mem_slider.setValue(int(self._mem_offset_cfg_key))
+            self.mem_slider.blockSignals(False)
+            self._update_mem_readout()
+        self._update_vf_curve()
+        self._sync_reset_buttons()
+        self._update_apply_hint(gated=self._is_gated)
 
     # ── slider handlers ──
     def _on_uv_slider(self, value: int) -> None:
         self.uv_val.setText(f"+{value} MHz")
+        self._update_vf_curve()
         self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _on_max_slider(self, value: int) -> None:
         self._update_max_readout(value)
+        self._update_vf_curve()
         self._sync_reset_buttons()
         self._update_apply_hint()
 
@@ -592,7 +658,7 @@ class GpuPage(QWidget):
         if value >= self._observed_ceiling:
             self.max_val.setText("Stock (unlocked)")
         else:
-            self.max_val.setText(f"Cap {value} MHz (−{self._observed_ceiling - value})")
+            self.max_val.setText(f"Cap {value} MHz")
 
     def _update_mem_readout(self) -> None:
         offset = self._mem_offset()
@@ -679,6 +745,9 @@ class GpuPage(QWidget):
             self.apply_btn.setEnabled(False)
             self.apply_btn.setCursor(Qt.CursorShape.ArrowCursor)
             self.apply_btn.setToolTip("Read-only while dGPU is powered off (gated)")
+            if hasattr(self, "discard_btn"):
+                self.discard_btn.setVisible(False)
+            self._update_apply_bar_style(dirty=False)
             return
 
         staged = self._staged_controls()
@@ -701,6 +770,9 @@ class GpuPage(QWidget):
         self.apply_btn.setCursor(
             Qt.CursorShape.PointingHandCursor if can_apply else Qt.CursorShape.ArrowCursor
         )
+        if hasattr(self, "discard_btn"):
+            self.discard_btn.setVisible(bool(staged))
+        self._update_apply_bar_style(dirty=bool(staged))
         if staged:
             self.apply_btn.setToolTip("Apply staged tuning changes")
             self.apply_hint_lbl.setStyleSheet(
@@ -851,6 +923,9 @@ class GpuPage(QWidget):
             return
 
         current_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+        self._woke_from_auto = (
+            mode == dgpu_gate.MODE_OPTIMUS and current_mode == dgpu_gate.MODE_AUTO
+        )
         if mode in ("eco", "auto") and not load_config().get("dgpu_gate_disclaimer_accepted", False):
             reply = QMessageBox.warning(
                 self,
@@ -1020,7 +1095,8 @@ class GpuPage(QWidget):
         if not self._gate_supported:
             return
 
-        self.gate_exp_badge.setText("Auto-discovered from ACPI")
+        self.gate_exp_badge.setText("Auto-discovered ACPI")
+        self.gate_exp_badge.set_tone("success")
         self.gate_exp_badge.setVisible(True)
         try:
             cfg = load_config()
@@ -1059,11 +1135,11 @@ class GpuPage(QWidget):
             ac_online = True
         eco_btn = self._gate_buttons.get(dgpu_gate.MODE_ECO)
         if isinstance(eco_btn, M3SegmentButton):
-            eco_btn.setText("ECO (Battery only)" if ac_online else "ECO (dGPU Off)")
+            eco_btn.setText("dGPU Off · Battery Only (~0 W)")
             eco_btn.setLocked(
                 ac_online,
                 tooltip=(
-                    "ECO mode is only available on battery power"
+                    "Battery only — use Automation → Auto-gate on battery"
                     if ac_online
                     else "Prompt & close GPU apps if needed, then cut power rail until switched back"
                 ),
@@ -1073,9 +1149,9 @@ class GpuPage(QWidget):
             eco_btn.setCursor(
                 Qt.CursorShape.ForbiddenCursor if ac_online else Qt.CursorShape.PointingHandCursor
             )
-            eco_btn.setText("ECO (Battery only)" if ac_online else "ECO (dGPU Off)")
+            eco_btn.setText("dGPU Off · Battery Only (~0 W)")
             eco_btn.setToolTip(
-                "ECO mode is only available on battery power"
+                "Battery only — use Automation → Auto-gate on battery"
                 if ac_online
                 else "Prompt & close GPU apps if needed, then cut power rail until switched back"
             )
@@ -1123,31 +1199,60 @@ class GpuPage(QWidget):
             self.gate_force_close_btn.setVisible(show_force)
 
         if gated:
-            self.gate_status_lbl.setStyleSheet("color: #38b2ac; font-size: 12px; font-weight: 600;")
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+            )
             self.gate_status_lbl.setText("Off (gated) — dGPU power rail cut (~0 W).")
         elif wedged:
-            self.gate_status_lbl.setStyleSheet("color: #fc8181; font-size: 12px; font-weight: 700;")
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_caption}px; font-weight: 700; background: transparent;"
+            )
             self.gate_status_lbl.setText(
                 "GPU needs a reboot — NVIDIA driver reset required; dGPU power gating paused."
             )
         elif policy.get("pending_off") and mode in ("eco", "auto"):
             self.gate_status_lbl.setStyleSheet(
-            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
-        )
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
             msg = policy.get("last_error") or "Waiting for dGPU to suspend before cutting power."
             self.gate_status_lbl.setText(f"Pending ({mode}): {msg}")
         elif mode == "optimus":
-            self.gate_status_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 500;")
-            self.gate_status_lbl.setText("Optimus active — kernel runtime PM manages D3cold.")
+            if self._woke_from_auto:
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
+                self.gate_status_lbl.setText(
+                    "dGPU woken on battery (Battery Auto-Gate turned off)"
+                )
+            else:
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
+                self.gate_status_lbl.setText("Optimus active — kernel runtime PM manages D3cold.")
         elif mode == "auto":
-            self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
             self.gate_status_lbl.setText("Auto active — AC connected; will prompt to power off on battery.")
         else:
-            self.gate_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
             self.gate_status_lbl.setText("ECO active.")
 
     # ── refresh ──
     def _refresh(self, recheck_gate: bool = False) -> None:
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        if hasattr(self, "auto_gate_link_pill"):
+            auto_on = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower() == dgpu_gate.MODE_AUTO
+            self.auto_gate_link_pill.setText(f"Battery Auto-Gate: {'ON' if auto_on else 'OFF'} ↗")
+        if hasattr(self, "boot_apply_link_pill"):
+            boot_on = bool(cfg.get("dgpu_undervolt_auto", True))
+            self.boot_apply_link_pill.setText(f"Boot Apply: {'ON' if boot_on else 'OFF'} ↗")
+        self._update_vf_curve()
         gpu = get_gpu_state()
         self._sync_power_gate_card(recheck_supported=recheck_gate)
         gated = bool(gpu.gated_off or gpu.status == "gated_off")

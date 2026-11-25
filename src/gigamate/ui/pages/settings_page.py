@@ -1,18 +1,23 @@
 """GigaMate Center — Settings & System Preferences Page.
 
 Allows configuring:
-- Hardware settings reapplication on login / startup (power profile, battery threshold, RGB)
-- Linux system power & dGPU Dynamic Boost profile synchronization
-- Background user systemd service management (gigamate.service)
-- System diagnostics & hardware info
+- Visible Power Profiles (which ACPI profiles appear in Dashboard / Tray)
+- Input & Desktop Shortcuts (hardware hotkey capture + KDE/GNOME registration)
+- Background user systemd service management (gigamate.service) & driver repair
+- System diagnostics, Doctor report & updates
 """
 
+import contextlib
+import io
 import json
 import subprocess
 import time
+from typing import Dict, Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer, QProcess
+from PyQt6.QtCore import QProcess, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,27 +27,85 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ... import __version__, dgpu_gate, doctor, hardware, updates
 from ...capabilities import detect_system_capabilities, invalidate_capabilities
 from ...config import load as load_config, update_config
-from ...system_power import sync_system_power
+from ...hotkeys import (
+    ACTION_MODE_SWITCH,
+    ACTION_OPEN_CENTER,
+    capture_hardware_hotkey,
+    desktop_shortcut_command,
+    register_desktop_shortcut,
+)
+from ...power_limits import discover_acpi_profiles
 from ...updates import build_terminal_repair_command, repair_command
 from .. import icons
 from ..theme import THEME
 from ..widgets import (
     M3Card,
+    M3IconHelpButton,
     M3PageHeader,
     M3ResponsiveGrid,
     M3StatusPill,
-    M3SwitchRow,
+)
+
+_PROFILE_NAMES = (
+    (0, "Quiet"),
+    (1, "Balanced"),
+    (2, "Performance"),
+    (3, "Gaming"),
+)
+
+_SHORTCUT_ACTIONS = (
+    (ACTION_OPEN_CENTER, "Open GigaMate Center", "Meta+G"),
+    (ACTION_MODE_SWITCH, "Cycle Power Profile", "Meta+Shift+M"),
 )
 
 
+class _HotkeyCaptureThread(QThread):
+    """Capture a single hardware hotkey press off the UI thread."""
+
+    captured = pyqtSignal(object)
+
+    def __init__(self, timeout_sec: float = 5.0, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.timeout_sec = timeout_sec
+
+    def run(self) -> None:
+        try:
+            spec = capture_hardware_hotkey(timeout_sec=self.timeout_sec)
+        except Exception:
+            spec = None
+        self.captured.emit(spec)
+
+
+class _UpdateCheckThread(QThread):
+    """Check for upstream GigaMate releases off the UI thread."""
+
+    finished_check = pyqtSignal(object)
+
+    def run(self) -> None:
+        try:
+            res = updates.check_for_updates(force=True)
+        except Exception as exc:
+            res = {"error": str(exc)}
+        self.finished_check.emit(res)
+
+
 class SettingsPage(QWidget):
-    """Configuration page for startup behavior, power sync, and service controls."""
+    """Settings page for visible profiles, shortcuts, daemon, diagnostics & updates."""
+
+    navigate_requested = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.cfg = load_config()
+        self._profile_enable_checks: Dict[int, QCheckBox] = {}
+        self._hotkey_labels: Dict[str, QLabel] = {}
+        self._record_buttons: Dict[str, QPushButton] = {}
+        self._capture_thread: Optional[_HotkeyCaptureThread] = None
+        self._update_thread: Optional[_UpdateCheckThread] = None
+        self._service_status_cache = None
         self._init_ui()
 
     @staticmethod
@@ -53,6 +116,17 @@ class SettingsPage(QWidget):
         line.setStyleSheet(f"background-color: {THEME.divider}; border: none;")
         return line
 
+    @staticmethod
+    def _make_card_header(title: str, help_tooltip: str) -> QHBoxLayout:
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        lbl = QLabel(title)
+        lbl.setProperty("class", "CardTitle")
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        hdr.addWidget(M3IconHelpButton(help_tooltip))
+        return hdr
+
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 24)
@@ -61,67 +135,135 @@ class SettingsPage(QWidget):
         layout.addWidget(
             M3PageHeader(
                 "Settings",
-                "Startup automation, background daemon & hardware diagnostics",
+                "Visible profiles, shortcuts, background daemon, diagnostics & updates",
             )
         )
 
-        # ── Card 1: Startup & Hardware Preferences ──
-        startup_card = M3Card()
-        s_layout = QVBoxLayout(startup_card)
-        s_layout.setContentsMargins(20, 18, 20, 18)
-        s_layout.setSpacing(10)
-
-        s_title = QLabel("Startup & Hardware Preferences")
-        s_title.setProperty("class", "CardTitle")
-        s_sub = QLabel(
-            "Configure which preferences are automatically restored on login and profile changes."
+        # ── Card 1: Visible Power Profiles ──
+        self.profiles_card = M3Card()
+        p_layout = QVBoxLayout(self.profiles_card)
+        p_layout.setContentsMargins(20, 18, 20, 18)
+        p_layout.setSpacing(10)
+        p_layout.addLayout(
+            self._make_card_header(
+                "Visible Power Profiles",
+                "Choose which ACPI power profiles are shown in Dashboard, Tray, and Automation.",
+            )
         )
-        s_sub.setProperty("class", "CardSubtitle")
-        s_sub.setWordWrap(True)
-        s_layout.addWidget(s_title)
-        s_layout.addWidget(s_sub)
-
-        # Startup Apply Row
-        row1 = M3SwitchRow(
-            "Apply hardware preferences automatically on login / startup",
-            "Re-applies your saved keyboard backlight when you log in. "
-            "The battery limit and power sync have their own toggles below.",
-            checked=self.cfg.get("startup_apply", False),
+        p_sub = QLabel(
+            "Disable profiles you don't use. At least one profile must remain enabled."
         )
-        self.chk_startup_apply = row1.switch
-        self.chk_startup_apply.toggled.connect(self._on_startup_apply_toggled)
-        s_layout.addWidget(row1)
-        s_layout.addWidget(self._make_divider())
+        p_sub.setProperty("class", "CardSubtitle")
+        p_sub.setWordWrap(True)
+        p_layout.addWidget(p_sub)
 
-        # System Power Sync Row
-        row2 = M3SwitchRow(
-            "Synchronize system power profile with fan profile",
-            "Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode.",
-            checked=self.cfg.get("sync_system_power", False),
+        checks_row = QHBoxLayout()
+        checks_row.setSpacing(16)
+        for pid, name in self._all_discovered_profiles():
+            chk = QCheckBox(name)
+            chk.toggled.connect(lambda checked, p=pid: self._on_profile_enable_toggled(p, checked))
+            self._profile_enable_checks[pid] = chk
+            checks_row.addWidget(chk)
+        checks_row.addStretch()
+        p_layout.addLayout(checks_row)
+        layout.addWidget(self.profiles_card)
+        self._sections: Dict[str, QWidget] = {"visible_profiles": self.profiles_card}
+
+        # ── Card 2: Input & Desktop Shortcuts ──
+        shortcuts_card = M3Card()
+        sh_layout = QVBoxLayout(shortcuts_card)
+        sh_layout.setContentsMargins(20, 18, 20, 18)
+        sh_layout.setSpacing(10)
+        sh_layout.addLayout(
+            self._make_card_header(
+                "Input & Desktop Shortcuts",
+                "Bind hardware keys or register desktop environment shortcuts.",
+            )
         )
-        self._row_sync_power = row2
-        self.chk_sync_power = row2.switch
-        self.chk_sync_power.toggled.connect(self._on_sync_power_toggled)
-        # System power sync is only meaningful with a verified model profile.
-        self._refresh_sync_power_enabled()
-        s_layout.addWidget(row2)
-        s_layout.addWidget(self._make_divider())
 
-        # dGPU Auto-Apply Row
-        row3 = M3SwitchRow(
-            "Apply dGPU undervolt / clock cap automatically on boot and resume",
-            "When off, the discrete GPU is left untouched on boot and resume; "
-            "use Apply on the GPU page (or the CLI) each session. Disabling does "
-            "not clear anything already applied.",
-            checked=self.cfg.get("dgpu_undervolt_auto", True),
+        for action, title, default_key in _SHORTCUT_ACTIONS:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 4, 0, 4)
+            row.setSpacing(10)
+
+            info_col = QVBoxLayout()
+            info_col.setSpacing(2)
+            title_lbl = QLabel(title)
+            title_lbl.setStyleSheet(
+                f"color: {THEME.on_surface}; font-size: 13px; font-weight: 500; background: transparent;"
+            )
+            info_col.addWidget(title_lbl)
+
+            binding_lbl = QLabel(self._format_hotkey_binding(action, default_key))
+            binding_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: 12px; background: transparent;"
+            )
+            self._hotkey_labels[action] = binding_lbl
+            info_col.addWidget(binding_lbl)
+            row.addLayout(info_col)
+            row.addStretch()
+
+            rec_btn = QPushButton("Record Hardware Key")
+            rec_btn.setProperty("class", "TonalButton")
+            rec_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            rec_btn.clicked.connect(lambda _checked=False, a=action: self._start_hotkey_capture(a))
+            self._record_buttons[action] = rec_btn
+            row.addWidget(rec_btn)
+
+            rst_btn = QPushButton("Reset")
+            rst_btn.setProperty("class", "OutlinedButton")
+            rst_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            rst_btn.clicked.connect(
+                lambda _checked=False, a=action, dk=default_key: self._reset_hotkey(a, dk)
+            )
+            row.addWidget(rst_btn)
+
+            sh_layout.addLayout(row)
+
+        sh_layout.addWidget(self._make_divider())
+
+        helper_title = QLabel("Desktop Shortcut Helper")
+        helper_title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 13px; font-weight: 600; background: transparent;"
         )
-        self.chk_dgpu_auto = row3.switch
-        self.chk_dgpu_auto.toggled.connect(self._on_dgpu_auto_toggled)
-        s_layout.addWidget(row3)
+        sh_layout.addWidget(helper_title)
 
-        layout.addWidget(startup_card)
+        for action, title, default_key in _SHORTCUT_ACTIONS:
+            cmd = desktop_shortcut_command(action)
+            cmd_row = QHBoxLayout()
+            cmd_row.setSpacing(8)
+            cmd_lbl = QLabel(f"{title}: <code>{cmd}</code>")
+            cmd_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: 12px; background: transparent;"
+            )
+            cmd_row.addWidget(cmd_lbl)
+            cmd_row.addStretch()
 
-        # ── Card 2: Background Service Management ──
+            copy_btn = QPushButton("Copy")
+            copy_btn.setProperty("class", "OutlinedButton")
+            copy_btn.setFixedWidth(72)
+            copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            copy_btn.clicked.connect(lambda _checked=False, c=cmd: self._copy_command(c))
+            cmd_row.addWidget(copy_btn)
+
+            reg_btn = QPushButton(f"Register ({default_key})")
+            reg_btn.setProperty("class", "TonalButton")
+            reg_btn.setFixedWidth(188)
+            reg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            reg_btn.clicked.connect(
+                lambda _checked=False, a=action, dk=default_key: self._register_desktop_shortcut(a, dk)
+            )
+            cmd_row.addWidget(reg_btn)
+            sh_layout.addLayout(cmd_row)
+
+        self.shortcut_status_lbl = QLabel("")
+        self.shortcut_status_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: 12px; background: transparent;"
+        )
+        sh_layout.addWidget(self.shortcut_status_lbl)
+        layout.addWidget(shortcuts_card)
+
+        # ── Card 3: Background Daemon & Driver ──
         service_card = M3Card()
         svc_layout = QVBoxLayout(service_card)
         svc_layout.setContentsMargins(20, 18, 20, 18)
@@ -129,7 +271,7 @@ class SettingsPage(QWidget):
 
         svc_hdr = QHBoxLayout()
         svc_hdr.setSpacing(12)
-        svc_title = QLabel("Background System Daemon")
+        svc_title = QLabel("Background Daemon & Driver")
         svc_title.setProperty("class", "CardTitle")
         svc_hdr.addWidget(svc_title)
         svc_hdr.addStretch()
@@ -175,32 +317,167 @@ class SettingsPage(QWidget):
         svc_layout.addLayout(svc_row)
         layout.addWidget(service_card)
 
-        # ── Card 3: Hardware Diagnostics & Environment ──
+        # ── Card 4: Hardware Diagnostics & Updates ──
         diag_card = M3Card()
         d_layout = QVBoxLayout(diag_card)
         d_layout.setContentsMargins(20, 18, 20, 18)
         d_layout.setSpacing(14)
 
-        d_title = QLabel("Hardware Diagnostics & Environment")
+        d_hdr = QHBoxLayout()
+        d_hdr.setSpacing(8)
+        d_title = QLabel("Hardware Diagnostics & Updates")
         d_title.setProperty("class", "CardTitle")
-        d_layout.addWidget(d_title)
+        d_hdr.addWidget(d_title)
+        d_hdr.addStretch()
+
+        self.btn_copy_doctor = QPushButton("Copy Doctor Report")
+        self.btn_copy_doctor.setProperty("class", "OutlinedButton")
+        self.btn_copy_doctor.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy_doctor.clicked.connect(self._on_copy_doctor_clicked)
+        d_hdr.addWidget(self.btn_copy_doctor)
+        d_layout.addLayout(d_hdr)
 
         self._diag_grid = M3ResponsiveGrid(
-            wide_cols=4,
+            wide_cols=3,
             narrow_cols=2,
-            breakpoint=660,
+            breakpoint=620,
             h_spacing=12,
             v_spacing=12,
         )
         d_layout.addWidget(self._diag_grid)
-        self._populate_diag_chips()
+
+        d_layout.addWidget(self._make_divider())
+
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(10)
+        ver_lbl = QLabel(f"GigaMate v{__version__}")
+        ver_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 13px; font-weight: 600; background: transparent;"
+        )
+        upd_row.addWidget(ver_lbl)
+
+        self.update_status_lbl = QLabel("")
+        self.update_status_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: 12px; background: transparent;"
+        )
+        upd_row.addWidget(self.update_status_lbl)
+        upd_row.addStretch()
+
+        self.btn_check_updates = QPushButton("Check for Updates")
+        self.btn_check_updates.setProperty("class", "TonalButton")
+        self.btn_check_updates.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_updates.clicked.connect(self._on_check_updates_clicked)
+        upd_row.addWidget(self.btn_check_updates)
+        d_layout.addLayout(upd_row)
 
         layout.addWidget(diag_card)
-
         layout.addStretch()
 
-        # Update service status
-        self._refresh_service_status()
+        self.reload_from_config()
+
+    def _all_discovered_profiles(self) -> list[tuple[int, str]]:
+        try:
+            discovered = discover_acpi_profiles()
+        except Exception:
+            discovered = {}
+        if discovered:
+            return [
+                (int(pid), (meta or {}).get("name", f"Profile {pid}"))
+                for pid, meta in sorted(discovered.items())
+            ]
+        return list(_PROFILE_NAMES)
+
+    def _sync_profile_enable_checks(self) -> None:
+        disabled = {int(x) for x in (self.cfg.get("disabled_profiles") or [])}
+        enabled_pids = [pid for pid in self._profile_enable_checks if pid not in disabled]
+        for pid, chk in self._profile_enable_checks.items():
+            is_enabled = pid not in disabled
+            chk.blockSignals(True)
+            chk.setChecked(is_enabled)
+            is_last = is_enabled and len(enabled_pids) <= 1
+            chk.setEnabled(not is_last)
+            chk.setToolTip("At least one profile must remain enabled" if is_last else "")
+            chk.blockSignals(False)
+
+    def _on_profile_enable_toggled(self, pid: int, checked: bool) -> None:
+        disabled = {int(x) for x in (self.cfg.get("disabled_profiles") or [])}
+        if checked:
+            disabled.discard(pid)
+        else:
+            all_pids = set(self._profile_enable_checks.keys())
+            if len(all_pids - disabled) <= 1:
+                self._sync_profile_enable_checks()
+                return
+            disabled.add(pid)
+
+        new_disabled = sorted(disabled)
+        self.cfg["disabled_profiles"] = new_disabled
+        update_config(lambda c: {**c, "disabled_profiles": new_disabled})
+        self._sync_profile_enable_checks()
+
+        # If active profile was just disabled, fall back to Balanced (1) or first enabled
+        active_pid = int(self.cfg.get("acpi_profile", 1))
+        if active_pid in disabled:
+            enabled_pids = [p for p in self._profile_enable_checks if p not in disabled]
+            fallback = 1 if 1 in enabled_pids else (enabled_pids[0] if enabled_pids else 1)
+            try:
+                hardware.apply_profile(fallback)
+            except Exception:
+                pass
+
+    def _format_hotkey_binding(self, action: str, default_key: str) -> str:
+        hotkeys = self.cfg.get("custom_hotkeys") or {}
+        spec = hotkeys.get(action)
+        if isinstance(spec, dict) and spec.get("key_name"):
+            return f"Custom: {spec['key_name']}"
+        return f"Default: {default_key}"
+
+    def _start_hotkey_capture(self, action: str) -> None:
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            return
+        btn = self._record_buttons.get(action)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("Press key…")
+        self._capture_thread = _HotkeyCaptureThread(timeout_sec=5.0, parent=self)
+        self._capture_thread.captured.connect(lambda spec, a=action: self._on_hotkey_captured(a, spec))
+        self._capture_thread.start()
+
+    def _on_hotkey_captured(self, action: str, spec: Optional[dict]) -> None:
+        btn = self._record_buttons.get(action)
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText("Record Hardware Key")
+        if spec:
+            hotkeys = dict(self.cfg.get("custom_hotkeys") or {})
+            hotkeys[action] = spec
+            self.cfg["custom_hotkeys"] = hotkeys
+            update_config(lambda c: {**c, "custom_hotkeys": {**(c.get("custom_hotkeys") or {}), action: spec}})
+            lbl = self._hotkey_labels.get(action)
+            if lbl is not None:
+                lbl.setText(self._format_hotkey_binding(action, ""))
+
+    def _reset_hotkey(self, action: str, default_key: str) -> None:
+        hotkeys = dict(self.cfg.get("custom_hotkeys") or {})
+        hotkeys.pop(action, None)
+        self.cfg["custom_hotkeys"] = hotkeys
+        update_config(lambda c: {
+            **c,
+            "custom_hotkeys": {k: v for k, v in (c.get("custom_hotkeys") or {}).items() if k != action},
+        })
+        lbl = self._hotkey_labels.get(action)
+        if lbl is not None:
+            lbl.setText(self._format_hotkey_binding(action, default_key))
+
+    def _copy_command(self, cmd: str) -> None:
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(cmd)
+        self.shortcut_status_lbl.setText(f"Copied: {cmd}")
+
+    def _register_desktop_shortcut(self, action: str = ACTION_OPEN_CENTER, default_key: str = "Meta+G") -> None:
+        ok, msg = register_desktop_shortcut(action, default_key)
+        self.shortcut_status_lbl.setText(msg if msg else ("Shortcut registered." if ok else "Registration failed."))
 
     def _make_chip(self, title: str, val_text: str, icon_name: str, sub_text: str = "") -> QFrame:
         chip = QFrame()
@@ -256,9 +533,8 @@ class SettingsPage(QWidget):
         return chip
 
     def _populate_diag_chips(self) -> None:
-        """(Re)build the hardware diagnostic chips from a fresh capability probe."""
+        """(Re)build the 5 hardware diagnostic chips from a fresh capability probe."""
         self._diag_grid.clear()
-
         caps = detect_system_capabilities()
 
         # 1. Device Model
@@ -271,7 +547,7 @@ class SettingsPage(QWidget):
         if caps.keyboard_detected and caps.keyboard_vid_pid:
             vid, pid = caps.keyboard_vid_pid
             kbd_val = f"0x{vid:04X}:0x{pid:04X}"
-            kbd_sub = "(HID LampArray)" if caps.keyboard_lamparray_supported else "(Unsupported — Use v4.5.x)"
+            kbd_sub = "(HID LampArray)" if caps.keyboard_lamparray_supported else "(Unsupported)"
         else:
             kbd_val = "Not Detected"
             kbd_sub = "(No RGB Controller)"
@@ -293,7 +569,19 @@ class SettingsPage(QWidget):
             self._make_chip("ACPI Driver", acpi_val, "bolt", acpi_sub)
         )
 
-        # 4. Battery Limiter
+        # 4. Discrete GPU
+        if dgpu_gate.is_supported():
+            dgpu_mode = str(self.cfg.get("dgpu_power_mode", "optimus"))
+            dgpu_val = dgpu_mode.capitalize()
+            dgpu_sub = "(Gate Supported)"
+        else:
+            dgpu_val = "Standard"
+            dgpu_sub = "(No ACPI Gate)"
+        self._diag_grid.addWidget(
+            self._make_chip("Discrete GPU", dgpu_val, "gpu", dgpu_sub)
+        )
+
+        # 5. Charge Limiter
         if caps.charge_limit_supported:
             bat_val = "Supported"
             bat_sub = "(EC / sysfs)"
@@ -307,68 +595,56 @@ class SettingsPage(QWidget):
             self._make_chip("Charge Limiter", bat_val, "battery", bat_sub)
         )
 
-    def _sync_power_supported(self) -> bool:
-        """Whether system power sync is meaningful (discovered power profiles)."""
+    def _on_copy_doctor_clicked(self) -> None:
+        buf = io.StringIO()
         try:
-            caps = detect_system_capabilities()
-            return bool(caps.has_power_profiles or caps.discovered_profiles)
-        except Exception:
-            return False
+            with contextlib.redirect_stdout(buf):
+                rc = doctor.run_doctor()
+            report = buf.getvalue().strip() or f"gigamate doctor exited with code {rc}"
+        except Exception as exc:
+            report = f"gigamate doctor error: {exc}"
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setText(report)
+        self.update_status_lbl.setText("Doctor report copied to clipboard.")
 
-    def _refresh_sync_power_enabled(self) -> None:
-        """Update enabled state and tooltip for the system power sync row."""
-        sync_enabled = bool(self._sync_power_supported())
-        self.chk_sync_power.setEnabled(sync_enabled)
-        tip = (
-            ""
-            if sync_enabled
-            else "System power profile sync requires a verified Gigabyte laptop model profile"
-        )
-        self._row_sync_power.setToolTip(tip)
-        self.chk_sync_power.setToolTip(tip)
+    def _on_check_updates_clicked(self) -> None:
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        self.btn_check_updates.setEnabled(False)
+        self.update_status_lbl.setText("Checking for updates…")
+        self._update_thread = _UpdateCheckThread(parent=self)
+        self._update_thread.finished_check.connect(self._on_update_check_finished)
+        self._update_thread.start()
 
-    def _on_startup_apply_toggled(self, checked: bool) -> None:
-        def _mutate(cfg):
-            cfg["startup_apply"] = checked
-            return cfg
-        self.cfg = update_config(_mutate)
-
-    def _on_sync_power_toggled(self, checked: bool) -> None:
-        def _mutate(cfg):
-            cfg["sync_system_power"] = checked
-            # Choosing to sync implies a profile to sync from; default to
-            # Balanced if the user has never picked one.
-            if checked and cfg.get("acpi_profile") is None:
-                cfg["acpi_profile"] = 1
-            return cfg
-        self.cfg = update_config(_mutate)
-        if checked:
-            sync_system_power(self.cfg.get("acpi_profile", 1))
-
-    def _on_dgpu_auto_toggled(self, checked: bool) -> None:
-        try:
-            from ... import dgpu_tune
-            dgpu_tune.set_auto_config(checked)
-        except Exception:
-            pass
-        self.cfg = load_config()
+    def _on_update_check_finished(self, res: object) -> None:
+        self.btn_check_updates.setEnabled(True)
+        if not isinstance(res, dict):
+            self.update_status_lbl.setText("Update check failed.")
+            return
+        if not res.get("reachable", True):
+            self.update_status_lbl.setText("Offline — could not check for updates.")
+            return
+        if res.get("error"):
+            self.update_status_lbl.setText(f"Update check failed: {res['error']}")
+            return
+        if res.get("update_available"):
+            latest = res.get("latest_version") or res.get("latest") or "new version"
+            self.update_status_lbl.setText(f"Update available: {latest}")
+        else:
+            self.update_status_lbl.setText(f"Up to date (v{__version__})")
 
     def _on_run_setup_clicked(self) -> None:
-        """Re-open the first-run setup wizard."""
-        try:
-            from ..onboarding import OnboardingWizard
-            OnboardingWizard(self).exec()
-        except Exception:
-            pass
+        from ..onboarding import OnboardingWizard
+
+        OnboardingWizard(self).exec()
         self.reload_from_config()
 
     def _on_restart_service_clicked(self) -> None:
         self.btn_restart_service.setEnabled(False)
         self.btn_restart_service.setCursor(Qt.CursorShape.ArrowCursor)
-        self.btn_restart_service.setText("Restarting...")
+        self.btn_restart_service.setText("Restarting…")
         try:
-            # --no-block returns immediately so the GUI thread never waits for
-            # the unit to fully restart (which can take many seconds).
             subprocess.run(
                 ["systemctl", "--user", "restart", "--no-block", "gigamate.service"],
                 check=False,
@@ -383,6 +659,7 @@ class SettingsPage(QWidget):
         self.btn_restart_service.setEnabled(True)
         self.btn_restart_service.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_restart_service.setText("Restart Daemon")
+        self._service_status_cache = None
         self._refresh_service_status()
 
     def _on_repair_driver_clicked(self) -> None:
@@ -400,7 +677,6 @@ class SettingsPage(QWidget):
             proc.finished.connect(self._on_repair_finished)
             proc.start(cmd[0], cmd[1:])
             return
-        # Helper not installed (older install): run the sudo commands in a terminal.
         term_cmd = build_terminal_repair_command()
         if term_cmd:
             try:
@@ -409,7 +685,8 @@ class SettingsPage(QWidget):
                     "Repair running in terminal",
                     "The ACPI driver repair is running in a terminal window (sudo "
                     "will ask for your password there). Restart the daemon afterwards "
-                    "if the driver does not appear loaded.")
+                    "if the driver does not appear loaded.",
+                )
                 return
             except Exception:
                 pass
@@ -417,7 +694,8 @@ class SettingsPage(QWidget):
             "Manual repair",
             "Run the following in a terminal (sudo will ask for your password):\n\n"
             "  sudo dkms install gigamate_acpi/<version> -k $(uname -r) --force\n"
-            "  sudo modprobe gigamate_acpi")
+            "  sudo modprobe gigamate_acpi",
+        )
 
     def _on_repair_read(self) -> None:
         data = bytes(self._repair_proc.readAll()).decode("utf-8", "replace")
@@ -428,17 +706,18 @@ class SettingsPage(QWidget):
         ok = False
         detail = out.strip()
         try:
-            # The helper emits a single JSON line; parse the last line.
             result = json.loads(detail.splitlines()[-1]) if detail else {}
             ok = bool(result.get("ok"))
             if not ok and result.get("error"):
                 detail = result["error"]
         except Exception:
             ok = code == 0
-        # A reloaded module needs a fresh probe; restart the tray so it re-inits ACPI.
         try:
-            subprocess.run(["systemctl", "--user", "restart", "--no-block",
-                            "gigamate.service"], check=False, timeout=5)
+            subprocess.run(
+                ["systemctl", "--user", "restart", "--no-block", "gigamate.service"],
+                check=False,
+                timeout=5,
+            )
         except Exception:
             pass
         invalidate_capabilities()
@@ -447,8 +726,9 @@ class SettingsPage(QWidget):
         self.btn_repair_driver.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_repair_driver.setText("Repair Driver")
         if ok:
-            self._show_repair_info("Repair complete",
-                                   "The ACPI kernel driver was rebuilt and reloaded.")
+            self._show_repair_info(
+                "Repair complete", "The ACPI kernel driver was rebuilt and reloaded."
+            )
         else:
             self._show_repair_info("Repair incomplete", detail or "See the output above.")
 
@@ -460,7 +740,6 @@ class SettingsPage(QWidget):
         box.exec()
 
     def _update_repair_button_state(self) -> None:
-        """Hint when the ACPI driver is expected but missing on a Gigabyte laptop."""
         try:
             caps = detect_system_capabilities()
             broken = bool(caps.is_gigabyte_laptop and not caps.acpi_driver_loaded)
@@ -480,11 +759,12 @@ class SettingsPage(QWidget):
             style.polish(self.btn_repair_driver)
         self.btn_repair_driver.setToolTip(
             "The ACPI kernel driver (gigamate_acpi) is not loaded — rebuild and "
-            "reload it for the running kernel." if broken else
-            "Rebuild and reload the ACPI kernel driver (gigamate_acpi) for the running kernel.")
+            "reload it for the running kernel."
+            if broken
+            else "Rebuild and reload the ACPI kernel driver (gigamate_acpi) for the running kernel."
+        )
 
     def _refresh_service_status(self) -> None:
-        # Cache for 30 s so window activation does not spawn systemctl each time.
         now = time.monotonic()
         cache = getattr(self, "_service_status_cache", None)
         if cache is not None and (now - cache[0]) < 30.0:
@@ -513,23 +793,15 @@ class SettingsPage(QWidget):
     def reload_from_config(self) -> None:
         """Reload and update settings widgets from on-disk config."""
         self.cfg = load_config()
-
-        self.chk_startup_apply.blockSignals(True)
-        self.chk_startup_apply.setChecked(self.cfg.get("startup_apply", False))
-        self.chk_startup_apply.blockSignals(False)
-
-        self.chk_sync_power.blockSignals(True)
-        self.chk_sync_power.setChecked(self.cfg.get("sync_system_power", False))
-        self.chk_sync_power.blockSignals(False)
-        self._refresh_sync_power_enabled()
-
-        self.chk_dgpu_auto.blockSignals(True)
-        self.chk_dgpu_auto.setChecked(self.cfg.get("dgpu_undervolt_auto", True))
-        self.chk_dgpu_auto.blockSignals(False)
-
-        # Refresh the diagnostic chips too (driver/keyboard/battery hotplug).
+        self._sync_profile_enable_checks()
+        for action, _title, default_key in _SHORTCUT_ACTIONS:
+            lbl = self._hotkey_labels.get(action)
+            if lbl is not None:
+                lbl.setText(self._format_hotkey_binding(action, default_key))
         self._populate_diag_chips()
         self._update_repair_button_state()
-
-        # Defer the (blocking) systemctl probe so window activation stays snappy.
         QTimer.singleShot(0, self._refresh_service_status)
+
+    def resolve_section(self, key: str) -> Optional[QWidget]:
+        """Return the target card widget for a deep-link section key."""
+        return self._sections.get(key)

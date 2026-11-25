@@ -1025,6 +1025,18 @@ install_desktop_entry() {
     if command -v update-desktop-database &>/dev/null; then
         update-desktop-database "$apps_dir" 2>/dev/null || true
     fi
+    # Invalidate KDE Plasma 6 icon & theme caches in user-space so updated icons appear immediately.
+    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache" \
+          "${XDG_CACHE_HOME:-$HOME/.cache}"/plasma_theme_*.kcache 2>/dev/null || true
+    if command -v kbuildsycoca6 &>/dev/null; then
+        kbuildsycoca6 --noincremental 2>/dev/null || true
+    fi
+    if command -v dbus-send &>/dev/null; then
+        local _grp
+        for _grp in 0 1 2 3 4 5; do
+            dbus-send --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:"$_grp" 2>/dev/null || true
+        done
+    fi
     info "Tray icon installed to icon theme."
 }
 

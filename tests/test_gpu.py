@@ -696,3 +696,59 @@ class TestDgpuGateFastPaths:
             watcher.tick(now=100.0)
             find_mock.assert_not_called()
             assert watcher.status()["runtime"] == "gated_off"
+
+
+def test_nvidia_sync_power_skips_powerd_when_dgpu_gate_pauses_tuning(tmp_path):
+    from gigamate import dgpu_gate
+
+    root = _nvidia_gpu(tmp_path, status="active", power_state="D0")
+    mon = NvidiaGpuMonitor(pci_sysfs=root)
+    with patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+         patch.object(dgpu_gate, "should_pause_tuning", return_value=True), \
+         patch.object(mon, "_check_dynamic_boost_supported", return_value=True), \
+         patch.object(mon, "_check_dynamic_boost_active", return_value=False), \
+         patch.object(mon, "_start_nvidia_powerd") as start_mock:
+        assert mon.sync_power(3) is True
+        start_mock.assert_not_called()
+
+
+def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power():
+    from gigamate import dgpu_gate, tray as tray_module
+
+    app = tray_module.GigaMateTrayApp.__new__(tray_module.GigaMateTrayApp)
+    app._last_ac_online = False
+    app._current_acpi_profile = 0
+    app._building = False
+    app._profile_items = {}
+    app._get_discovered_profiles = lambda: {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
+
+    cfg = {
+        "ac_profile_mode": "switch",
+        "ac_profile_id": 2,
+        "battery_profile_id": 3,
+        "disabled_profiles": [],
+    }
+    allowed_state = {"val": False}
+
+    with patch.object(tray_module, "load_config", return_value=cfg), \
+         patch.object(tray_module, "power_config_mtime_token", return_value=1), \
+         patch.object(tray_module, "detect_power_managers", return_value={"conflicts": [], "has_external_ac_switching": False}), \
+         patch.object(dgpu_gate, "high_power_profiles_allowed", side_effect=lambda: allowed_state["val"]), \
+         patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_AUTO), \
+         patch.object(tray_module.hardware, "apply_profile") as apply_mock:
+        # Transition False -> True while dGPU is still asleep: should defer, not apply
+        app._run_profile_automation(True)
+        apply_mock.assert_not_called()
+        assert getattr(app, "_pending_ac_profile_target", None) is not None
+
+        # Next tick after dGPU wakes: should apply profile 2
+        app._last_ac_online = True
+        allowed_state["val"] = True
+        app._run_profile_automation(True)
+        apply_mock.assert_called_once_with(2, cfg=cfg, sync_system=True)
+        assert getattr(app, "_pending_ac_profile_target", None) is None
+
+        # Transition True -> False on battery with battery_profile_id=3 under auto mode: clamps to 0 (Quiet)
+        apply_mock.reset_mock()
+        app._run_profile_automation(False)
+        apply_mock.assert_called_once_with(0, cfg=cfg, sync_system=True)

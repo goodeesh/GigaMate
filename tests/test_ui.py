@@ -570,7 +570,7 @@ def test_every_page_fits_the_narrowest_window(qapp):
         available = win.stack.width()
         assert available > 0
 
-        for idx, name in enumerate(("dashboard", "battery", "rgb", "gpu", "settings")):
+        for idx, name in enumerate(("dashboard", "battery", "rgb", "gpu", "automation", "settings")):
             win.stack.setCurrentIndex(idx)
             qapp.processEvents()
             area = win.stack.currentWidget()
@@ -746,9 +746,11 @@ def test_battery_page(qapp):
 
 def test_battery_page_topup_and_calibration(qapp):
     from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.ui.pages.automation_page import AutomationPage
     from gigamate.config import load as load_config, save as save_config
 
     page = BatteryPage()
+    auto_page = AutomationPage()
 
     # Verify topup button exists
     assert page.topup_btn is not None
@@ -765,32 +767,32 @@ def test_battery_page_topup_and_calibration(qapp):
             page._on_topup_clicked()
             mock_start.assert_called_once()
 
-    # Auto calibration checkbox
-    assert page.auto_cal_chk is not None
-    assert page.auto_cal_chk.isChecked() is False  # Opt-in default False
+    # Auto calibration checkbox (moved to AutomationPage)
+    assert auto_page.auto_cal_chk is not None
+    assert auto_page.auto_cal_chk.switch.isChecked() is False  # Opt-in default False
 
     # Check auto calibration
-    page.auto_cal_chk.setChecked(True)
+    auto_page.auto_cal_chk.switch.setChecked(True)
     cfg = load_config()
     assert cfg.get("charge_calibration_auto") is True
-    assert page.interval_row_widget.isEnabled() is True
+    assert auto_page.interval_row_widget.isEnabled() is True
 
     # Interval buttons
-    assert 30 in page.interval_buttons
-    assert 14 in page.interval_buttons
-    assert 60 in page.interval_buttons
+    assert 30 in auto_page.interval_buttons
+    assert 14 in auto_page.interval_buttons
+    assert 60 in auto_page.interval_buttons
 
-    page.interval_buttons[14].click()
+    auto_page.interval_buttons[14].click()
     cfg = load_config()
     assert cfg.get("charge_calibration_interval_days") == 14
-    assert page.interval_buttons[14].isChecked() is True
+    assert auto_page.interval_buttons[14].isChecked() is True
 
     # Reload from config with topup active
     cfg["charge_topup_active"] = True
     save_config(cfg)
     page.reload_from_config()
     assert "Cancel 100% Top-Up" in page.topup_btn.text()
-    assert "Top-Up Active" in page.topup_status_label.text()
+    assert "Top-Up active" in page.topup_status_label.text()
 
 
 
@@ -814,8 +816,9 @@ def test_rgb_page_reload_from_config(qapp):
 
     assert "Active: Light Blue" in rgb.active_color_badge.text()
     assert rgb.brightness_slider.value() >= 5
-    # 5m is now a canonical step, so it is preserved exactly.
-    assert rgb.idle_combo.currentData() == 300
+    # 5m is now a canonical step, so it is preserved exactly (idle_combo moved to AutomationPage).
+    win.page_automation.reload_from_config()
+    assert win.page_automation.idle_combo.currentData() == 300
 
 
 def test_rgb_page_idle_options_match_tray_steps(qapp):
@@ -824,10 +827,10 @@ def test_rgb_page_idle_options_match_tray_steps(qapp):
     from gigamate.idle import IDLE_TIMEOUT_STEPS
 
     win = MainWindow()
-    rgb = win.page_rgb
+    auto_page = win.page_automation
 
     canonical = [sec for sec, _ in IDLE_TIMEOUT_STEPS]
-    assert [sec for _, sec in rgb.idle_options] == canonical
+    assert [sec for sec, _ in auto_page.idle_options] == canonical
     assert 15 not in canonical
 
 
@@ -993,35 +996,36 @@ def test_tray_save_config_preserves_memory_keys():
 
 
 def test_settings_page(qapp):
+    from gigamate.ui.pages.automation_page import AutomationPage
     from gigamate.ui.pages.settings_page import SettingsPage
     from gigamate.config import load as load_config, save as save_config
 
-    page = SettingsPage()
-    assert page.chk_startup_apply is not None
-    assert page.chk_sync_power is not None
-    assert page.chk_dgpu_auto is not None
+    auto_page = AutomationPage()
+    assert auto_page.chk_startup_apply is not None
+    assert auto_page.chk_sync_power is not None
+    assert auto_page.chk_dgpu_auto is not None
 
     # Test toggling startup apply
-    page.chk_startup_apply.setChecked(False)
+    auto_page.chk_startup_apply.switch.setChecked(False)
     assert load_config()["startup_apply"] is False
 
-    page.chk_startup_apply.setChecked(True)
+    auto_page.chk_startup_apply.switch.setChecked(True)
     assert load_config()["startup_apply"] is True
 
     # Test toggling sync power
-    page.chk_sync_power.setChecked(False)
+    auto_page.chk_sync_power.switch.setChecked(False)
     assert load_config()["sync_system_power"] is False
 
-    page.chk_sync_power.setChecked(True)
+    auto_page.chk_sync_power.switch.setChecked(True)
     assert load_config()["sync_system_power"] is True
 
     # Test toggling dGPU auto-apply (patched: no real GPU/helper access).
     with patch("gigamate.dgpu_tune.find_nvidia_bdf", return_value=None), \
          patch("gigamate.dgpu_tune._write_state_file"):
-        page.chk_dgpu_auto.setChecked(False)
+        auto_page.chk_dgpu_auto.switch.setChecked(False)
         assert load_config()["dgpu_undervolt_auto"] is False
 
-        page.chk_dgpu_auto.setChecked(True)
+        auto_page.chk_dgpu_auto.switch.setChecked(True)
         assert load_config()["dgpu_undervolt_auto"] is True
 
     # Test external config reload
@@ -1031,10 +1035,24 @@ def test_settings_page(qapp):
     cfg["dgpu_undervolt_auto"] = False
     save_config(cfg)
 
-    page.reload_from_config()
-    assert page.chk_startup_apply.isChecked() is False
-    assert page.chk_sync_power.isChecked() is False
-    assert page.chk_dgpu_auto.isChecked() is False
+    auto_page.reload_from_config()
+    assert auto_page.chk_startup_apply.switch.isChecked() is False
+    assert auto_page.chk_sync_power.switch.isChecked() is False
+    assert auto_page.chk_dgpu_auto.switch.isChecked() is False
+
+    # Test SettingsPage controls
+    settings_page = SettingsPage()
+    assert settings_page._profile_enable_checks is not None
+    assert settings_page.btn_restart_service is not None
+    assert settings_page.btn_copy_doctor is not None
+    assert settings_page.btn_check_updates is not None
+
+    settings_page._service_status_cache = (9999999999.0, "active")
+    with patch("gigamate.ui.pages.settings_page.QTimer.singleShot"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        settings_page.btn_restart_service.click()
+        settings_page._finish_restart_service()
+    assert settings_page._service_status_cache != (9999999999.0, "active")
 
 
 def test_tray_self_heals_acpi_after_repair():
@@ -1117,6 +1135,7 @@ def test_battery_page_when_battery_missing(qapp):
         page = BatteryPage()
         page.show()
         qapp.processEvents()
+        assert page.battery_tank.isVisible() is False
         assert page.progress_bar.isVisible() is False
         assert page.slider_container.isVisible() is False
         assert page.unsupported_notice.isVisible() is True
@@ -1139,6 +1158,7 @@ def test_battery_page_when_charge_limit_unsupported(qapp):
         page = BatteryPage()
         page.show()
         qapp.processEvents()
+        assert page.battery_tank.isVisible() is True
         assert page.progress_bar.isVisible() is True
         assert page.slider_container.isVisible() is False
         assert page.unsupported_notice.isVisible() is True
@@ -2042,14 +2062,14 @@ def test_automation_page_restore_handoff_visible_in_follow_system(qapp):
 
 
 def test_automation_page_shortcuts_copy_and_reset(qapp):
-    """Verify AutomationPage copies desktop shortcut commands and resets custom hotkeys."""
+    """Verify SettingsPage copies desktop shortcut commands and resets custom hotkeys."""
     from gigamate.config import load as load_config, save as save_config
-    from gigamate.ui.pages.automation_page import AutomationPage
+    from gigamate.ui.pages.settings_page import SettingsPage
 
     cfg = load_config()
     cfg["custom_hotkeys"] = {"open_center": {"key_name": "HID iface 3 (0x01)"}}
     save_config(cfg)
-    page = AutomationPage()
+    page = SettingsPage()
 
     assert "HID iface 3 (0x01)" in page._hotkey_labels["open_center"].text()
     page._reset_hotkey("open_center", "GigaMate")
@@ -2131,6 +2151,7 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
     from gigamate.acpi import AcpiCapabilities
     from gigamate.config import load as load_config
     from gigamate.ui.pages.automation_page import AutomationPage
+    from gigamate.ui.pages.settings_page import SettingsPage
 
     caps = AcpiCapabilities(
         has_temperature=True,
@@ -2146,31 +2167,34 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
     }
     page, ctrl = _dashboard_with_profiles(caps, profiles, qapp)
     assert sorted(page._profile_buttons.keys()) == [0, 1, 2, 3]
-    assert page.visible_profiles_row.isVisible() is True
 
-    # Toggle off Gaming (3)
-    page._profile_enable_checks[3].setChecked(False)
-    qapp.processEvents()
-    assert load_config()["disabled_profiles"] == [3]
-    assert 3 not in page._profile_buttons
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles):
+        settings_page = SettingsPage()
+        # Toggle off Gaming (3)
+        settings_page._profile_enable_checks[3].setChecked(False)
+        qapp.processEvents()
+        page.reload_from_config()
+        assert load_config()["disabled_profiles"] == [3]
+        assert 3 not in page._profile_buttons
 
-    # Disable 0 and 2 -> only 1 remains enabled, and its checkbox is disabled
-    page._profile_enable_checks[0].setChecked(False)
-    page._profile_enable_checks[2].setChecked(False)
-    qapp.processEvents()
-    assert sorted(page._profile_buttons.keys()) == [1]
-    assert page._profile_enable_checks[1].isEnabled() is False
+        # Disable 0 and 2 -> only 1 remains enabled, and its checkbox is disabled
+        settings_page._profile_enable_checks[0].setChecked(False)
+        settings_page._profile_enable_checks[2].setChecked(False)
+        qapp.processEvents()
+        page.reload_from_config()
+        assert sorted(page._profile_buttons.keys()) == [1]
+        assert settings_page._profile_enable_checks[1].isEnabled() is False
 
-    # Re-enable 0, 2 so only 3 is disabled, then verify AutomationPage.refresh_profiles()
-    page._profile_enable_checks[0].setChecked(True)
-    page._profile_enable_checks[2].setChecked(True)
-    qapp.processEvents()
+        # Re-enable 0, 2 so only 3 is disabled, then verify AutomationPage.refresh_profiles()
+        settings_page._profile_enable_checks[0].setChecked(True)
+        settings_page._profile_enable_checks[2].setChecked(True)
+        qapp.processEvents()
 
     with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles):
         auto_page = AutomationPage()
         auto_page.refresh_profiles()
         lbl_3, swatch_3, _base = auto_page._profile_color_rows[3]
-        assert "(Disabled in Dashboard)" in lbl_3.text()
+        assert "(Disabled in Settings)" in lbl_3.text()
         assert swatch_3.isEnabled() is False
         ac_ids = [auto_page.ac_profile_combo.itemData(i) for i in range(auto_page.ac_profile_combo.count())]
         bat_ids = [auto_page.battery_profile_combo.itemData(i) for i in range(auto_page.battery_profile_combo.count())]
@@ -2221,3 +2245,133 @@ def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
         mock_apply.assert_called_once()
         assert mock_apply.call_args[0][0] == 0
         mock_osd.assert_called_once_with("Quiet", "Low fan noise, capped GPU power")
+
+
+def test_automation_auto_gate_locks_battery_high_power_only(qapp):
+    """Auto dGPU Power Gate locks Performance/Gaming only in Battery combo, keeping AC unlocked."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    profiles = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    update_config(
+        lambda c: {
+            **c,
+            "dgpu_gate_disclaimer_accepted": True,
+            "dgpu_power_mode": "optimus",
+            "ac_action_mode": "switch",
+            "ac_profile_id": 2,
+            "battery_profile_id": 2,
+            "disabled_profiles": [],
+        }
+    )
+
+    mock_mgr = MagicMock()
+    mock_mgr.is_ac_online.return_value = True
+
+    def _fake_set_mode(mode, **_kw):
+        update_config(lambda c: {**c, "dgpu_power_mode": mode})
+
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.automation_page.dgpu_gate.set_mode", side_effect=_fake_set_mode) as mock_set_mode, \
+         patch("gigamate.battery.get_battery_manager", return_value=mock_mgr):
+        page = AutomationPage()
+        page.show()
+        page._set_ac_mode("switch")
+        qapp.processEvents()
+
+        # Enable auto_gate_switch
+        page.auto_gate_switch.switch.setChecked(True)
+        qapp.processEvents()
+
+        mock_set_mode.assert_called_with("auto", apply_now=True)
+        bat_ids = [page.battery_profile_combo.itemData(i) for i in range(page.battery_profile_combo.count())]
+        ac_ids = [page.ac_profile_combo.itemData(i) for i in range(page.ac_profile_combo.count())]
+        assert 2 not in bat_ids
+        assert 3 not in bat_ids
+        assert 2 in ac_ids
+        assert 3 in ac_ids
+        assert load_config().get("battery_profile_id") == 0
+        assert page.dgpu_battery_guard_banner.isVisible() is True
+
+        # Turn auto_gate_switch OFF -> 2 and 3 unlocked in battery_profile_combo
+        page.auto_gate_switch.switch.setChecked(False)
+        qapp.processEvents()
+        mock_set_mode.assert_called_with("optimus", apply_now=True)
+        bat_ids_after = [page.battery_profile_combo.itemData(i) for i in range(page.battery_profile_combo.count())]
+        assert 2 in bat_ids_after
+        assert 3 in bat_ids_after
+
+
+def test_aero_instrument_visual_widgets_and_dynamic_accent(qapp):
+    """MainWindow navigates all 6 pages, syncs automation, switches dynamic accent, and grabs offscreen."""
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+
+    for key in ("automation", "settings", "gpu", "battery", "keyboard", "overview"):
+        win.navigate_to(key)
+        qapp.processEvents()
+
+    with patch.object(win.page_automation, "reload_from_config") as mock_reload:
+        win.sync_all_from_config()
+        mock_reload.assert_called_once()
+
+    win._on_profile_accent_changed(0)
+    win._on_profile_accent_changed(2)
+    qapp.processEvents()
+
+    try:
+        for idx in range(6):
+            win.stack.setCurrentIndex(idx)
+            qapp.processEvents()
+            pix = win.stack.currentWidget().grab()
+            assert not pix.isNull()
+
+        win.resize(2560, 1360)
+        qapp.processEvents()
+        for page in (
+            win.page_dashboard,
+            win.page_battery,
+            win.page_rgb,
+            win.page_gpu,
+            win.page_automation,
+            win.page_settings,
+        ):
+            idx = {
+                win.page_dashboard: 0,
+                win.page_battery: 1,
+                win.page_rgb: 2,
+                win.page_gpu: 3,
+                win.page_automation: 4,
+                win.page_settings: 5,
+            }[page]
+            win.stack.setCurrentIndex(idx)
+            qapp.processEvents()
+            assert page.width() <= 1140
+            assert page.x() > 0
+
+        # Deep-link navigation scrolls to and highlights the exact target setting
+        win.resize(1020, 700)
+        qapp.processEvents()
+        assert any(tx.text() == "Automation" for _b, _ic, tx, _nm in win._nav_items)
+        assert win.page_rgb.profile_link_pill._target_page == "automation:profile_rgb"
+        assert win.page_rgb.idle_link_pill._target_page == "automation:idle_sleep"
+        assert win.page_gpu.auto_gate_link_pill._target_page == "automation:dgpu_gate"
+        assert win.page_gpu.boot_apply_link_pill._target_page == "automation:boot_apply"
+        assert win.page_battery.cal_link_pill._target_page == "automation:calibration"
+
+        win.navigate_to("automation:idle_sleep")
+        qapp.processEvents()
+        assert win.stack.currentIndex() == 4
+        assert win._last_highlighted_widget is win.page_automation.idle_card
+        assert win._scroll_by_idx[4].verticalScrollBar().value() > 0
+    finally:
+        win.close()
+        win.deleteLater()

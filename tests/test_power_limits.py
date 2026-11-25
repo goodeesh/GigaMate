@@ -265,8 +265,9 @@ def test_dashboard_shows_comparison_matrix_by_default_without_confusing_single_b
         page.timer.stop()
         try:
             page._update_power_limits_ui(active_prof_id=2, usable=True)
+            # Both the comparison matrix and active power envelope bar are always visible
             assert not page.power_limits_container.isHidden()
-            # Comparison table is visible immediately by default
+            assert not page.power_envelope_bar.isHidden()
             assert not page.compare_limits_frame.isHidden()
             # Ensure all 4 profiles and key wattages are rendered in the comparison grid
             texts = [lbl.text() for lbl in page.compare_limits_frame.findChildren(QLabel)]

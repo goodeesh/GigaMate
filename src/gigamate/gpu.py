@@ -437,6 +437,13 @@ class NvidiaGpuMonitor:
         if self._vendor == "nvidia":
             # For Gaming (3) or Performance (2), ensure nvidia-powerd is running
             if fan_profile_id in (2, 3):
+                try:
+                    from . import dgpu_gate
+
+                    if dgpu_gate.is_gated_off() or dgpu_gate.should_pause_tuning():
+                        return True
+                except Exception:
+                    pass
                 if self._check_dynamic_boost_supported() and not self._check_dynamic_boost_active():
                     return self._start_nvidia_powerd()
             return True

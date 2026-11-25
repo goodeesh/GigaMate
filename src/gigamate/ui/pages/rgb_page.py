@@ -1,14 +1,13 @@
-"""GigaMate Center — Keyboard RGB Lighting & Effects Page."""
+"""GigaMate Center — Keyboard Studio (24-bit HID LampArray RGB & Brightness)."""
 
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
-    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -36,46 +35,29 @@ from ...protocol import (
 from .. import icons
 from ..theme import THEME
 from ..widgets import (
+    KeyboardDeckWidget,
+    LinkPillButton,
     M3Banner,
     M3Card,
-    M3ComboBox,
     M3PageHeader,
-    M3ResponsiveGrid,
     M3SegmentedBar,
     M3Slider,
-    M3SwitchRow,
 )
 
-# Color swatch hex codes (display names match tray.py: cname.replace('_', ' ').title())
-COLOR_HEX_MAP: Dict[str, str] = {
-    "red": "#fc8181",
-    "green": "#68d391",
-    "yellow": "#f6e05e",
-    "blue": "#63b3ed",
-    "orange": "#f6ad55",
-    "dark_yellow": "#ecc94b",
-    "purple": "#b794f4",
-    "light_purple": "#d6bcfa",
-    "white": "#f7fafc",
-    "light_blue": "#90cdf4",
-    "blush_pink": "#f687b3",
-}
-
-
-def make_color_swatch_icon(hex_color: str, size: int = 16) -> QIcon:
-    """Generate a crisp circular antialiased color swatch icon."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor(hex_color))
-    painter.setPen(QPen(QColor(255, 255, 255, 68), 1))
-    painter.drawEllipse(1, 1, size - 2, size - 2)
-    painter.end()
-    return QIcon(pixmap)
-
-
 _HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+_QUICK_SWATCHES = [
+    "#FFFFFF",
+    "#14B8A6",
+    "#38BDF8",
+    "#3B82F6",
+    "#8B5CF6",
+    "#FF6B2B",
+    "#F59E0B",
+    "#EF4444",
+]
+
+_BRIGHTNESS_PRESETS = [15, 40, 75, 100]
 
 
 class RgbColorPad(QWidget):
@@ -89,7 +71,8 @@ class RgbColorPad(QWidget):
         self._hue: float = 0.72  # 0.0 .. 1.0
         self._sat: float = 0.40  # 0.0 .. 1.0
         self._gradient_img: Optional[QImage] = None
-        self.setMinimumHeight(148)
+        self.setMinimumHeight(164)
+        self.setMaximumHeight(196)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def current_hex(self) -> str:
@@ -183,15 +166,18 @@ class RgbColorPad(QWidget):
 
 
 class RgbPage(QWidget):
-    """Keyboard RGB backlight colours, brightness, and idle sleep timeout."""
+    """Keyboard Studio — 24-bit HID LampArray colour, brightness & live deck preview."""
+
+    navigate_requested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.cfg = load_config()
         self._full_rgb: bool = False
-        self._palette_info: Dict[str, Tuple[str, str]] = {}
-        self.color_buttons: Dict[str, QPushButton] = {}
-        self.brightness_buttons: Dict[int, QPushButton] = {}
+        self._kbd_state: str = "supported"
+        self._accent_hex: str = THEME.primary
+        self.swatch_buttons: Dict[str, QPushButton] = {}
+        self._brightness_preset_buttons: Dict[int, QPushButton] = {}
         self._brightness_debounce = QTimer(self)
         self._brightness_debounce.setSingleShot(True)
         self._brightness_debounce.setInterval(45)
@@ -203,26 +189,65 @@ class RgbPage(QWidget):
         self._pending_pad_hex: Optional[str] = None
         self._init_ui()
 
+    def set_accent(self, accent_hex: str) -> None:
+        """Accept profile accent updates from MainWindow."""
+        self._accent_hex = accent_hex or THEME.primary
+
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(20, 18, 20, 20)
+        layout.setSpacing(14)
 
         header = M3PageHeader(
-            "RGB Lighting",
-            "Keyboard backlight colour, brightness & idle energy saver",
+            "Keyboard",
+            "24-bit HID LampArray colour, brightness & live deck preview",
         )
+        trailing = QWidget()
+        tr_layout = QHBoxLayout(trailing)
+        tr_layout.setContentsMargins(0, 0, 0, 0)
+        tr_layout.setSpacing(8)
+
+        self.profile_link_pill = LinkPillButton("Profile Link: Off ↗", "automation:profile_rgb")
+        self.profile_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        tr_layout.addWidget(self.profile_link_pill)
+
+        self.idle_link_pill = LinkPillButton("Idle: Off ↗", "automation:idle_sleep")
+        self.idle_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        tr_layout.addWidget(self.idle_link_pill)
+        self.auto_link_pill = self.idle_link_pill
+
+        self.power_toggle_btn = QPushButton("Turn Off")
+        self.power_toggle_btn.setProperty("class", "OutlinedButton")
+        self.power_toggle_btn.setIcon(
+            icons.make_icon("power_off", color=THEME.on_surface, size=15)
+        )
+        self.power_toggle_btn.setIconSize(QSize(15, 15))
+        self.power_toggle_btn.setMinimumHeight(32)
+        self.power_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.power_toggle_btn.clicked.connect(self._toggle_rgb_power)
+        tr_layout.addWidget(self.power_toggle_btn)
+
+        header.set_trailing_widget(trailing)
         layout.addWidget(header)
 
-        # ── Colour Palette Card ──
+        # ── Hero Card: Live Keyboard Deck Preview ──
+        deck_card = M3Card()
+        deck_layout = QVBoxLayout(deck_card)
+        deck_layout.setContentsMargins(16, 14, 16, 14)
+        deck_layout.setSpacing(8)
+
+        self.keyboard_deck = KeyboardDeckWidget()
+        deck_layout.addWidget(self.keyboard_deck)
+        layout.addWidget(deck_card)
+
+        # ── Colour & Brightness Studio Card ──
         colour_card = M3Card()
         c_layout = QVBoxLayout(colour_card)
-        c_layout.setContentsMargins(20, 18, 20, 18)
-        c_layout.setSpacing(14)
+        c_layout.setContentsMargins(18, 16, 18, 16)
+        c_layout.setSpacing(12)
 
-        # Header with Title and Active Badge
         c_header = QHBoxLayout()
-        c_title = QLabel("Keyboard Backlight Colour")
+        c_title = QLabel("Colour & Brightness Studio")
         c_title.setProperty("class", "CardTitle")
         c_header.addWidget(c_title)
         c_header.addStretch()
@@ -234,18 +259,18 @@ class RgbPage(QWidget):
             f"color: {THEME.on_surface_variant};"
         )
         c_header.addWidget(self.active_color_badge)
-
-        self.power_toggle_btn = QPushButton("Turn Off")
-        self.power_toggle_btn.setProperty("class", "OutlinedButton")
-        self.power_toggle_btn.setIcon(
-            icons.make_icon("power_off", color=THEME.on_surface, size=15)
-        )
-        self.power_toggle_btn.setIconSize(QSize(15, 15))
-        self.power_toggle_btn.setMinimumHeight(32)
-        self.power_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.power_toggle_btn.clicked.connect(self._toggle_rgb_power)
-        c_header.addWidget(self.power_toggle_btn)
         c_layout.addLayout(c_header)
+
+        # Profile link / unlink status pill near colour controls
+        self.unlink_status_label = QLabel("")
+        self.unlink_status_label.setStyleSheet(
+            f"color: {THEME.info}; font-size: 11px; font-weight: 600; "
+            f"background-color: {THEME.info_container}; border: 1px solid {THEME.info_border}; "
+            f"border-radius: 8px; padding: 4px 10px;"
+        )
+        self.unlink_status_label.setWordWrap(True)
+        self.unlink_status_label.setVisible(False)
+        c_layout.addWidget(self.unlink_status_label)
 
         # ── Notice 1: Unsupported Keyboard (non-Gigabyte) ──
         self.kbd_unsupported_notice = M3Banner(
@@ -282,24 +307,9 @@ class RgbPage(QWidget):
         self.lamparray_permission_banner.setVisible(False)
         c_layout.addWidget(self.lamparray_permission_banner)
 
-        # ── Notice 4: LampArray Unsupported Firmware/Layout Caption ──
-        self.lamparray_unsupported_caption = QLabel("")
-        self.lamparray_unsupported_caption.setWordWrap(True)
-        self.lamparray_unsupported_caption.setStyleSheet(
-            f"color: {THEME.on_surface_muted}; font-size: 11px; background: transparent;"
-        )
-        self.lamparray_unsupported_caption.setVisible(False)
-        c_layout.addWidget(self.lamparray_unsupported_caption)
-
-        # ── Palette Container (shown when profile is mapped) ──
-        self.palette_container = QWidget()
-        palette_outer = QVBoxLayout(self.palette_container)
-        palette_outer.setContentsMargins(0, 0, 0, 0)
-        palette_outer.setSpacing(12)
-
-        # Full 24-bit RGB Pad + Compact Control Strip (shown when self._full_rgb is True)
-        self.full_rgb_container = QWidget()
-        fr_layout = QVBoxLayout(self.full_rgb_container)
+        # ── Studio Controls Container ──
+        self.studio_container = QWidget()
+        fr_layout = QVBoxLayout(self.studio_container)
         fr_layout.setContentsMargins(0, 0, 0, 0)
         fr_layout.setSpacing(12)
 
@@ -308,239 +318,184 @@ class RgbPage(QWidget):
         self.color_pad.colorCommitted.connect(self._on_pad_color_committed)
         fr_layout.addWidget(self.color_pad)
 
-        cc_row = QHBoxLayout()
-        cc_row.setContentsMargins(0, 0, 0, 0)
-        cc_row.setSpacing(10)
+        # Unified controls row: circular quick-color swatches (left) + hex/Pure White (right)
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 2, 0, 2)
+        controls_row.setSpacing(8)
+        for hex_val in _QUICK_SWATCHES:
+            sw = QPushButton()
+            sw.setFixedSize(26, 26)
+            sw.setCursor(Qt.CursorShape.PointingHandCursor)
+            sw.setToolTip(hex_val)
+            sw.setStyleSheet(
+                f"QPushButton {{ background-color: {hex_val}; border: 2px solid {THEME.outline_variant}; "
+                f"border-radius: 13px; min-width: 22px; max-width: 22px; "
+                f"min-height: 22px; max-height: 22px; padding: 0px; }}"
+                f"QPushButton:hover {{ border: 2px solid {THEME.on_surface}; }}"
+            )
+            sw.clicked.connect(lambda _, h=hex_val: self._commit_rgb_hex(h))
+            controls_row.addWidget(sw)
+            self.swatch_buttons[hex_val.lower()] = sw
+
+        controls_row.addStretch(1)
 
         self.custom_colour_swatch = QPushButton()
         self.custom_colour_swatch.setFixedSize(28, 28)
         self.custom_colour_swatch.setEnabled(False)
-        cc_row.addWidget(self.custom_colour_swatch)
+        controls_row.addWidget(self.custom_colour_swatch)
 
         self.hex_input = QLineEdit("#b794f4")
-        self.hex_input.setMaximumWidth(104)
         self.hex_input.setMaxLength(7)
+        self.hex_input.setFixedWidth(104)
         self.hex_input.setStyleSheet(
-            f"font-family: {THEME.mono_family}; font-size: 12px; font-weight: 600; "
-            f"color: {THEME.on_surface}; background-color: {THEME.surface_container_high}; "
-            f"border: 1px solid {THEME.outline_variant}; border-radius: 8px; padding: 4px 10px;"
+            f"font-family: {THEME.mono_family}; font-size: 13px; padding: 5px 8px; "
+            f"background-color: {THEME.surface_container_high}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: 8px; "
+            f"color: {THEME.on_surface};"
         )
         self.hex_input.editingFinished.connect(self._on_hex_input_committed)
-        cc_row.addWidget(self.hex_input)
+        controls_row.addWidget(self.hex_input)
 
-        cc_row.addStretch()
-
-        self.white_btn = QPushButton("White")
-        self.white_btn.setProperty("class", "OutlinedButton")
-        self.white_btn.setMinimumHeight(34)
+        self.white_btn = QPushButton("Pure White")
+        self.white_btn.setProperty("class", "TonalButton")
+        self.white_btn.setMinimumHeight(32)
         self.white_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.white_btn.clicked.connect(lambda: self._commit_rgb_hex("#ffffff"))
-        cc_row.addWidget(self.white_btn)
+        controls_row.addWidget(self.white_btn)
+        fr_layout.addLayout(controls_row)
 
-        fr_layout.addLayout(cc_row)
-        palette_outer.addWidget(self.full_rgb_container)
-        c_layout.addWidget(self.palette_container)
-        layout.addWidget(colour_card)
+        # Brightness slider + readout
+        br_row = QHBoxLayout()
+        br_row.setContentsMargins(0, 0, 0, 0)
+        br_row.setSpacing(10)
 
-        # ── Brightness & Energy Saver Card ──
-        self.opts_card = M3Card()
-        o_layout = QVBoxLayout(self.opts_card)
-        o_layout.setContentsMargins(20, 18, 20, 18)
-        o_layout.setSpacing(16)
+        br_lbl = QLabel("Brightness")
+        br_lbl.setProperty("class", "SectionLabel")
+        br_row.addWidget(br_lbl)
 
-        o_title = QLabel("Brightness & Energy Saver")
-        o_title.setProperty("class", "CardTitle")
-        o_layout.addWidget(o_title)
-
-        # Continuous 1–100% Brightness Slider + 4 presets (LampArray / full RGB)
-        self.full_brightness_container = QWidget()
-        fb_layout = QVBoxLayout(self.full_brightness_container)
-        fb_layout.setContentsMargins(0, 0, 0, 0)
-        fb_layout.setSpacing(10)
-
-        fb_slider_row = QHBoxLayout()
-        fb_slider_row.setSpacing(12)
-        fb_label = QLabel("Backlight Brightness:")
-        fb_label.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-weight: 500; min-width: 145px;"
-        )
-        fb_slider_row.addWidget(fb_label)
-
-        self.brightness_slider = M3Slider(Qt.Orientation.Horizontal)
+        self.brightness_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.brightness_slider.setRange(5, 100)
-        self.brightness_slider.setSingleStep(1)
-        self.brightness_slider.setPageStep(5)
+        self.brightness_slider.setSingleStep(5)
         self.brightness_slider.valueChanged.connect(self._on_brightness_slider_changed)
         self.brightness_slider.sliderReleased.connect(self._on_brightness_slider_released)
-        fb_slider_row.addWidget(self.brightness_slider, stretch=1)
+        br_row.addWidget(self.brightness_slider, stretch=1)
 
         self.brightness_readout = QLabel("100%")
         self.brightness_readout.setProperty("class", "ValueReadoutPill")
-        self.brightness_readout.setMinimumWidth(54)
         self.brightness_readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fb_slider_row.addWidget(self.brightness_readout)
-        fb_layout.addLayout(fb_slider_row)
-        o_layout.addWidget(self.full_brightness_container)
+        self.brightness_readout.setMinimumWidth(56)
+        br_row.addWidget(self.brightness_readout)
+        fr_layout.addLayout(br_row)
 
-        # Idle Sleep Timeout
-        idle_row = QHBoxLayout()
-        idle_row.setSpacing(12)
-        idle_label = QLabel("Backlight Auto-Off (Idle):")
-        idle_label.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-weight: 500; min-width: 145px;"
-        )
-        idle_row.addWidget(idle_label)
+        # 4 quick brightness preset pills
+        self._brightness_presets_bar = M3SegmentedBar()
+        for pct in _BRIGHTNESS_PRESETS:
+            btn = self._brightness_presets_bar.add_segment(
+                f"{pct}%", checkable=True, min_height=34
+            )
+            btn.clicked.connect(lambda _, p=pct: self._set_brightness_pct(p))
+            self._brightness_preset_buttons[pct] = btn
+        fr_layout.addWidget(self._brightness_presets_bar)
 
-        self.idle_combo = M3ComboBox()
-        self.idle_combo.setMinimumWidth(210)
-        # Single source of truth shared with the tray (gigamate.idle).
-        self.idle_options = [(label, sec) for sec, label in IDLE_TIMEOUT_STEPS]
-        for text, sec in self.idle_options:
-            self.idle_combo.addItem(text, sec)
-
-        self.idle_combo.currentIndexChanged.connect(self._on_idle_changed)
-        idle_row.addWidget(self.idle_combo)
-        idle_row.addStretch()
-        o_layout.addLayout(idle_row)
-
-        idle_caption = QLabel(
-            "Turns off the keyboard backlight after inactivity — the keyboard stays active."
-        )
-        idle_caption.setWordWrap(True)
-        idle_caption.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-size: 11px; margin-left: 157px;"
-        )
-        o_layout.addWidget(idle_caption)
-
-        self.keep_on_ac_row = M3SwitchRow(
-            "Keep backlight active on AC",
-            "Pause idle auto-off while plugged into AC power",
-        )
-        self.keep_on_ac_row.switch.toggled.connect(self._on_keep_on_ac_toggled)
-        o_layout.addWidget(self.keep_on_ac_row)
-
-        self.unlink_status_label = QLabel("")
-        self.unlink_status_label.setStyleSheet(
-            f"color: {THEME.on_surface_variant}; font-size: 11px; font-style: italic;"
-        )
-        self.unlink_status_label.setVisible(False)
-        o_layout.addWidget(self.unlink_status_label)
-
-        layout.addWidget(self.opts_card)
+        c_layout.addWidget(self.studio_container)
+        self.palette_container = self.studio_container
+        self.full_rgb_container = self.studio_container
+        self.opts_card = self.studio_container
+        layout.addWidget(colour_card)
         layout.addStretch()
 
-        self._sync_idle_combo()
-        self._refresh_keyboard_support()
-        self._highlight_active()
+        self.reload_from_config()
 
-    def _sync_idle_combo(self) -> None:
-        """Select the combo entry matching the stored timeout (nearest step)."""
-        idle_enabled = bool(self.cfg.get("idle_off_enabled", False))
-        if not idle_enabled:
-            target = IDLE_STEP_OFF
+    def _sync_auto_link_pill(self) -> None:
+        """Update header link pills for profile-link and idle-timeout rules."""
+        enabled = bool(self.cfg.get("idle_off_enabled", False))
+        sec = nearest_idle_step(int(self.cfg.get("idle_timeout_sec", IDLE_STEP_OFF)))
+        if not enabled or sec == 0:
+            idle_label = "Idle: Off"
         else:
-            target = nearest_idle_step(self.cfg.get("idle_timeout_sec", 60))
-
-        for i, (_, sec) in enumerate(self.idle_options):
-            if sec == target:
-                self.idle_combo.blockSignals(True)
-                self.idle_combo.setCurrentIndex(i)
-                self.idle_combo.blockSignals(False)
-                break
-
-        if hasattr(self, "keep_on_ac_row"):
-            self.keep_on_ac_row.switch.blockSignals(True)
-            self.keep_on_ac_row.switch.setChecked(bool(self.cfg.get("idle_keep_on_ac", False)))
-            self.keep_on_ac_row.switch.blockSignals(False)
-            self.keep_on_ac_row.setEnabled(idle_enabled)
+            step_lbl = next(
+                (lbl for s, lbl in IDLE_TIMEOUT_STEPS if s == sec),
+                "Off",
+            )
+            idle_label = f"Idle: {step_lbl}"
+        self.idle_link_pill.setText(f"{idle_label} ↗")
+        if bool(self.cfg.get("profile_rgb_enabled", False)):
+            self.profile_link_pill.setText("Profile Link: ON ↗")
+        else:
+            self.profile_link_pill.setText("Profile Link: Off ↗")
 
     def _refresh_keyboard_support(self) -> None:
-        """Inspect hardware capabilities and display appropriate notices."""
+        """Show/hide RGB controls based on detected HID LampArray keyboard."""
         caps = detect_system_capabilities()
-        diag_status = "not_detected"
-        diag_reason = ""
-        if caps.keyboard_detected and caps.keyboard_vid_pid is not None:
-            diag = diagnose_lamparray(
-                caps.keyboard_vid_pid[0],
-                caps.keyboard_vid_pid[1],
-            )
-            diag_status = str(diag.get("status", "not_detected"))
-            diag_reason = str(diag.get("reason", ""))
+        lamp_diag: dict = {}
+        if caps.keyboard_detected:
+            vid_pid = caps.keyboard_vid_pid
+            if not vid_pid:
+                dev = get_keyboard()
+                if dev is not None:
+                    vid_pid = (int(dev.idVendor), int(dev.idProduct))
+            if vid_pid:
+                try:
+                    lamp_diag = diagnose_lamparray(int(vid_pid[0]), int(vid_pid[1]))
+                except Exception:
+                    lamp_diag = {}
 
         if not caps.keyboard_detected:
             self._kbd_state = "unsupported"
-            self._full_rgb = False
-            self.palette_container.setVisible(False)
-            self.legacy_v4_banner.setVisible(False)
-            self.kbd_unsupported_notice.setVisible(True)
-            self.opts_card.setVisible(False)
-            self.active_color_badge.setVisible(False)
-            self.power_toggle_btn.setVisible(False)
-        elif not caps.keyboard_lamparray_supported or diag_status in (
+        elif not caps.keyboard_lamparray_supported or lamp_diag.get("status") in (
             "unsupported_firmware",
             "unsupported_layout",
         ):
-            self._kbd_state = "legacy_v4"
-            self._full_rgb = False
-            self.palette_container.setVisible(False)
-            self.kbd_unsupported_notice.setVisible(False)
-            self.legacy_v4_banner.setVisible(True)
-            self.opts_card.setVisible(False)
-            self.active_color_badge.setVisible(False)
-            self.power_toggle_btn.setVisible(False)
+            self._kbd_state = "legacy"
         else:
             self._kbd_state = "supported"
-            self._full_rgb = True
-            self.palette_container.setVisible(True)
-            self.full_rgb_container.setVisible(True)
-            self.kbd_unsupported_notice.setVisible(False)
-            self.legacy_v4_banner.setVisible(False)
-            self.opts_card.setVisible(True)
-            self.full_brightness_container.setVisible(True)
-            self.active_color_badge.setVisible(True)
-            self.power_toggle_btn.setVisible(True)
 
-        if diag_status == "permission_denied":
-            self.lamparray_permission_banner.body_lbl.setText(diag_reason)
+        self._full_rgb = self._kbd_state == "supported"
+
+        self.kbd_unsupported_notice.setVisible(self._kbd_state == "unsupported")
+        self.legacy_v4_banner.setVisible(self._kbd_state == "legacy")
+        self.studio_container.setVisible(self._kbd_state == "supported")
+        self.power_toggle_btn.setVisible(self._kbd_state == "supported")
+
+        if lamp_diag.get("status") == "permission_denied":
+            self.lamparray_permission_banner.title_lbl.setText("24-bit RGB Permission Denied")
+            self.lamparray_permission_banner.set_body(
+                str(
+                    lamp_diag.get("reason")
+                    or "GigaMate detected a LampArray RGB keyboard, but permission to its HID node was denied."
+                )
+            )
             self.lamparray_permission_banner.setVisible(True)
         else:
             self.lamparray_permission_banner.setVisible(False)
-        self.lamparray_unsupported_caption.setVisible(False)
 
-    def _set_colour(self, colour: str) -> None:
-        # Atomic read-modify-write so concurrent changes from tray/CLI are not
-        # clobbered by a stale in-memory snapshot.
-        def _mutate(cfg):
-            if self._full_rgb:
-                if effective_brightness_pct(cfg) == 0:
-                    restored_pct = int(cfg.get("last_brightness_pct", 25) or 25)
-                    cfg["brightness_pct"] = restored_pct
-                    cfg["brightness"] = pct_to_legacy_brightness(restored_pct)
-                cfg["colour"] = colour
-                cfg["rgb_hex"] = None
-            else:
-                if cfg.get("brightness", 2) == 0:
-                    restored = cfg.get("last_brightness", 2)
-                    if restored == 0:
-                        restored = 2
-                    cfg["brightness"] = restored
-                cfg["colour"] = colour
-            return cfg
-
-        self.cfg = update_config(_mutate)
-        self._unlink_profile_rgb_if_needed()
-        self._apply_hardware()
-        self._highlight_active()
+    def _update_deck_preview(
+        self,
+        hex_color: Optional[str] = None,
+        brightness_pct: Optional[int] = None,
+        enabled: Optional[bool] = None,
+    ) -> None:
+        """Update the hero KeyboardDeckWidget preview."""
+        c = hex_color or effective_rgb_hex(self.cfg)
+        b = (
+            int(brightness_pct)
+            if brightness_pct is not None
+            else max(5, int(self.cfg.get("brightness_pct", 100) or 100))
+        )
+        en = is_rgb_enabled(self.cfg) if enabled is None else bool(enabled)
+        self.keyboard_deck.set_lighting(c, b, enabled=en)
 
     def _on_pad_color_changed(self, rgb_hex: str) -> None:
         self._pending_pad_hex = rgb_hex
         self.custom_colour_swatch.setStyleSheet(
-            f"background-color: {rgb_hex}; border: 2px solid {THEME.outline}; "
-            f"border-radius: 14px; min-width: 0px; min-height: 0px; padding: 0px;"
+            f"QPushButton {{ background-color: {rgb_hex}; border: 2px solid {THEME.outline}; "
+            f"border-radius: 14px; min-width: 24px; max-width: 24px; "
+            f"min-height: 24px; max-height: 24px; padding: 0px; }}"
         )
         self.hex_input.blockSignals(True)
         self.hex_input.setText(rgb_hex.lower())
         self.hex_input.blockSignals(False)
+        self._update_deck_preview(hex_color=rgb_hex, enabled=True)
         self._color_debounce.start()
 
     def _on_color_debounce(self) -> None:
@@ -548,12 +503,12 @@ class RgbPage(QWidget):
             return
         dev = get_keyboard()
         if dev is not None:
-            pct = max(1, effective_brightness_pct(self.cfg) or int(self.cfg.get("brightness_pct", 100) or 100))
-            set_rgb(
-                dev,
-                self._pending_pad_hex,
-                pct,
+            pct = max(
+                1,
+                effective_brightness_pct(self.cfg)
+                or int(self.cfg.get("brightness_pct", 100) or 100),
             )
+            set_rgb(dev, self._pending_pad_hex, pct)
 
     def _on_pad_color_committed(self, rgb_hex: str) -> None:
         self._color_debounce.stop()
@@ -606,19 +561,8 @@ class RgbPage(QWidget):
         self._apply_hardware()
         self._highlight_active()
 
-    def _set_brightness(self, level: int) -> None:
-        def _mutate(cfg):
-            if level > 0:
-                cfg["last_brightness"] = level
-            cfg["brightness"] = level
-            return cfg
-
-        self.cfg = update_config(_mutate)
-        self._apply_hardware()
-        self._highlight_active()
-
     def _set_brightness_pct(self, pct: int) -> None:
-        pct = max(1, min(100, int(pct)))
+        pct = max(5, min(100, int(pct)))
         self._brightness_debounce.stop()
 
         def _mutate(cfg):
@@ -635,6 +579,7 @@ class RgbPage(QWidget):
 
     def _on_brightness_slider_changed(self, pct: int) -> None:
         self.brightness_readout.setText(f"{pct}%")
+        self._update_deck_preview(brightness_pct=pct, enabled=True)
         self._brightness_debounce.start()
 
     def _on_brightness_debounce(self) -> None:
@@ -650,37 +595,11 @@ class RgbPage(QWidget):
         self.cfg = update_config(_mutate)
         dev = get_keyboard()
         if dev is not None:
-            set_rgb(
-                dev,
-                effective_rgb_hex(self.cfg),
-                pct,
-            )
+            set_rgb(dev, effective_rgb_hex(self.cfg), pct)
         self._highlight_active()
 
     def _on_brightness_slider_released(self) -> None:
         self._set_brightness_pct(self.brightness_slider.value())
-
-    def _on_idle_changed(self, index: int) -> None:
-        sec = self.idle_combo.currentData()
-
-        def _mutate(cfg):
-            if sec == 0:
-                cfg["idle_off_enabled"] = False
-            else:
-                cfg["idle_off_enabled"] = True
-                cfg["idle_timeout_sec"] = sec
-            return cfg
-
-        self.cfg = update_config(_mutate)
-        if hasattr(self, "keep_on_ac_row"):
-            self.keep_on_ac_row.setEnabled(bool(self.cfg.get("idle_off_enabled", False)))
-
-    def _on_keep_on_ac_toggled(self, checked: bool) -> None:
-        def _mutate(cfg):
-            cfg["idle_keep_on_ac"] = bool(checked)
-            return cfg
-
-        self.cfg = update_config(_mutate)
 
     def _unlink_profile_rgb_if_needed(self) -> None:
         if not self.cfg.get("profile_rgb_enabled", False):
@@ -691,143 +610,124 @@ class RgbPage(QWidget):
             return cfg
 
         self.cfg = update_config(_mutate)
-        if hasattr(self, "unlink_status_label"):
-            self.unlink_status_label.setText("Unlinked from Power Profile colour")
-            self.unlink_status_label.setVisible(True)
-            QTimer.singleShot(3000, lambda: self.unlink_status_label.setVisible(False))
+        self.unlink_status_label.setText(
+            "Unlinked from Power Profile — manual colour active."
+        )
+        self.unlink_status_label.setVisible(True)
+        self._sync_auto_link_pill()
 
     def _apply_hardware(self) -> None:
         dev = get_keyboard()
-        if dev is not None:
-            pct = effective_brightness_pct(self.cfg)
-            if not is_rgb_enabled(self.cfg) or pct == 0:
-                set_off(dev)
-            else:
-                set_rgb(
-                    dev,
-                    effective_rgb_hex(self.cfg),
-                    pct,
-                )
+        if dev is None:
+            return
+        if not is_rgb_enabled(self.cfg):
+            set_off(dev)
+            return
+        pct = effective_brightness_pct(self.cfg)
+        if pct <= 0:
+            set_off(dev)
+            return
+        set_rgb(dev, effective_rgb_hex(self.cfg), pct)
 
-    def _turn_off_backlight(self) -> None:
-        def _mutate(cfg):
-            curr_pct = effective_brightness_pct(cfg)
-            if curr_pct > 0:
-                cfg["last_brightness_pct"] = curr_pct
-                cfg["last_brightness"] = pct_to_legacy_brightness(curr_pct)
-            cfg["brightness_pct"] = 0
-            cfg["brightness"] = 0
-            return cfg
-
-        self.cfg = update_config(_mutate)
-        self._apply_hardware()
-        self._highlight_active()
+    @staticmethod
+    def _lifted_hex(hex_color: str) -> str:
+        c = QColor(hex_color)
+        if not c.isValid():
+            return THEME.primary
+        if c.lightnessF() < 0.55:
+            h, s, _, a = c.getHslF()
+            c.setHslF(max(0.0, h), s, 0.62, a)
+        return c.name()
 
     def _highlight_active(self) -> None:
-        b_level = self.cfg.get("brightness", 2)
-        active_col = self.cfg.get("colour", "light_purple")
-        custom_hex = self.cfg.get("rgb_hex")
-        if self._full_rgb and custom_hex:
-            active_hex = effective_rgb_hex(self.cfg)
-            active_label = active_hex.upper()
+        enabled = is_rgb_enabled(self.cfg)
+        is_off = not enabled
+        pct = max(5, int(self.cfg.get("brightness_pct", 100) or 100))
+        swatch_hex = effective_rgb_hex(self.cfg)
+        if self.cfg.get("rgb_hex"):
+            active_label = swatch_hex.upper()
         else:
-            active_label, active_hex = self._palette_info.get(
-                active_col, (active_col.replace("_", " ").title(), "#b794f4")
+            colour = str(self.cfg.get("colour", "light_purple") or "light_purple")
+            active_label = colour.replace("_", " ").title()
+
+        self.custom_colour_swatch.setStyleSheet(
+            f"QPushButton {{ background-color: {swatch_hex}; border: 2px solid {THEME.outline}; "
+            f"border-radius: 14px; min-width: 24px; max-width: 24px; "
+            f"min-height: 24px; max-height: 24px; padding: 0px; }}"
+        )
+        self.color_pad.set_hex(swatch_hex)
+        self.hex_input.blockSignals(True)
+        self.hex_input.setText(swatch_hex.lower())
+        self.hex_input.blockSignals(False)
+        self.brightness_slider.blockSignals(True)
+        self.brightness_slider.setValue(pct)
+        self.brightness_slider.blockSignals(False)
+        self.brightness_readout.setText(f"{pct}%")
+
+        for p_val, btn in self._brightness_preset_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(pct == p_val)
+            btn.blockSignals(False)
+
+        for hex_key, sw in self.swatch_buttons.items():
+            is_sel = hex_key == swatch_hex.lower() and enabled
+            border = THEME.on_surface if is_sel else THEME.outline_variant
+            sw.setStyleSheet(
+                f"QPushButton {{ background-color: {hex_key}; border: 2px solid {border}; "
+                f"border-radius: 13px; min-width: 22px; max-width: 22px; "
+                f"min-height: 22px; max-height: 22px; padding: 0px; }}"
+                f"QPushButton:hover {{ border: 2px solid {THEME.on_surface}; }}"
             )
 
-        if self._full_rgb:
-            enabled = is_rgb_enabled(self.cfg)
-            is_off = not enabled
-            pct = max(5, int(self.cfg.get("brightness_pct", 100) or 100))
-            swatch_hex = effective_rgb_hex(self.cfg)
-            self.custom_colour_swatch.setStyleSheet(
-                f"background-color: {swatch_hex}; border: 2px solid {THEME.outline}; "
-                f"border-radius: 14px; min-width: 0px; min-height: 0px; padding: 0px;"
+        if enabled:
+            self.power_toggle_btn.setText("Turn Off")
+            self.power_toggle_btn.setProperty("class", "OutlinedButton")
+            self.power_toggle_btn.setIcon(
+                icons.make_icon("power_off", color=THEME.on_surface, size=15)
             )
-            self.color_pad.set_hex(swatch_hex)
-            self.hex_input.blockSignals(True)
-            self.hex_input.setText(swatch_hex.lower())
-            self.hex_input.blockSignals(False)
-            self.brightness_slider.blockSignals(True)
-            self.brightness_slider.setValue(pct)
-            self.brightness_slider.blockSignals(False)
-            self.brightness_readout.setText(f"{pct}%")
-
-            if enabled:
-                self.power_toggle_btn.setText("Turn Off")
-                self.power_toggle_btn.setProperty("class", "OutlinedButton")
-                self.power_toggle_btn.setIcon(
-                    icons.make_icon("power_off", color=THEME.on_surface, size=15)
-                )
-            else:
-                self.power_toggle_btn.setText("Turn On")
-                self.power_toggle_btn.setProperty("class", "TonalButton")
-                self.power_toggle_btn.setIcon(
-                    icons.make_icon("power_off", color=THEME.on_primary_container, size=15)
-                )
-            self.power_toggle_btn.style().unpolish(self.power_toggle_btn)
-            self.power_toggle_btn.style().polish(self.power_toggle_btn)
         else:
-            is_off = b_level == 0
+            self.power_toggle_btn.setText("Turn On")
+            self.power_toggle_btn.setProperty("class", "TonalButton")
+            self.power_toggle_btn.setIcon(
+                icons.make_icon("power_off", color=THEME.on_primary_container, size=15)
+            )
+        self.power_toggle_btn.style().unpolish(self.power_toggle_btn)
+        self.power_toggle_btn.style().polish(self.power_toggle_btn)
 
-        # Update Header Badge (keep the "Uncalibrated" badge when applicable)
-        if getattr(self, "_kbd_state", "supported") != "uncalibrated":
-            if is_off:
-                self.active_color_badge.setText(f"Active: {active_label} (Off)")
-                self.active_color_badge.setStyleSheet(
-                    f"color: {THEME.on_surface_muted}; font-size: 12px; font-weight: 600; "
-                    f"padding: 4px 12px; border-radius: 12px; "
-                    f"background-color: {THEME.surface_container_high}; "
-                    f"border: 1px solid {THEME.outline_variant};"
-                )
-            else:
-                self.active_color_badge.setText(f"Active: {active_label}")
-                self.active_color_badge.setStyleSheet(
-                    f"color: {active_hex}; font-size: 12px; font-weight: 600; "
-                    f"padding: 4px 12px; border-radius: 12px; "
-                    f"background-color: {THEME.surface_container_high}; "
-                    f"border: 1px solid {active_hex};"
-                )
+        if is_off:
+            self.active_color_badge.setText(f"Active: {active_label} (Off)")
+            self.active_color_badge.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: 12px; font-weight: 600; "
+                f"padding: 4px 12px; border-radius: 12px; "
+                f"background-color: {THEME.surface_container_high}; "
+                f"border: 1px solid {THEME.outline_variant};"
+            )
+        else:
+            lifted = self._lifted_hex(swatch_hex)
+            self.active_color_badge.setText(f"Active: {active_label}")
+            self.active_color_badge.setStyleSheet(
+                f"color: {THEME.on_surface}; font-family: {THEME.mono_family}; font-size: 12px; font-weight: 700; "
+                f"padding: 4px 12px; border-radius: 12px; "
+                f"background-color: {THEME.surface_container_high}; "
+                f"border: 1.5px solid {lifted};"
+            )
 
-        for col_key, btn in self.color_buttons.items():
-            label, hex_color = self._palette_info.get(col_key, (col_key, "#ffffff"))
-            if is_off and col_key == "off":
-                btn.setText(f"  {label}   ✓")
-                btn.setStyleSheet(
-                    "QPushButton { background-color: #36302B; border: 2px solid #857A72; "
-                    "color: #F2ECE7; font-weight: 600; border-radius: 12px; "
-                    "padding: 10px 14px; text-align: left; }"
-                )
-            elif not is_off and not (self._full_rgb and custom_hex) and col_key == active_col:
-                btn.setText(f"  {label}   ✓")
-                btn.setStyleSheet(
-                    f"QPushButton {{ background-color: #36302B; border: 2px solid {hex_color}; "
-                    f"color: #F2ECE7; font-weight: 600; border-radius: 12px; "
-                    f"padding: 10px 14px; text-align: left; }}"
-                )
-            else:
-                btn.setText(f"  {label}")
-                btn.setStyleSheet(
-                    "QPushButton { background-color: #2C2723; border: 1px solid #423a35; "
-                    "color: #B9AEA6; font-weight: 500; border-radius: 12px; "
-                    "padding: 10px 14px; text-align: left; } "
-                    "QPushButton:hover { background-color: #36302B; border-color: #6E635B; "
-                    "color: #F2ECE7; }"
-                )
+        if bool(self.cfg.get("profile_rgb_enabled", False)):
+            self.unlink_status_label.setText(
+                "Linked to Power Profile — picking a colour will unlink."
+            )
+            self.unlink_status_label.setVisible(True)
+        elif "Unlinked" not in self.unlink_status_label.text():
+            self.unlink_status_label.setVisible(False)
 
-        if b_level in self.brightness_buttons:
-            self.brightness_buttons[b_level].setChecked(True)
+        self._update_deck_preview(hex_color=swatch_hex, brightness_pct=pct, enabled=enabled)
+        self._sync_auto_link_pill()
 
     def reload_from_config(self) -> None:
         """Synchronize UI with latest on-disk config without hardware writes."""
         self.cfg = load_config()
         self._refresh_keyboard_support()
-
-        # Update Colour controls and header badge
         self._highlight_active()
-
-        # Update Idle Timeout without re-firing signal
-        self._sync_idle_combo()
 
     def sync_from_config(self) -> None:
         """Alias for reload_from_config()."""

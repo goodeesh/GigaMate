@@ -1,28 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <defs>
     <linearGradient id="bg" gradientUnits="userSpaceOnUse" x1="3" y1="3" x2="61" y2="61">
-      <stop offset="0%" stop-color="#2E2824"/>
-      <stop offset="55%" stop-color="#1E1A17"/>
-      <stop offset="100%" stop-color="#161311"/>
+      <stop offset="0%" stop-color="#1A1A21"/>
+      <stop offset="100%" stop-color="#0B0B0E"/>
     </linearGradient>
     <linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="32" y1="3" x2="32" y2="61">
-      <stop offset="0%" stop-color="#5B5048"/>
-      <stop offset="100%" stop-color="#322B26"/>
+      <stop offset="0%" stop-color="#383842"/>
+      <stop offset="100%" stop-color="#202028"/>
     </linearGradient>
-    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="32" cy="34" r="22">
-      <stop offset="0%" stop-color="#E8612C" stop-opacity="0.20"/>
-      <stop offset="100%" stop-color="#E8612C" stop-opacity="0"/>
-    </radialGradient>
     <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="15" y1="14" x2="49" y2="49">
-      <stop offset="0%" stop-color="#FFC6AE"/>
-      <stop offset="52%" stop-color="#F47840"/>
-      <stop offset="100%" stop-color="#DF541F"/>
+      <stop offset="0%" stop-color="#FAFAFA"/>
+      <stop offset="100%" stop-color="#D4D4D8"/>
     </linearGradient>
   </defs>
-  <rect x="3" y="3" width="58" height="58" rx="16.5" fill="url(#bg)" stroke="url(#rim)" stroke-width="1.5"/>
-  <circle cx="32" cy="34" r="22" fill="url(#glow)"/>
-  <path d="M 41.2 21.8 A 13.8 13.8 0 1 0 45.8 32 L 33.5 32" fill="none" stroke="url(#mark)" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="51" cy="13" r="7.5" fill="#ef4444" stroke="#1E1A17" stroke-width="3"/>
-  <circle cx="51" cy="51" r="8.5" fill="#f59e0b" stroke="#1E1A17" stroke-width="3"/>
-  <path d="M 51 46.8 L 51 54.4 M 47.7 51.3 L 51 54.7 L 54.3 51.3" fill="none" stroke="#181310" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#bg)" stroke="url(#rim)" stroke-width="1.5"/>
+  <line x1="55.5" y1="32.0" x2="52.5" y2="32.0" stroke="#14B8A6" stroke-width="1.6" stroke-linecap="round"/>
+  <line x1="52.4" y1="43.8" x2="50.9" y2="42.9" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="43.8" y1="52.4" x2="42.9" y2="50.9" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="32.0" y1="55.5" x2="32.0" y2="52.5" stroke="#3F3F4A" stroke-width="1.6" stroke-linecap="round"/>
+  <line x1="20.3" y1="52.4" x2="21.1" y2="50.9" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="11.6" y1="43.8" x2="13.1" y2="42.9" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="8.5" y1="32.0" x2="11.5" y2="32.0" stroke="#3F3F4A" stroke-width="1.6" stroke-linecap="round"/>
+  <line x1="11.6" y1="20.2" x2="13.1" y2="21.1" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="20.2" y1="11.6" x2="21.1" y2="13.1" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="32.0" y1="8.5" x2="32.0" y2="11.5" stroke="#3F3F4A" stroke-width="1.6" stroke-linecap="round"/>
+  <line x1="43.8" y1="11.6" x2="42.9" y2="13.1" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <line x1="52.4" y1="20.2" x2="50.9" y2="21.1" stroke="#3F3F4A" stroke-width="1.1" stroke-linecap="round"/>
+  <path d="M 41.5 21.2 A 14 14 0 1 0 46 32" fill="none" stroke="url(#mark)" stroke-width="5.6" stroke-linecap="round"/>
+  <line x1="33" y1="32" x2="46.5" y2="32" stroke="#14B8A6" stroke-width="5.2" stroke-linecap="round"/>
+  <circle cx="51" cy="13" r="7.5" fill="#ef4444" stroke="#0B0B0E" stroke-width="3"/>
+  <circle cx="51" cy="51" r="8.5" fill="#f59e0b" stroke="#0B0B0E" stroke-width="3"/>
+  <path d="M 51 46.8 L 51 54.4 M 47.7 51.3 L 51 54.7 L 54.3 51.3" fill="none" stroke="#0B0B0E" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

@@ -17,8 +17,23 @@ from gigamate.ui.widgets.surfaces import (
     M3StatusPill,
 )
 from gigamate.ui.widgets.switch import M3Switch, M3SwitchRow
+from gigamate.ui.widgets.visuals import (
+    ArcGaugeWidget,
+    BatteryTankWidget,
+    KeyboardDeckWidget,
+    LinkPillButton,
+    PowerEnvelopeBarWidget,
+    SparklineWidget,
+    SpinningFanIcon,
+    VfCurveWidget,
+    highlight_widget,
+)
 
 __all__ = [
+    "ArcGaugeWidget",
+    "BatteryTankWidget",
+    "KeyboardDeckWidget",
+    "LinkPillButton",
     "M3Banner",
     "M3Card",
     "M3ComboBox",
@@ -34,4 +49,9 @@ __all__ = [
     "M3StatusPill",
     "M3Switch",
     "M3SwitchRow",
+    "PowerEnvelopeBarWidget",
+    "SparklineWidget",
+    "SpinningFanIcon",
+    "VfCurveWidget",
+    "highlight_widget",
 ]
