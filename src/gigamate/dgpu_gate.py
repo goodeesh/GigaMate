@@ -962,12 +962,13 @@ def _write_policy_state(state: Dict) -> None:
 
 
 def is_gated_off(
-    pci_sysfs: Path = PCI_SYSFS,
+    pci_sysfs: Optional[Path] = None,
     *,
     topo: Optional[DgpuTopology] = None,
     gate_state: Optional[Dict] = None,
 ) -> bool:
     """Whether the dGPU is currently gated off (self-healing if PCI device returned)."""
+    sysfs = PCI_SYSFS if pci_sysfs is None else pci_sysfs
     state = read_gate_state() if gate_state is None else gate_state
     if not state.get("gated"):
         return False
@@ -976,10 +977,10 @@ def is_gated_off(
     bdf = state.get("bdf")
     if isinstance(bdf, str) and _BDF_RE.fullmatch(bdf):
         # Fast path: single stat() check on the known gated BDF.
-        return not (pci_sysfs / bdf).is_dir()
+        return not (sysfs / bdf).is_dir()
     # If the GPU is visible on PCI again (e.g. BIOS repowered after resume),
     # treat it as NOT gated off.
-    if find_dgpu_topology(pci_sysfs=pci_sysfs).bdf is not None:
+    if find_dgpu_topology(pci_sysfs=sysfs).bdf is not None:
         return False
     return True
 
