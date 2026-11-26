@@ -56,6 +56,7 @@ DEFAULT_CONFIG = {
     "idle_off_enabled": False,
     "idle_timeout_sec": 60,
     "idle_keep_on_ac": False,
+    "idle_internal_only": False,
     "charge_limit": 80,
     "charge_limit_enabled": False,
     "charge_topup_active": False,
@@ -375,6 +376,8 @@ def load():
             data["idle_off_enabled"] = bool(data["idle_off_enabled"])
         if "idle_keep_on_ac" in data:
             data["idle_keep_on_ac"] = bool(data["idle_keep_on_ac"])
+        if "idle_internal_only" in data:
+            data["idle_internal_only"] = bool(data["idle_internal_only"])
         if "sync_system_power" in data:
             data["sync_system_power"] = bool(data["sync_system_power"])
         if "startup_apply" in data:
@@ -640,6 +643,7 @@ def _write_config(config):
         "idle_timeout_sec": _migrate_idle_timeout(
             config.get("idle_timeout_sec", DEFAULT_CONFIG["idle_timeout_sec"])),
         "idle_keep_on_ac": bool(config.get("idle_keep_on_ac", DEFAULT_CONFIG["idle_keep_on_ac"])),
+        "idle_internal_only": bool(config.get("idle_internal_only", DEFAULT_CONFIG["idle_internal_only"])),
         "charge_limit": _coerce_charge_limit(config.get("charge_limit", DEFAULT_CONFIG["charge_limit"])),
         "charge_limit_enabled": bool(config.get("charge_limit_enabled", DEFAULT_CONFIG["charge_limit_enabled"])),
         "dgpu_undervolt_enabled": bool(config.get("dgpu_undervolt_enabled", DEFAULT_CONFIG["dgpu_undervolt_enabled"])),

@@ -132,6 +132,7 @@ class GigaMateDaemon:
         self._idle_timeout: int = clamp_timeout(
             self._config.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
         )
+        self._idle_internal_only: bool = bool(self._config.get("idle_internal_only", False))
         self._idle_dimmed: bool = False
         self._idle_monitor: Optional[IdleMonitor] = None
         self._use_fallback_idle: bool = False
@@ -362,9 +363,15 @@ class GigaMateDaemon:
         new_idle_sec = clamp_timeout(
             new_cfg.get("idle_timeout_sec", DEFAULT_TIMEOUT_SEC)
         )
-        if (new_idle_off != self._idle_enabled) or (new_idle_sec != self._idle_timeout):
+        new_idle_internal = bool(new_cfg.get("idle_internal_only", False))
+        if (
+            (new_idle_off != self._idle_enabled)
+            or (new_idle_sec != self._idle_timeout)
+            or (new_idle_internal != self._idle_internal_only)
+        ):
             self._idle_enabled = new_idle_off
             self._idle_timeout = new_idle_sec
+            self._idle_internal_only = new_idle_internal
             self._init_idle()
 
         if (
@@ -550,14 +557,25 @@ class GigaMateDaemon:
                 return
             if self._no_keyboard and not self._has_lamparray:
                 return
+            internal_usb_ids = (
+                {(self._detected_vid, self._detected_pid)}
+                if (self._detected_vid and self._detected_pid)
+                else None
+            )
             monitor = IdleMonitor(
                 on_idle=self._on_idle_fired,
                 on_active=self._on_idle_active,
                 timeout_sec=self._idle_timeout,
                 enabled=True,
+                internal_only=self._idle_internal_only,
+                internal_usb_ids=internal_usb_ids,
             )
             if monitor.start():
                 self._idle_monitor = monitor
+                return
+            if self._idle_internal_only:
+                # Session-level D-Bus/X11 idle cannot distinguish internal vs
+                # external peripherals, so do not silently fall back.
                 return
             ms, _name = fallback_idle_ms()
             if ms is not None:

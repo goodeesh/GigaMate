@@ -1001,6 +1001,14 @@ def test_settings_page(qapp):
     assert auto_page.chk_sync_power.switch.isChecked() is False
     assert auto_page.chk_dgpu_auto.switch.isChecked() is False
 
+    # Test built-in keyboard & touchpad only idle toggle
+    auto_page.idle_combo.setCurrentIndex(1)  # enable idle timeout (10s)
+    assert auto_page.internal_only_row.isEnabled() is True
+    auto_page.internal_only_row.switch.setChecked(True)
+    assert load_config()["idle_internal_only"] is True
+    auto_page.internal_only_row.switch.setChecked(False)
+    assert load_config()["idle_internal_only"] is False
+
     # Test SettingsPage controls
     settings_page = SettingsPage()
     assert settings_page._profile_enable_checks is not None
@@ -2159,6 +2167,8 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
         lbl_3, swatch_3, _base = auto_page._profile_color_rows[3]
         assert "(Disabled in Settings)" in lbl_3.text()
         assert swatch_3.isEnabled() is False
+        assert swatch_3.text() == "—"
+        assert "#ff0000" not in swatch_3.styleSheet().lower()
         ac_ids = [auto_page.ac_profile_combo.itemData(i) for i in range(auto_page.ac_profile_combo.count())]
         bat_ids = [auto_page.battery_profile_combo.itemData(i) for i in range(auto_page.battery_profile_combo.count())]
         assert 3 not in ac_ids

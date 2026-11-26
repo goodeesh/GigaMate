@@ -499,6 +499,14 @@ class AutomationPage(QWidget):
         self.keep_on_ac_row.switch.toggled.connect(self._on_idle_keep_ac_toggled)
         idle_layout.addWidget(self.keep_on_ac_row)
 
+        self.internal_only_row = M3SwitchRow(
+            "Built-in keyboard & touchpad only",
+            "Ignore external USB/Bluetooth keyboards and mice so the backlight stays off while docked.",
+            checked=bool(self.cfg.get("idle_internal_only", False)),
+        )
+        self.internal_only_row.switch.toggled.connect(self._on_idle_internal_only_toggled)
+        idle_layout.addWidget(self.internal_only_row)
+
         layout.addWidget(self.idle_card)
 
         # ── Card 4: ON BOOT & SCHEDULE — Startup & Periodic BMS Calibration ──
@@ -590,9 +598,19 @@ class AutomationPage(QWidget):
         luminance = (0.299 * c.redF()) + (0.587 * c.greenF()) + (0.114 * c.blueF())
         return "#09090B" if luminance > 0.45 else "#FAFAFA"
 
-    def _update_swatch_style(self, pid: int, hex_color: str) -> None:
+    def _update_swatch_style(self, pid: int, hex_color: str, *, disabled: bool = False) -> None:
         btn = self._swatch_buttons.get(pid)
         if btn is None:
+            return
+        if disabled:
+            btn.setText("—")
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {THEME.surface_container}; "
+                f"color: {THEME.on_surface_muted}; "
+                f"border: 1px solid {THEME.outline_variant}; border-radius: 7px; "
+                f"font-family: {THEME.mono_family}; font-size: 11px; font-weight: 600; "
+                f"padding: 0px 8px; min-height: 0px; }}"
+            )
             return
         fg = self._contrast_text_color(hex_color)
         btn.setText(hex_color)
@@ -913,6 +931,7 @@ class AutomationPage(QWidget):
         secs_int = int(secs)
         enabled = secs_int != 0
         self.keep_on_ac_row.setEnabled(enabled)
+        self.internal_only_row.setEnabled(enabled)
         if enabled:
             update_config(lambda c: {**c, "idle_off_enabled": True, "idle_timeout_sec": secs_int})
         else:
@@ -922,6 +941,11 @@ class AutomationPage(QWidget):
         val = bool(checked)
         self.cfg["idle_keep_on_ac"] = val
         update_config(lambda c: {**c, "idle_keep_on_ac": val})
+
+    def _on_idle_internal_only_toggled(self, checked: bool) -> None:
+        val = bool(checked)
+        self.cfg["idle_internal_only"] = val
+        update_config(lambda c: {**c, "idle_internal_only": val})
 
     def _on_startup_apply_toggled(self, checked: bool) -> None:
         val = bool(checked)
@@ -977,7 +1001,14 @@ class AutomationPage(QWidget):
                 f"color: {lbl_color}; font-size: 13px; font-weight: 500; background: transparent;"
             )
             swatch.setEnabled(rgb_on and not is_disabled)
-            self._update_swatch_style(pid, profile_rgb_for(self.cfg, pid))
+            swatch.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if (rgb_on and not is_disabled)
+                else Qt.CursorShape.ArrowCursor
+            )
+            self._update_swatch_style(
+                pid, profile_rgb_for(self.cfg, pid), disabled=is_disabled
+            )
 
     def refresh_profiles(self) -> None:
         """Refresh disabled-profile state for colour swatches and AC/Battery combos."""
@@ -1049,6 +1080,11 @@ class AutomationPage(QWidget):
         self.keep_on_ac_row.switch.blockSignals(True)
         self.keep_on_ac_row.switch.setChecked(bool(self.cfg.get("idle_keep_on_ac", False)))
         self.keep_on_ac_row.switch.blockSignals(False)
+
+        self.internal_only_row.setEnabled(idle_enabled)
+        self.internal_only_row.switch.blockSignals(True)
+        self.internal_only_row.switch.setChecked(bool(self.cfg.get("idle_internal_only", False)))
+        self.internal_only_row.switch.blockSignals(False)
 
         # Card 4: Boot & BMS Calibration
         self.chk_startup_apply.switch.blockSignals(True)
