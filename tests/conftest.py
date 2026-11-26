@@ -54,13 +54,13 @@ def _no_real_hardware(monkeypatch, tmp_path):
     # UI/tray modules are optional (PyQt6/gi may be missing, e.g. on CI).
     main_window_mod = _try_import("gigamate.ui.main_window")
     onboarding_mod = _try_import("gigamate.ui.onboarding")
-    tray_mod = _try_import("gigamate.tray")
+    daemon_mod = _try_import("gigamate.daemon")
     if main_window_mod is not None:
         monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
     if onboarding_mod is not None:
         monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
-    if tray_mod is not None:
-        monkeypatch.setattr("gigamate.tray.CONFIG_FILE", cfg_file, raising=False)
+    if daemon_mod is not None:
+        monkeypatch.setattr("gigamate.daemon.CONFIG_FILE", cfg_file, raising=False)
 
 
     # ── Hermetic env ──
@@ -87,8 +87,6 @@ def _no_real_hardware(monkeypatch, tmp_path):
     monkeypatch.setattr("gigamate.sleep_handler.set_off", lambda *a, **k: True, raising=False)
     for fn in ("mutter_idle_ms", "screensaver_idle_ms", "x11_idle_ms"):
         monkeypatch.setattr(f"gigamate.idle.{fn}", lambda *a, **k: None, raising=False)
-    if tray_mod is not None:
-        monkeypatch.setattr("gigamate.tray.resolve_profile", lambda *a, **k: None, raising=False)
 
     # ── High-level hardware reapplication ──
     noop_apply = MagicMock(side_effect=_safe_apply_hardware_settings)
@@ -206,28 +204,23 @@ def _no_real_hardware(monkeypatch, tmp_path):
         raising=False,
     )
 
-    # ── GTK tray (optional) ──
-    try:
-        import gigamate.tray  # noqa: F401
-
-        monkeypatch.setattr("gigamate.tray.detect_device", lambda *a, **k: None, raising=False)
-        monkeypatch.setattr("gigamate.tray.AcpiController", lambda *a, **k: fake_ctrl, raising=False)
-        monkeypatch.setattr("gigamate.tray.get_gpu_state", lambda *a, **k: GpuState(present=False), raising=False)
-        monkeypatch.setattr("gigamate.tray.HotkeyListener", MagicMock(), raising=False)
-        monkeypatch.setattr("gigamate.tray.sync_system_power", MagicMock(return_value=True), raising=False)
+    # ── Background daemon (pure Python, always importable) ──
+    if daemon_mod is not None:
+        monkeypatch.setattr("gigamate.daemon.detect_keyboards", lambda *a, **k: [], raising=False)
+        monkeypatch.setattr("gigamate.daemon.AcpiController", lambda *a, **k: fake_ctrl, raising=False)
+        monkeypatch.setattr("gigamate.daemon.get_gpu_state", lambda *a, **k: GpuState(present=False), raising=False)
+        monkeypatch.setattr("gigamate.daemon.HotkeyListener", MagicMock(), raising=False)
         monkeypatch.setattr(
-            "gigamate.tray.update_checker.check_for_updates",
+            "gigamate.daemon.update_checker.check_for_updates",
             MagicMock(return_value={"current": "0.0.0", "latest": None,
                                     "update_available": False, "reachable": True}),
             raising=False,
         )
-        monkeypatch.setattr("gigamate.tray.get_keyboard", lambda *a, **k: None, raising=False)
-        monkeypatch.setattr("gigamate.tray.set_static", lambda *a, **k: True, raising=False)
-        monkeypatch.setattr("gigamate.tray.set_off", lambda *a, **k: True, raising=False)
-        monkeypatch.setattr("gigamate.tray.apply_hardware_settings", MagicMock(return_value={}), raising=False)
-        monkeypatch.setattr("gigamate.tray.get_sleep_handler", lambda *a, **k: MagicMock(), raising=False)
-        monkeypatch.setattr("gigamate.tray.get_battery_manager", lambda *a, **k: fake_battery, raising=False)
-    except Exception:
-        pass
+        monkeypatch.setattr("gigamate.daemon.get_keyboard", lambda *a, **k: None, raising=False)
+        monkeypatch.setattr("gigamate.daemon.set_rgb", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr("gigamate.daemon.set_off", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr("gigamate.daemon.apply_hardware_settings", MagicMock(return_value={}), raising=False)
+        monkeypatch.setattr("gigamate.daemon.get_sleep_handler", lambda *a, **k: MagicMock(), raising=False)
+        monkeypatch.setattr("gigamate.daemon.get_battery_manager", lambda *a, **k: fake_battery, raising=False)
 
     yield

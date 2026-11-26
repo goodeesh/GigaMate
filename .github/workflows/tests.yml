@@ -43,9 +43,9 @@ jobs:
         run: |
           python -m pytest tests/ -v -rs --strict-markers
 
-      - name: Verify tray imports on system Python (has PyGObject)
+      - name: Verify daemon and tray imports
         run: |
-          /usr/bin/python3 -c "import gi; gi.require_version('Gtk','3.0'); import sys; sys.path.insert(0,'src'); import gigamate.tray; print('tray imports OK')"
+          QT_QPA_PLATFORM=offscreen python -c "import gigamate.daemon, gigamate.tray; print('daemon + tray imports OK')"
 
   lint:
     runs-on: ubuntu-latest

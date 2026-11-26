@@ -54,7 +54,11 @@ def apply_profile(
 
     update_config(lambda c: {**c, "acpi_profile": int(profile_id)})
 
-    if applied and sync_system and cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"]):
+    sync_enabled = bool(
+        cfg.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])
+        or str(cfg.get("ac_profile_mode", "off")) == "switch"
+    )
+    if applied and sync_system and sync_enabled:
         try:
             from .system_power import sync_system_power
 

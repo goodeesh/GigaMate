@@ -713,17 +713,12 @@ def test_nvidia_sync_power_skips_powerd_when_dgpu_gate_pauses_tuning(tmp_path):
 
 
 def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power():
-    import pytest
+    from gigamate import daemon as daemon_module, dgpu_gate
 
-    pytest.importorskip("gi")
-    from gigamate import dgpu_gate, tray as tray_module
-
-    app = tray_module.GigaMateTrayApp.__new__(tray_module.GigaMateTrayApp)
-    app._last_ac_online = False
-    app._current_acpi_profile = 0
-    app._building = False
-    app._profile_items = {}
-    app._get_discovered_profiles = lambda: {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
+    d = daemon_module.GigaMateDaemon()
+    d._last_ac_online = False
+    d._current_acpi_profile = 0
+    d.get_discovered_profiles = lambda: {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
 
     cfg = {
         "ac_profile_mode": "switch",
@@ -733,25 +728,25 @@ def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power
     }
     allowed_state = {"val": False}
 
-    with patch.object(tray_module, "load_config", return_value=cfg), \
-         patch.object(tray_module, "power_config_mtime_token", return_value=1), \
-         patch.object(tray_module, "detect_power_managers", return_value={"conflicts": [], "has_external_ac_switching": False}), \
+    with patch.object(daemon_module, "load_config", return_value=cfg), \
+         patch.object(daemon_module, "power_config_mtime_token", return_value=1), \
+         patch.object(daemon_module, "detect_power_managers", return_value={"conflicts": [], "has_external_ac_switching": False}), \
          patch.object(dgpu_gate, "high_power_profiles_allowed", side_effect=lambda: allowed_state["val"]), \
          patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_AUTO), \
-         patch.object(tray_module.hardware, "apply_profile") as apply_mock:
+         patch.object(daemon_module.hardware, "apply_profile") as apply_mock:
         # Transition False -> True while dGPU is still asleep: should defer, not apply
-        app._run_profile_automation(True)
+        d._run_profile_automation(True)
         apply_mock.assert_not_called()
-        assert getattr(app, "_pending_ac_profile_target", None) is not None
+        assert d._pending_ac_profile_target is not None
 
         # Next tick after dGPU wakes: should apply profile 2
-        app._last_ac_online = True
+        d._last_ac_online = True
         allowed_state["val"] = True
-        app._run_profile_automation(True)
+        d._run_profile_automation(True)
         apply_mock.assert_called_once_with(2, cfg=cfg, sync_system=True)
-        assert getattr(app, "_pending_ac_profile_target", None) is None
+        assert d._pending_ac_profile_target is None
 
         # Transition True -> False on battery with battery_profile_id=3 under auto mode: clamps to 0 (Quiet)
         apply_mock.reset_mock()
-        app._run_profile_automation(False)
+        d._run_profile_automation(False)
         apply_mock.assert_called_once_with(0, cfg=cfg, sync_system=True)

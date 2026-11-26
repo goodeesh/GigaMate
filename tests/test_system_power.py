@@ -112,22 +112,15 @@ def test_detect_power_managers_with_tlp_and_powerdevil(tmp_path, monkeypatch):
 def test_follow_system_ignores_stale_tlp_pd_during_settle_window(monkeypatch):
     """After GigaMate switches profile, follow_system must not revert on stale tlp-pd Get()."""
     from unittest.mock import MagicMock, patch
-    import pytest
-    pytest.importorskip("gi")
-    from gigamate import tray as tray_mod
+    from gigamate import daemon as daemon_mod
 
-    app = tray_mod.GigaMateTrayApp.__new__(tray_mod.GigaMateTrayApp)
-    app._config = {"ac_profile_mode": "follow_system", "sync_system_power": True}
-    app._current_acpi_profile = 1
-    app._last_ac_online = True
-    app._last_seen_system_profile = "balanced"
-    app._profile_sync_until = 0.0
-    app._building = False
-    app._sync_system_power = True
-    app._acpi_controller = MagicMock(available=True)
-    app._model = MagicMock()
-    app._profile_items = {}
-    app._update_status = lambda _from_timer=False: app._run_profile_automation(True) if _from_timer else None
+    d = daemon_mod.GigaMateDaemon()
+    d._config = {"ac_profile_mode": "follow_system", "sync_system_power": True}
+    d._current_acpi_profile = 1
+    d._last_ac_online = True
+    d._last_seen_system_profile = "balanced"
+    d._profile_sync_until = 0.0
+    d._acpi_controller = MagicMock(available=True)
 
     applied = []
 
@@ -135,22 +128,19 @@ def test_follow_system_ignores_stale_tlp_pd_during_settle_window(monkeypatch):
         applied.append((pid, sync_system))
         return True
 
-    fake_item = MagicMock()
-    fake_item.get_active.return_value = True
-
-    with patch.object(tray_mod.dgpu_gate, "high_power_profiles_allowed", return_value=True), \
-         patch.object(tray_mod.hardware, "apply_profile", side_effect=fake_apply), \
-         patch.object(tray_mod, "load_config", return_value=dict(app._config)), \
-         patch.object(tray_mod.SystemPowerManager, "get_active_profile", return_value="balanced"):
-        # User clicks Performance (2) while tlp-pd still reports stale "balanced"
-        app._on_profile_changed(fake_item, 2)
-        assert app._current_acpi_profile == 2
+    with patch.object(daemon_mod.dgpu_gate, "high_power_profiles_allowed", return_value=True), \
+         patch.object(daemon_mod.hardware, "apply_profile", side_effect=fake_apply), \
+         patch.object(daemon_mod, "load_config", return_value=dict(d._config)), \
+         patch.object(daemon_mod.SystemPowerManager, "get_active_profile", return_value="balanced"):
+        # User selects Performance (2) while tlp-pd still reports stale "balanced"
+        assert d.set_profile(2) is True
+        assert d._current_acpi_profile == 2
         assert applied == [(2, True)]
 
         # A timer tick arrives immediately while tlp-pd is still applying detached TLP
-        app._run_profile_automation(True)
+        d._run_profile_automation(True)
         # Must NOT revert back to Balanced (1)!
-        assert app._current_acpi_profile == 2
+        assert d._current_acpi_profile == 2
         assert applied == [(2, True)]
 
 
@@ -273,40 +263,36 @@ def test_tlp_deactivate_and_restore_pkexec(tmp_path, monkeypatch):
 
 
 def test_tray_dgpu_gate_and_one_shot_drift_notification():
-    """Tray _run_profile_automation blocks high-power profile when dGPU gated and notifies once on drift."""
-    from unittest.mock import MagicMock, patch
-    import pytest
-    pytest.importorskip("gi")
-    from gigamate import tray as tray_mod
+    """Daemon _run_profile_automation blocks high-power profile when dGPU gated and notifies once on drift."""
+    from unittest.mock import patch
+    from gigamate import daemon as daemon_mod
 
-    app = tray_mod.GigaMateTrayApp.__new__(tray_mod.GigaMateTrayApp)
-    app._config = {
+    d = daemon_mod.GigaMateDaemon()
+    d._config = {
         "ac_profile_mode": "switch",
         "ac_profile_id": 2,
         "battery_profile_id": 0,
     }
-    app._current_acpi_profile = 1
-    app._last_ac_online = False
-    app._building = False
-    app._profile_items = {}
+    d._current_acpi_profile = 1
+    d._last_ac_online = False
 
     conflict_info = {
         "conflicts": [{"id": "tlp", "name": "TLP", "scope": "system", "detail": "TLP_AUTO_SWITCH=2"}],
         "has_external_ac_switching": True,
     }
 
-    with patch.object(tray_mod, "load_config", return_value=dict(app._config)), \
-         patch.object(tray_mod, "power_config_mtime_token", return_value=(("a", 1),)), \
-         patch.object(tray_mod, "detect_power_managers", return_value=conflict_info), \
-         patch.object(tray_mod.dgpu_gate, "high_power_profiles_allowed", return_value=False), \
-         patch.object(tray_mod.hardware, "apply_profile") as mock_apply, \
-         patch.object(tray_mod.shutil, "which", return_value="/usr/bin/notify-send"), \
-         patch.object(tray_mod.subprocess, "Popen") as mock_popen:
+    with patch.object(daemon_mod, "load_config", return_value=dict(d._config)), \
+         patch.object(daemon_mod, "power_config_mtime_token", return_value=(("a", 1),)), \
+         patch.object(daemon_mod, "detect_power_managers", return_value=conflict_info), \
+         patch.object(daemon_mod.dgpu_gate, "high_power_profiles_allowed", return_value=False), \
+         patch.object(daemon_mod.hardware, "apply_profile") as mock_apply, \
+         patch.object(daemon_mod.shutil, "which", return_value="/usr/bin/notify-send"), \
+         patch.object(daemon_mod.subprocess, "Popen") as mock_popen:
         # First tick: AC plugged in -> target=2 blocked by dgpu_gate; notification sent once
-        app._run_profile_automation(True)
+        d._run_profile_automation(True)
         mock_apply.assert_not_called()
         assert mock_popen.call_count == 1
 
         # Second tick with same token: no duplicate notification
-        app._run_profile_automation(True)
+        d._run_profile_automation(True)
         assert mock_popen.call_count == 1

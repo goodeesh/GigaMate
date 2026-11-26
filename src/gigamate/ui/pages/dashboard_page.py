@@ -484,7 +484,7 @@ class DashboardPage(QWidget):
         kb_mid.addWidget(self.btn_kb_toggle)
         kb_l.addLayout(kb_mid)
 
-        self.kb_brightness_slider = M3Slider(Qt.Orientation.Horizontal)
+        self.kb_brightness_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.kb_brightness_slider.setRange(5, 100)
         self.kb_brightness_slider.valueChanged.connect(self._on_kb_brightness_changed)
         kb_l.addWidget(self.kb_brightness_slider)
@@ -942,7 +942,6 @@ class DashboardPage(QWidget):
                 **c,
                 "rgb_enabled": True,
                 "brightness_pct": val,
-                "last_brightness_pct": val,
                 "brightness": pct_to_legacy_brightness(val),
             }
         )

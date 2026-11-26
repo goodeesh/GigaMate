@@ -22,12 +22,8 @@ def qapp():
 
 
 def _import_tray_app():
-    """Import the GTK tray app, skipping if the GUI stack is unavailable."""
-    pytest.importorskip("gi")
-    try:
-        from gigamate.tray import GigaMateTrayApp
-    except Exception as exc:  # gi.require_version / typelib failures
-        pytest.skip(f"GTK/AppIndicator stack unavailable: {exc}")
+    """Import the PyQt6 tray app."""
+    from gigamate.tray import GigaMateTrayApp
     return GigaMateTrayApp
 
 
@@ -38,9 +34,10 @@ def isolate_config(tmp_path, monkeypatch):
     cfg_file = cfg_dir / "config.json"
     monkeypatch.setattr(config_mod, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(config_mod, "CONFIG_FILE", cfg_file)
-    # main_window/onboarding bound CONFIG_FILE at import; redirect them too.
+    # main_window/onboarding/daemon bound CONFIG_FILE at import; redirect them too.
     monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
     monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
+    monkeypatch.setattr("gigamate.daemon.CONFIG_FILE", cfg_file, raising=False)
     # Start each test with DEFAULT_CONFIG
     config_mod.save(dict(config_mod.DEFAULT_CONFIG))
 
@@ -835,48 +832,34 @@ def test_rgb_page_idle_options_match_tray_steps(qapp):
 
 
 def test_tray_sync_from_external_config():
-    from unittest.mock import MagicMock, patch
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "white"
-        tray._current_brightness = 2
-        tray._current_acpi_profile = 1
-        tray._idle_enabled = True
-        tray._idle_timeout = 60
-        tray._startup_apply = True
-        tray._sync_system_power = False
-        tray._building = False
-        tray._last_config_mtime = 0.0
-        tray._colour_items = {"red": MagicMock(), "white": MagicMock()}
-        tray._brightness_items = {1: MagicMock(), 2: MagicMock()}
-        tray._profile_items = {3: MagicMock()}
-        tray._idle_timeout_items = {}
-        tray._startup_item = MagicMock()
-        tray._sync_power_item = MagicMock()
-        tray._idle_parent_item = MagicMock()
-        tray._init_idle = MagicMock()
+    d = GigaMateDaemon()
+    d._current_acpi_profile = 1
+    d._idle_enabled = False
+    d._idle_timeout = 60
+    d._last_config_mtime = 0.0
+    d._init_idle = MagicMock()
 
-        with patch("gigamate.tray.load_config", return_value={
-            "colour": "red",
-            "brightness": 1,
-            "acpi_profile": 3,
-            "idle_off_enabled": True,
-            "idle_timeout_sec": 60,
-            "startup_apply": False,
-            "sync_system_power": True,
-        }), patch.object(tray, "_get_config_mtime", return_value=12345.0):
-            tray._sync_from_external_config()
-
-            assert tray._current_colour == "red"
-            assert tray._current_brightness == 1
-            assert tray._current_acpi_profile == 3
-            assert tray._startup_apply is False
-            assert tray._sync_system_power is True
-            tray._colour_items["red"].set_active.assert_called_with(True)
-            tray._brightness_items[1].set_active.assert_called_with(True)
-            tray._profile_items[3].set_active.assert_called_with(True)
+    with patch("gigamate.daemon.load_config", return_value={
+        "colour": "red",
+        "brightness": 1,
+        "brightness_pct": 50,
+        "rgb_enabled": True,
+        "acpi_profile": 3,
+        "idle_off_enabled": True,
+        "idle_timeout_sec": 30,
+        "startup_apply": False,
+        "sync_system_power": True,
+    }), patch.object(d, "_get_config_mtime", return_value=12345.0):
+        assert d.sync_from_external_config() is True
+        assert d._current_acpi_profile == 3
+        assert d._idle_enabled is True
+        assert d._idle_timeout == 30
+        d._init_idle.assert_called_once()
+        state = d.get_menu_state()
+        assert state["active_profile"] == 3
+        assert state["backlight_pct"] == 50
 
 
 def test_single_instance_quit_ipc(qapp):
@@ -925,26 +908,21 @@ def test_ensure_tray_running():
         assert fake_run.called_start is True
 
 
-def test_tray_on_quit_signals_center():
+def test_tray_on_quit_signals_center(qapp):
     GigaMateTrayApp = _import_tray_app()
-    from unittest.mock import patch, MagicMock
 
-    with patch("gigamate.tray.load_config", return_value={}), \
-         patch("gigamate.tray.get_keyboard", return_value=None), \
-         patch("gi.repository.AppIndicator3.Indicator.new_with_path", return_value=MagicMock()):
-        tray = GigaMateTrayApp()
+    tray = GigaMateTrayApp(start_daemon=False)
 
-        # Mock socket
-        mock_socket_cls = MagicMock()
-        mock_socket_instance = MagicMock()
-        mock_socket_cls.return_value.__enter__.return_value = mock_socket_instance
+    mock_socket_cls = MagicMock()
+    mock_socket_instance = MagicMock()
+    mock_socket_cls.return_value.__enter__.return_value = mock_socket_instance
 
-        with patch("os.path.exists", return_value=True), \
-             patch("socket.socket", mock_socket_cls), \
-             patch("gi.repository.Gtk.main_quit"):
-            tray._on_quit()
-            assert mock_socket_instance.sendall.called
-            assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
+    with patch("os.path.exists", return_value=True), \
+         patch("gigamate.daemon.socket.socket", mock_socket_cls), \
+         patch("gigamate.tray.QApplication.instance", return_value=MagicMock()):
+        tray.quit()
+        assert mock_socket_instance.sendall.called
+        assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
 
 
 def test_battery_page_reload_from_config(qapp):
@@ -962,37 +940,20 @@ def test_battery_page_reload_from_config(qapp):
 
 
 def test_tray_save_config_preserves_memory_keys():
-    GigaMateTrayApp = _import_tray_app()
-    from unittest.mock import patch, MagicMock
+    """Daemon backlight writes must never clobber unrelated keys like charge_limit."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "red"
-        tray._current_brightness = 2
-        tray._startup_apply = True
-        tray._sync_system_power = True
-        tray._idle_enabled = True
-        tray._idle_timeout = 60
-        tray._current_acpi_profile = 2
-        tray._config = {"charge_limit": 65, "charge_limit_enabled": True}
-        tray._battery_dirty = True  # simulate a tray-originated battery change
-        tray._get_config_mtime = MagicMock(return_value=100.0)
+    update_config(lambda c: {**c, "charge_limit": 65, "charge_limit_enabled": True, "acpi_profile": 2})
+    d = GigaMateDaemon()
+    d.set_backlight_pct(50)
 
-        captured = {}
-
-        def fake_update(mutate):
-            cfg = mutate({"charge_limit": 80})
-            captured.update(cfg)
-            return cfg
-
-        with patch("gigamate.tray.update_config", side_effect=fake_update) as mock_update:
-            tray._save_config()
-
-            mock_update.assert_called_once()
-            # Must preserve the charge limit set in memory (65), not revert to 80
-            assert captured["charge_limit"] == 65
-            assert captured["acpi_profile"] == 2
-            assert captured["colour"] == "red"
+    cfg = load_config()
+    assert cfg["charge_limit"] == 65
+    assert cfg["charge_limit_enabled"] is True
+    assert cfg["acpi_profile"] == 2
+    assert cfg["brightness_pct"] == 50
+    assert cfg["rgb_enabled"] is True
 
 
 def test_settings_page(qapp):
@@ -1056,39 +1017,36 @@ def test_settings_page(qapp):
 
 
 def test_tray_self_heals_acpi_after_repair():
-    """The tray must recover its ACPI status once the driver is back."""
-    GigaMateTrayApp = _import_tray_app()
+    """The daemon must recover its ACPI status once the driver is back."""
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = None
-        tray._acpi_caps = None
-        tray._acpi_retry_at = 0.0
-        tray._last_status_text = "Status: reading..."
-        mock_ctrl = MagicMock()
-        mock_ctrl.available = True
-        with patch("gigamate.tray.AcpiController", return_value=mock_ctrl), \
-             patch.object(tray, "_rebuild_menu") as mock_rebuild:
-            tray._ensure_acpi_controller()
-        assert tray._acpi_controller is mock_ctrl
-        assert tray._acpi_caps is mock_ctrl.capabilities
-        assert tray._last_status_text is None
-        assert mock_rebuild.called
+    d = GigaMateDaemon()
+    d._acpi_controller = None
+    d._acpi_caps = None
+    d._acpi_retry_at = 0.0
+    d._last_status_text = "Status: reading..."
+    mock_ctrl = MagicMock()
+    mock_ctrl.available = True
+    with patch("gigamate.daemon.AcpiController", return_value=mock_ctrl):
+        healed = d._ensure_acpi_controller()
+    assert healed is True
+    assert d._acpi_controller is mock_ctrl
+    assert d._acpi_caps is mock_ctrl.capabilities
+    assert d._last_status_text == ""
 
 
 def test_tray_self_heal_is_throttled():
     """Re-probing the ACPI backend must not spam AcpiController() every tick."""
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = None
-        tray._acpi_retry_at = 0.0
-        with patch("gigamate.tray.AcpiController", return_value=MagicMock(available=False)) as mock_cls:
-            tray._ensure_acpi_controller()  # first attempt
-            tray._acpi_retry_at = 999999.0  # now inside the throttle window
-            tray._ensure_acpi_controller()  # second attempt must be skipped
-            assert mock_cls.call_count == 1
+    d = GigaMateDaemon()
+    d._acpi_controller = None
+    d._acpi_retry_at = 0.0
+    with patch("gigamate.daemon.AcpiController", return_value=MagicMock(available=False)) as mock_cls:
+        d._ensure_acpi_controller()  # first attempt
+        d._acpi_retry_at = 9999999999.0  # now inside the throttle window
+        d._ensure_acpi_controller()  # second attempt must be skipped
+        assert mock_cls.call_count == 1
 
 
 def test_settings_page_has_repair_driver_button(qapp):
@@ -1501,75 +1459,36 @@ def test_run_gui_refuses_root(qapp):
 
 
 def test_tray_save_config_does_not_clobber_when_clean():
-    """A tray save with no tray-originated battery change must not write it."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "blue"
-        tray._current_brightness = 2
-        tray._startup_apply = False
-        tray._sync_system_power = False
-        tray._idle_enabled = False
-        tray._idle_timeout = 60
-        tray._current_acpi_profile = None
-        tray._config = {"colour": "blue", "charge_limit": 65, "charge_limit_enabled": True}
-        tray._battery_dirty = False
-        tray._get_config_mtime = MagicMock(return_value=100.0)
+    """Daemon backlight off must not clobber charge_limit or charge_limit_enabled."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.daemon import GigaMateDaemon
 
-        captured = {}
+    update_config(lambda c: {**c, "charge_limit": 80, "charge_limit_enabled": False})
+    d = GigaMateDaemon()
+    d.set_backlight_pct(0)
 
-        def fake_update(mutate):
-            cfg = mutate({"charge_limit": 80, "charge_limit_enabled": False})
-            captured.update(cfg)
-            return cfg
-
-        with patch("gigamate.tray.update_config", side_effect=fake_update):
-            tray._save_config()
-
-        assert captured["charge_limit"] == 80
-        assert captured["charge_limit_enabled"] is False
+    cfg = load_config()
+    assert cfg["charge_limit"] == 80
+    assert cfg["charge_limit_enabled"] is False
+    assert cfg["rgb_enabled"] is False
 
 
 def test_tray_battery_topup_menu_and_actions():
-    """Tray battery section renders top-up button and toggles state."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._menu = MagicMock()
-        tray._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": False}
-        tray._rebuild_menu = MagicMock()
+    """Daemon status_text reflects active 100% Top-Up state."""
+    from gigamate.battery import BatteryInfo
+    from gigamate.daemon import GigaMateDaemon
 
-        mgr = MagicMock()
-        mgr.is_available = True
-        mgr.is_charge_limit_supported.return_value = True
-        mgr.set_charge_limit.return_value = True
-        from gigamate.battery import BatteryInfo
-        mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=80, ac_online=True)
+    d = GigaMateDaemon()
+    d._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": True}
 
-        with patch("gigamate.tray.get_battery_manager", return_value=mgr):
-            with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
-                with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
-                    # 1. Append battery section with topup inactive: one flyout row
-                    parent = tray._append_battery_section()
-                    assert parent is tray._battery_parent_item
-                    tray._menu.append.assert_called_once_with(parent)
-                    labels = [c.get_label()
-                              for c in parent.get_submenu().get_children()]
-                    assert "Battery Care (Cap at 80%)" in labels
-                    assert "Charge to 100% Once" in labels
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=85, ac_online=True)
 
-                    # 2. Trigger start topup
-                    tray._on_start_topup(MagicMock())
-                    mock_start.assert_called_once_with(mgr)
-                    assert tray._config["charge_topup_active"] is True
-                    tray._rebuild_menu.assert_called_once()
-
-                    # 3. Trigger cancel topup
-                    tray._rebuild_menu.reset_mock()
-                    tray._on_cancel_topup(MagicMock())
-                    mock_cancel.assert_called_once_with(mgr, restore_limit=True)
-                    assert tray._config["charge_topup_active"] is False
-                    tray._rebuild_menu.assert_called_once()
+    with patch("gigamate.daemon.get_battery_manager", return_value=mgr), \
+         patch("gigamate.daemon.evaluate_calibration_state", return_value={}):
+        snap = d.poll_tick(run_automation=False)
+        assert "Batt: 85% (AC - 100% Top-Up)" in snap.status_text
 
 
 def test_onboarding_unsupported_opts_out_everything(qapp):
@@ -1655,46 +1574,38 @@ def test_onboarding_cli_created_config_stays_new(qapp):
 
 def test_tray_hotkey_action_dispatch():
     """Hotkey actions route to profile cycling or Center activation."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch.object(tray, "_on_hotkey_cycle_profile") as cyc, \
-             patch.object(tray, "_activate_center") as act:
-            tray._on_hotkey_action("mode_switch")
-            cyc.assert_called_once()
-            act.assert_not_called()
-            tray._on_hotkey_action("open_center")
-            act.assert_called_once()
-            cyc.assert_called_once()
-            # Unknown actions are logged, not raised.
-            tray._on_hotkey_action("bogus")
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch.object(d, "cycle_profile_hotkey") as cyc, \
+         patch.object(d, "open_center") as act:
+        d._on_hotkey_action("mode_switch")
+        cyc.assert_called_once()
+        act.assert_not_called()
+        d._on_hotkey_action("open_center")
+        act.assert_called_once()
+        cyc.assert_called_once()
+        # Unknown actions are logged, not raised.
+        d._on_hotkey_action("bogus")
 
 
 def test_tray_resolve_hotkey_specs_precedence():
-    """Overrides > active profile; unknown models get none."""
-    from types import SimpleNamespace
-    GigaMateTrayApp = _import_tray_app()
+    """Overrides > built-in defaults."""
+    from gigamate.daemon import GigaMateDaemon
 
-    user = SimpleNamespace(hotkeys={
-        "mode_switch": {"interface": 2, "report_id": 4, "payload": "0000ff"},
-    })
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._detected_vid, tray._detected_pid = 0x0414, 0x8105
-        tray._profile = user
-        tray._config = {"hotkey_overrides": {
-            "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
-        }}
-        by_action = {s.action: s for s in tray._resolve_hotkey_specs()}
-        assert by_action["open_center"].payload == bytes.fromhex("000091")
-        assert by_action["mode_switch"].payload == bytes.fromhex("000084")
+    d = GigaMateDaemon()
+    d._detected_vid, d._detected_pid = 0x0414, 0x8105
+    d._config = {"hotkey_overrides": {
+        "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
+    }}
+    by_action = {s.action: s for s in d._resolve_hotkey_specs()}
+    assert by_action["open_center"].payload == bytes.fromhex("000091")
+    assert by_action["mode_switch"].payload == bytes.fromhex("000084")
 
-        # No overrides: falls back to built-in default hotkeys.
-        tray._profile = None
-        tray._detected_vid, tray._detected_pid = 0x9999, 0x1234
-        tray._config = {}
-        tray._hotkey_listener = None
-        assert len(tray._resolve_hotkey_specs()) == 2
+    # No overrides: falls back to built-in default hotkeys.
+    d._detected_vid, d._detected_pid = 0x9999, 0x1234
+    d._config = {}
+    assert len(d._resolve_hotkey_specs()) == 2
 
 
 class _FakeCenterSocket:
@@ -1722,25 +1633,25 @@ class _FakeCenterSocket:
 
 
 def test_tray_activate_center_uses_socket():
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch("socket.socket", side_effect=_FakeCenterSocket), \
-             patch("gigamate.tray.subprocess.Popen") as popen:
-            tray._activate_center()
-        popen.assert_not_called()
-        assert _FakeCenterSocket.instance is not None
-        assert _FakeCenterSocket.instance.sent == b"ACTIVATE\n"
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch("gigamate.daemon.socket.socket", side_effect=_FakeCenterSocket), \
+         patch("gigamate.daemon.subprocess.Popen") as popen:
+        d.open_center()
+    popen.assert_not_called()
+    assert _FakeCenterSocket.instance is not None
+    assert _FakeCenterSocket.instance.sent == b"ACTIVATE\n"
 
 
 def test_tray_activate_center_falls_back_to_spawn():
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch("socket.socket", side_effect=OSError("no server")), \
-             patch("gigamate.tray.subprocess.Popen") as popen:
-            tray._activate_center()
-        popen.assert_called_once()
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch("gigamate.daemon.socket.socket", side_effect=OSError("no server")), \
+         patch("gigamate.daemon.subprocess.Popen") as popen:
+        d.open_center()
+    popen.assert_called_once()
 
 
 def test_main_window_init_does_not_wake_suspended_dgpu(qapp):
@@ -1943,7 +1854,7 @@ def test_automation_page_ac_mode_and_tlp_warning(qapp):
             "has_external_ac_switching": True,
             "recommended_mode": "follow_system",
         },
-    ):
+    ), patch("gigamate.ui.pages.automation_page.sync_system_power", return_value=True):
         page = AutomationPage()
         page.show()
         qapp.processEvents()
@@ -1965,8 +1876,16 @@ def test_automation_page_ac_mode_and_tlp_warning(qapp):
         assert page._ac_mode_cards["off"].is_selected() is False
         assert "GigaMate switches both Gigabyte EC" in page.ac_mode_desc_lbl.text()
         assert load_config()["ac_profile_mode"] == "switch"
+        assert page.chk_sync_power.switch.isChecked() is True
+        assert page.chk_sync_power.isEnabled() is False
+        assert load_config()["sync_system_power"] is True
         assert page.tlp_warning_banner.isVisible() is True
         assert page.ac_selectors_widget.isVisible() is True
+
+        # Switching away from GigaMate-Driven unlocks the toggle again
+        page._ac_mode_cards["off"].clicked.emit()
+        qapp.processEvents()
+        assert page.chk_sync_power.isEnabled() is True
 
 
 def test_automation_page_sole_controller_banner_when_no_conflicts(qapp):
@@ -2130,20 +2049,62 @@ def test_rgb_brightness_debounce_persists_and_apply_profile_preserves(qapp):
 
 
 def test_tray_backlight_full_rgb_persists_brightness_atomically(qapp):
-    from unittest.mock import MagicMock
     from gigamate.config import load as load_config
+    from gigamate.daemon import GigaMateDaemon
     GigaMateTrayApp = _import_tray_app()
 
-    tray = GigaMateTrayApp()
-    tray._building = False
-    item = MagicMock()
-    item.get_active.return_value = True
-    tray._on_backlight_full_rgb_selected(item, 35)
-    assert load_config()["brightness_pct"] == 35
+    d = GigaMateDaemon()
+    d._has_lamparray = True
+    d._idle_dimmed = True
+    fake_dev = MagicMock()
+    with patch.object(d, "_get_keyboard", return_value=fake_dev), \
+         patch("gigamate.daemon.set_rgb") as mock_rgb:
+        assert d.set_backlight_pct(35) is True
+        assert load_config()["brightness_pct"] == 35
+        assert load_config()["brightness"] == 1
+        assert d._idle_dimmed is False
+        mock_rgb.assert_called_once()
 
-    # Subsequent _save_config() must not clobber brightness_pct
-    tray._save_config()
-    assert load_config()["brightness_pct"] == 35
+        # Re-clicking an already-checked 100% menu action must still re-apply 100%
+        tray = GigaMateTrayApp(daemon=d, start_daemon=False)
+        d.set_backlight_pct(100)
+        tray._populate_menu()
+        assert tray._backlight_actions[100].isChecked() is True
+        mock_rgb.reset_mock()
+        tray._backlight_actions[100].trigger()
+        mock_rgb.assert_called_once()
+        assert load_config()["brightness_pct"] == 100
+
+
+def test_tray_menu_about_to_show_refreshes_dgpu_profile_sensitivity(qapp):
+    """Opening the tray menu after dGPU wakes must immediately re-enable Performance/Gaming."""
+    from gigamate.daemon import GigaMateDaemon
+    GigaMateTrayApp = _import_tray_app()
+
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    d = GigaMateDaemon()
+    d._acpi_controller = MagicMock(available=True)
+    d.get_discovered_profiles = MagicMock(return_value=discovered)
+
+    allowed = {"val": False}
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", side_effect=lambda: allowed["val"]):
+        tray = GigaMateTrayApp(daemon=d, start_daemon=False)
+        assert tray._profile_actions[2].isEnabled() is False
+        assert "(dGPU off)" in tray._profile_actions[2].text()
+        assert tray._profile_actions[3].isEnabled() is False
+
+        # AC plugged in -> dGPU wakes up; next menu open must refresh live!
+        allowed["val"] = True
+        tray.menu.aboutToShow.emit()
+        assert tray._profile_actions[2].isEnabled() is True
+        assert tray._profile_actions[2].text() == "Performance"
+        assert tray._profile_actions[3].isEnabled() is True
+        assert tray._profile_actions[3].text() == "Gaming"
 
 
 def test_dashboard_disable_profiles_and_automation_refresh(qapp):
@@ -2205,9 +2166,8 @@ def test_dashboard_disable_profiles_and_automation_refresh(qapp):
 
 
 def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
-    from unittest.mock import MagicMock, patch
     from gigamate.config import update_config
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
     discovered = {
         0: {"name": "Quiet"},
@@ -2216,23 +2176,21 @@ def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
         3: {"name": "Gaming"},
     }
     update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
-    with patch("gigamate.tray.dgpu_gate.high_power_profiles_allowed", return_value=True), \
-         patch("gigamate.tray.hardware.apply_profile") as mock_apply:
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = MagicMock()
-        tray._acpi_controller.available = True
-        tray._current_acpi_profile = 1
-        tray._get_discovered_profiles = MagicMock(return_value=discovered)
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.daemon.hardware.apply_profile", return_value=True) as mock_apply:
+        d = GigaMateDaemon()
+        d._acpi_controller = MagicMock(available=True)
+        d._current_acpi_profile = 1
+        d.get_discovered_profiles = MagicMock(return_value=discovered)
 
-        tray._on_hotkey_cycle_profile()
+        d.cycle_profile_hotkey()
         mock_apply.assert_called_once()
         assert mock_apply.call_args[0][0] == 0
 
 
 def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
-    from unittest.mock import MagicMock, patch
     from gigamate.config import update_config
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
     discovered = {
         0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
@@ -2241,16 +2199,15 @@ def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
         3: {"name": "Gaming", "description": "Maximum GPU power and cooling"},
     }
     update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
-    with patch("gigamate.tray.dgpu_gate.high_power_profiles_allowed", return_value=True), \
-         patch("gigamate.tray.hardware.apply_profile", return_value=True) as mock_apply, \
-         patch("gigamate.tray.show_profile_osd") as mock_osd:
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = MagicMock()
-        tray._acpi_controller.available = True
-        tray._current_acpi_profile = 1
-        tray._get_discovered_profiles = MagicMock(return_value=discovered)
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.daemon.hardware.apply_profile", return_value=True) as mock_apply, \
+         patch("gigamate.daemon.show_profile_osd") as mock_osd:
+        d = GigaMateDaemon()
+        d._acpi_controller = MagicMock(available=True)
+        d._current_acpi_profile = 1
+        d.get_discovered_profiles = MagicMock(return_value=discovered)
 
-        tray._on_hotkey_cycle_profile()
+        d.cycle_profile_hotkey()
         mock_apply.assert_called_once()
         assert mock_apply.call_args[0][0] == 0
         mock_osd.assert_called_once_with("Quiet", "Low fan noise, capped GPU power")
@@ -2376,6 +2333,7 @@ def test_aero_instrument_visual_widgets_and_dynamic_accent(qapp):
         assert win.page_gpu.boot_apply_link_pill._target_page == "automation:boot_apply"
         assert win.page_battery.cal_link_pill._target_page == "automation:calibration"
 
+        assert win.page_dashboard.kb_brightness_slider._ignore_wheel is True
         win.navigate_to("automation:idle_sleep")
         qapp.processEvents()
         assert win.stack.currentIndex() == 4

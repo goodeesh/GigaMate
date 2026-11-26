@@ -565,10 +565,10 @@ install_python_pkg() {
             # trusting it; otherwise fall back to pip --user.
             local venv_py="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python"
             if [ -x "$venv_py" ] && "$venv_py" -c \
-                "import gi, usb; import gigamate.tray, gigamate.idle, gigamate.ui" 2>/dev/null; then
-                info "Installed via pipx (verified: gi + tray + Center imports OK)"
+                "import gigamate.daemon, gigamate.tray, gigamate.idle, gigamate.ui" 2>/dev/null; then
+                info "Installed via pipx (verified: daemon + tray + Center imports OK)"
             else
-                warn "pipx venv verification failed (gi/tray/Center import) — falling back to pip --user"
+                warn "pipx venv verification failed (daemon/tray/Center import) — falling back to pip --user"
                 pipx uninstall gigamate 2>/dev/null || true
                 pip install --user --break-system-packages "$script_dir" 2>/dev/null || \
                 pip install --user "$script_dir"

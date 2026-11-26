@@ -567,7 +567,6 @@ class RgbPage(QWidget):
 
         def _mutate(cfg):
             cfg["rgb_enabled"] = True
-            cfg["last_brightness_pct"] = pct
             cfg["last_brightness"] = pct_to_legacy_brightness(pct)
             cfg["brightness_pct"] = pct
             cfg["brightness"] = pct_to_legacy_brightness(pct)
@@ -588,7 +587,6 @@ class RgbPage(QWidget):
         def _mutate(cfg):
             cfg["rgb_enabled"] = True
             cfg["brightness_pct"] = pct
-            cfg["last_brightness_pct"] = pct
             cfg["brightness"] = pct_to_legacy_brightness(pct)
             return cfg
 

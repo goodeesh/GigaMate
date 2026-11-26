@@ -259,8 +259,8 @@ class AutomationPage(QWidget):
         ac_layout.setSpacing(10)
         ac_layout.addLayout(
             self._make_card_header(
-                "ON AC / BATTERY — Power Source & dGPU Rules",
-                "Automate EC fan/power profiles and discrete GPU power gating when plugging or unplugging AC.",
+                "ON AC / BATTERY — Power Source, Sync & dGPU Rules",
+                "Automate EC fan/power profiles, Linux system power sync, and discrete GPU power gating on AC/battery.",
             )
         )
 
@@ -402,17 +402,26 @@ class AutomationPage(QWidget):
         sel_layout.addLayout(bat_row)
 
         ac_layout.addWidget(self.ac_selectors_widget)
+        ac_layout.addWidget(self._make_divider())
+
+        self.chk_sync_power = M3SwitchRow(
+            "Synchronize system power profile with fan profile",
+            "Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode.",
+            checked=bool(self.cfg.get("sync_system_power", False)),
+        )
+        self.chk_sync_power.switch.toggled.connect(self._on_sync_power_toggled)
+        ac_layout.addWidget(self.chk_sync_power)
         layout.addWidget(ac_card)
 
-        # ── Card 2: ON PROFILE SWITCH — Lighting & Linux System Sync ──
+        # ── Card 2: ON PROFILE SWITCH — Keyboard Lighting ──
         rgb_card = M3Card()
         rgb_layout = QVBoxLayout(rgb_card)
         rgb_layout.setContentsMargins(20, 18, 20, 18)
         rgb_layout.setSpacing(10)
         rgb_layout.addLayout(
             self._make_card_header(
-                "ON PROFILE SWITCH — Lighting & Linux System Sync",
-                "Link keyboard backlight colours and Linux system power profiles to EC fan mode changes.",
+                "ON PROFILE SWITCH — Keyboard Lighting",
+                "Link keyboard backlight colours to EC power profile changes.",
             )
         )
 
@@ -453,16 +462,6 @@ class AutomationPage(QWidget):
         self.btn_reset_profile_rgb.clicked.connect(self._reset_profile_rgb_defaults)
         reset_row.addWidget(self.btn_reset_profile_rgb)
         rgb_layout.addLayout(reset_row)
-
-        rgb_layout.addWidget(self._make_divider())
-
-        self.chk_sync_power = M3SwitchRow(
-            "Synchronize system power profile with fan profile",
-            "Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode.",
-            checked=bool(self.cfg.get("sync_system_power", False)),
-        )
-        self.chk_sync_power.switch.toggled.connect(self._on_sync_power_toggled)
-        rgb_layout.addWidget(self.chk_sync_power)
 
         layout.addWidget(rgb_card)
 
@@ -796,6 +795,21 @@ class AutomationPage(QWidget):
         is_switch = self._ac_profile_mode == "switch"
         self.ac_selectors_widget.setVisible(is_switch)
 
+        # Lock system power sync ON whenever GigaMate-Driven mode is active
+        if is_switch:
+            self.chk_sync_power.switch.blockSignals(True)
+            self.chk_sync_power.switch.setChecked(True)
+            self.chk_sync_power.switch.blockSignals(False)
+            self.chk_sync_power.setEnabled(False)
+            self.chk_sync_power.subtitle_lbl.setText(
+                "Always active in GigaMate-Driven mode — aligns Linux power-profiles-daemon & Dynamic Boost with your active fan mode."
+            )
+        else:
+            self.chk_sync_power.setEnabled(True)
+            self.chk_sync_power.subtitle_lbl.setText(
+                "Aligns Linux power-profiles-daemon and NVIDIA/AMD Dynamic Boost with your active fan mode."
+            )
+
         dgpu_mode = str(self.cfg.get("dgpu_power_mode", "optimus"))
         self.dgpu_battery_guard_banner.setVisible(is_switch and dgpu_mode in ("auto", "eco"))
 
@@ -827,6 +841,8 @@ class AutomationPage(QWidget):
         if persist:
             self.cfg["ac_profile_mode"] = mode
             update_config(lambda c: {**c, "ac_profile_mode": mode})
+            if mode == "switch" and not self.chk_sync_power.switch.isChecked():
+                self.chk_sync_power.switch.setChecked(True)
         if mode != "switch" and has_handoff_to_restore():
             self.ac_action_status_lbl.setText(
                 "Previously paused power manager rules can be restored anytime using the button below."
@@ -1015,8 +1031,11 @@ class AutomationPage(QWidget):
         self.refresh_profiles()
 
         self.chk_sync_power.switch.blockSignals(True)
-        self.chk_sync_power.switch.setChecked(bool(self.cfg.get("sync_system_power", False)))
+        self.chk_sync_power.switch.setChecked(
+            True if self._ac_profile_mode == "switch" else bool(self.cfg.get("sync_system_power", False))
+        )
         self.chk_sync_power.switch.blockSignals(False)
+        self._sync_ac_visibility()
 
         # Card 3: Keyboard Idle Sleep
         idle_enabled = bool(self.cfg.get("idle_off_enabled", False))
