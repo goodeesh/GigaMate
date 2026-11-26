@@ -1098,7 +1098,12 @@ class DashboardPage(QWidget):
             weight = "700" if is_active else "500"
             col_idx = 0
 
-            name_lbl = QLabel(self._profile_base_labels.get(r.profile_id, f"Profile {r.profile_id}"))
+            _default_names = {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
+            prof_name = self._profile_base_labels.get(
+                r.profile_id,
+                _default_names.get(r.profile_id, f"Profile {r.profile_id}"),
+            )
+            name_lbl = QLabel(prof_name)
             name_lbl.setStyleSheet(
                 f"color: {color}; font-size: 12px; font-weight: {weight}; background: transparent;"
             )
