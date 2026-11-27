@@ -1006,6 +1006,114 @@ def _cmd_gate_off(args: argparse.Namespace) -> int:
     })
 
 
+def _wake_bridge_to_d0(bridge_bdf: Optional[str], wait_sec: float = 2.0) -> bool:
+    """Force the upstream PCIe root port into D0 before evaluating PG00._ON.
+
+    If the root port is runtime-suspended (D3), its config window returns
+    0xFFFF for the downstream GPU's vendor ID (NVID), causing PG00._ON's
+    ``While (NVID != 0x10DE)`` loop to hit AE_AML_LOOP_TIMEOUT and abort
+    before clearing ``EC0.DSMD = 0`` (leaving Dynamic Boost capped at 50 W)
+    and leaving the PCIe link trained at x1.
+    """
+    if not bridge_bdf or not _is_valid_bdf(bridge_bdf):
+        return False
+    bdir = _PCI_DEVICES / bridge_bdf
+    if not bdir.exists():
+        return False
+    ctrl = bdir / "power" / "control"
+    if ctrl.exists():
+        try:
+            ctrl.write_text("on\n", encoding="utf-8")
+        except OSError:
+            pass
+    deadline = time.monotonic() + max(0.2, float(wait_sec))
+    while time.monotonic() < deadline:
+        pstate = _read_text(bdir / "power_state")
+        rstatus = _read_text(bdir / "power" / "runtime_status")
+        if pstate == "D0" and rstatus in ("active", None, ""):
+            return True
+        time.sleep(0.05)
+    return _read_text(bdir / "power_state") == "D0"
+
+
+def _read_int_sysfs(path: Path) -> Optional[int]:
+    raw = _read_text(path)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def _pcie_retrain_link(bridge_bdf: str, wait_sec: float = 1.5) -> Optional[int]:
+    """Set the PCIe Capability Link Control Retrain Link bit (bit 5) on ``bridge_bdf``."""
+    bdir = _PCI_DEVICES / bridge_bdf
+    cfg_path = bdir / "config"
+    if not cfg_path.exists():
+        return None
+    try:
+        with open(cfg_path, "r+b", buffering=0) as fh:
+            fh.seek(0x34)
+            cap_ptr = fh.read(1)[0] & 0xFC
+            visited = set()
+            pcie_cap: Optional[int] = None
+            while cap_ptr and cap_ptr not in visited and len(visited) < 48:
+                visited.add(cap_ptr)
+                fh.seek(cap_ptr)
+                hdr = fh.read(2)
+                if len(hdr) < 2:
+                    break
+                if hdr[0] == 0x10:  # PCI_CAP_ID_EXP
+                    pcie_cap = cap_ptr
+                    break
+                cap_ptr = hdr[1] & 0xFC
+            if pcie_cap is None:
+                return None
+            lnkctl_off = pcie_cap + 0x10
+            fh.seek(lnkctl_off)
+            raw_ctl = fh.read(2)
+            if len(raw_ctl) < 2:
+                return None
+            ctl = int.from_bytes(raw_ctl, "little")
+            ctl |= 0x0020  # PCI_EXP_LNKCTL_RL (Retrain Link)
+            fh.seek(lnkctl_off)
+            fh.write(ctl.to_bytes(2, "little"))
+    except OSError:
+        return None
+
+    max_w = _read_int_sysfs(bdir / "max_link_width")
+    deadline = time.monotonic() + max(0.2, float(wait_sec))
+    while time.monotonic() < deadline:
+        cur_w = _read_int_sysfs(bdir / "current_link_width")
+        if cur_w is not None and max_w is not None and cur_w >= max_w:
+            return cur_w
+        time.sleep(0.1)
+    return _read_int_sysfs(bdir / "current_link_width")
+
+
+def _ensure_full_pcie_link_width(
+    bridge_bdf: Optional[str],
+    gpu_bdf: str,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Verify PCIe link width after rescan; retrain once if degraded (e.g. x1 vs x8)."""
+    target_bdf = bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else gpu_bdf
+    tdir = _PCI_DEVICES / target_bdf
+    cur_w = _read_int_sysfs(tdir / "current_link_width")
+    max_w = _read_int_sysfs(tdir / "max_link_width")
+    if (
+        bridge_bdf
+        and _is_valid_bdf(bridge_bdf)
+        and cur_w is not None
+        and max_w is not None
+        and 0 < cur_w < max_w
+    ):
+        retr = _pcie_retrain_link(bridge_bdf)
+        if retr is not None:
+            cur_w = retr
+    return cur_w, max_w
+
+
 def _cmd_gate_on(args: argparse.Namespace) -> int:
     if not _is_valid_acpi_path(args.path):
         return _emit({"ok": False, "error": f"invalid ACPI path: {args.path!r}"}, code=2)
@@ -1016,12 +1124,18 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
         return _emit({"ok": False, "error": "invalid sta method"}, code=2)
 
     prev_state = _read_state()
+    bridge_bdf = args.bridge_bdf or prev_state.get("bridge_bdf")
+
+    # Wake the upstream PCIe root port to D0 BEFORE evaluating PG00._ON so its
+    # config space is reachable when PG00._ON polls NVID == 0x10DE and clears
+    # EC0.DSMD = 0 (otherwise PG00._ON aborts on AE_AML_LOOP_TIMEOUT).
+    _wake_bridge_to_d0(bridge_bdf)
+
     full_on = f"{args.path}.{args.method}"
     ok_eval, _, backend, eval_err = _eval_acpi_method(full_on)
     if ok_eval:
         time.sleep(0.2)
 
-    bridge_bdf = args.bridge_bdf or prev_state.get("bridge_bdf")
     if bridge_bdf and _is_valid_bdf(bridge_bdf):
         bridge_rescan = _PCI_DEVICES / bridge_bdf / "rescan"
         if bridge_rescan.exists():
@@ -1065,8 +1179,14 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
             "error": f"{msg}. Reboot your laptop to recover the discrete GPU cleanly.",
         })
 
-    # Ensure kernel runtime PM is enabled again on GPU and audio sibling.
-    for target_bdf in (found_bdf, f"{found_bdf[:-1]}1"):
+    # Verify PCIe link width (retrain root port once if degraded, e.g. x1 vs x8).
+    link_width, max_link_width = _ensure_full_pcie_link_width(bridge_bdf, found_bdf)
+
+    # Ensure kernel runtime PM is enabled again on GPU, audio sibling, and root port.
+    pm_targets = [found_bdf, f"{found_bdf[:-1]}1"]
+    if bridge_bdf and _is_valid_bdf(bridge_bdf):
+        pm_targets.append(bridge_bdf)
+    for target_bdf in pm_targets:
         ctrl = _PCI_DEVICES / target_bdf / "power" / "control"
         if ctrl.exists():
             try:
@@ -1122,6 +1242,8 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
         "power_state": pstate,
         "sta_after": sta_after,
         "nvidia_powerd_active": powerd_active,
+        "link_width": link_width,
+        "max_link_width": max_link_width,
         "backend": backend,
     }
     if not ok_eval and eval_err:

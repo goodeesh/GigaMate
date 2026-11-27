@@ -15,6 +15,9 @@ def test_gigamate_acpi_exposes_npcf_and_wmbd_aml_attributes():
         assert attr in src, f"Missing sysfs attribute {attr} in gigamate_acpi.c"
     assert "\\\\_SB.NPCF.%s" in src
     assert "ACPI_SIG_DSDT" in src
+    assert "gigamate_recover_pg00_on_timeout" in src
+    assert "AE_AML_LOOP_TIMEOUT" in src
+    assert "\\\\_SB.ALIB" in src
 
 
 def test_gigamate_acpi_builds_against_running_kernel(tmp_path):

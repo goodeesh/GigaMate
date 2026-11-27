@@ -553,6 +553,49 @@ static ssize_t acpi_eval_show(struct device *dev,
 	return sysfs_emit(buf, "%s\n", res);
 }
 
+static void gigamate_recover_pg00_on_timeout(const char *path)
+{
+	size_t len = strlen(path);
+	const char *suffix = ".PG00._ON";
+	size_t slen = strlen(suffix);
+	acpi_handle alib_handle = NULL;
+	u8 ec_val = 0;
+
+	if (len < slen || strcmp(path + len - slen, suffix) != 0)
+		return;
+
+	/*
+	 * On AMD + NVIDIA Gigabyte laptops (e.g. AERO X16), PG00._ON calls
+	 * \_SB.ALIB(0x18, 0) at entry and clears EC0.DSMD (EC 0x2D bit 0)
+	 * plus calls \_SB.ALIB(0x18, 1) only after its While(NVID != 0x10DE)
+	 * loop. If that loop hits AE_AML_LOOP_TIMEOUT, replay those two
+	 * tail steps so the EC and AMD SMU re-enable full Dynamic Boost.
+	 */
+	if (ec_read(0x2D, &ec_val) == 0 && (ec_val & 0x01)) {
+		u8 next_val = ec_val & ~0x01;
+		if (ec_write(0x2D, next_val) == 0)
+			pr_info(DRIVER_NAME ": PG00._ON timeout recovery: cleared EC0.DSMD (0x2D: 0x%02x -> 0x%02x)\n",
+				ec_val, next_val);
+	}
+
+	if (ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.ALIB", &alib_handle))) {
+		union acpi_object alib_args[2];
+		struct acpi_object_list arg_list = {
+			.count = 2,
+			.pointer = alib_args,
+		};
+		acpi_status alib_st;
+
+		alib_args[0].type = ACPI_TYPE_INTEGER;
+		alib_args[0].integer.value = 0x18;
+		alib_args[1].type = ACPI_TYPE_INTEGER;
+		alib_args[1].integer.value = 1;
+		alib_st = acpi_evaluate_object(alib_handle, NULL, &arg_list, NULL);
+		pr_info(DRIVER_NAME ": PG00._ON timeout recovery: \\_SB.ALIB(0x18, 1) status=0x%x\n",
+			alib_st);
+	}
+}
+
 static ssize_t acpi_eval_store(struct device *dev,
 			       struct device_attribute *attr,
 			       const char *buf, size_t count)
@@ -588,6 +631,8 @@ static ssize_t acpi_eval_store(struct device *dev,
 	mutex_lock(&gigamate_acpi_mutex);
 	status = acpi_evaluate_object(NULL, path, NULL, &output);
 	if (ACPI_FAILURE(status)) {
+		if (status == AE_AML_LOOP_TIMEOUT)
+			gigamate_recover_pg00_on_timeout(path);
 		snprintf(last_eval_result, sizeof(last_eval_result), "error:0x%x", status);
 		has_eval_result = true;
 		kfree(output.pointer);

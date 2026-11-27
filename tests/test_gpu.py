@@ -750,3 +750,49 @@ def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power
         apply_mock.reset_mock()
         d._run_profile_automation(False)
         apply_mock.assert_called_once_with(0, cfg=cfg, sync_system=True)
+
+
+def test_dgpu_gate_helper_wakes_bridge_and_retrains_degraded_pcie_link(tmp_path):
+    """_wake_bridge_to_d0 forces D0 and _pcie_retrain_link sets LNKCTL bit 5."""
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+
+    helper_path = Path(__file__).resolve().parents[1] / "data" / "gigamate-dgpu-gate"
+    loader = importlib.machinery.SourceFileLoader("gigamate_dgpu_gate_helper", str(helper_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+
+    pci_root = tmp_path / "pci"
+    bdf = "0000:00:03.1"
+    bdir = pci_root / bdf
+    (bdir / "power").mkdir(parents=True)
+    (bdir / "power" / "control").write_text("auto\n", encoding="utf-8")
+    (bdir / "power" / "runtime_status").write_text("active\n", encoding="utf-8")
+    (bdir / "power_state").write_text("D0\n", encoding="utf-8")
+    (bdir / "current_link_width").write_text("1\n", encoding="utf-8")
+    (bdir / "max_link_width").write_text("8\n", encoding="utf-8")
+
+    # Build minimal 256-byte PCI config space:
+    # cap_ptr at 0x34 -> 0x50 (non-PCIe cap 0x01 -> next 0x60) -> 0x60 (PCIe cap 0x10)
+    cfg = bytearray(256)
+    cfg[0x34] = 0x50
+    cfg[0x50] = 0x01
+    cfg[0x51] = 0x60
+    cfg[0x60] = 0x10
+    cfg[0x61] = 0x00
+    # LNKCTL at 0x60 + 0x10 = 0x70, initial value 0x0040
+    cfg[0x70] = 0x40
+    cfg[0x71] = 0x00
+    (bdir / "config").write_bytes(bytes(cfg))
+
+    with patch.object(mod, "_PCI_DEVICES", pci_root):
+        assert mod._wake_bridge_to_d0(bdf, wait_sec=0.2) is True
+        assert (bdir / "power" / "control").read_text(encoding="utf-8").strip() == "on"
+
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0")
+        updated = (bdir / "config").read_bytes()
+        lnkctl = int.from_bytes(updated[0x70:0x72], "little")
+        assert lnkctl & 0x0020 == 0x0020  # Retrain Link bit set
+        assert lnkctl & 0x0040 == 0x0040  # Existing bits preserved
