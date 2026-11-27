@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something isn't working as expected
+about: Report a bug, regression, or hardware discovery issue in GigaMate
 title: "[BUG] "
 labels: bug
 assignees: ''
@@ -8,36 +8,36 @@ assignees: ''
 
 ## Describe the bug
 
-<!-- A clear description of what the bug is. -->
+<!-- A clear description of what went wrong. -->
 
 ## To reproduce
 
 Steps to reproduce the behaviour:
-1. Ran `gigabyte-rgb ...`
-2. Expected colour: ...
-3. Saw instead: ...
-
-## Expected behaviour
-
-<!-- What you expected to happen. -->
+1. Command or UI action:
+2. Expected behaviour:
+3. Actual behaviour:
 
 ## Environment
 
-- Laptop model: 
-- CPU: 
-- GPU: 
-- Keyboard USB ID (output of `lsusb | grep -i gigabyte`): 
-- Distro: 
-- Kernel: `uname -r` → 
-- Tool version: `gigabyte-rgb --help` → 
+- Laptop model & BIOS version:
+- CPU / GPU:
+- Distro & Desktop / Compositor (e.g. KDE Wayland, GNOME Wayland, X11):
+- Kernel (`uname -r`):
+- GigaMate version (`gigamate version`):
 
-## Logs / output
-
-<!-- Paste the full output of the command, including any errors. -->
+## Diagnostics (`gigamate doctor` & `gigamate profile report`)
 
 ```
+<!-- Paste the full output of:
+  gigamate doctor
+  gigamate profile report
+-->
 ```
 
-## Additional context
+## Service logs (if related to tray, idle sleep, hotkeys, or dGPU watcher)
 
-<!-- Anything else that might be relevant. Did it work before and stop after a change? -->
+```
+<!-- Paste recent logs from:
+  journalctl --user -u gigamate.service -u gigamate-dgpu.service -n 80 --no-pager
+-->
+```
