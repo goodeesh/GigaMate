@@ -796,3 +796,29 @@ def test_dgpu_gate_helper_wakes_bridge_and_retrains_degraded_pcie_link(tmp_path)
         lnkctl = int.from_bytes(updated[0x70:0x72], "little")
         assert lnkctl & 0x0020 == 0x0020  # Retrain Link bit set
         assert lnkctl & 0x0040 == 0x0040  # Existing bits preserved
+
+        # SBR safety: must NOT touch reset_subordinate when GPU has a bound driver
+        gdir = pci_root / "0000:64:00.0"
+        gdir.mkdir(parents=True)
+        (gdir / "driver").mkdir()
+        sbr = bdir / "reset_subordinate"
+        sbr.write_text("0\n", encoding="utf-8")
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0", allow_sbr=True)
+        assert sbr.read_text(encoding="utf-8").strip() == "0"
+
+        # When GPU is unbound, allow_sbr=True triggers reset_subordinate
+        (gdir / "driver").rmdir()
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0", allow_sbr=True)
+        assert sbr.read_text(encoding="utf-8").strip() == "1"
+
+    # _pause_pci_autoprobe must always restore 1 even on exception
+    ap = tmp_path / "drivers_autoprobe"
+    ap.write_text("1\n", encoding="utf-8")
+    with patch.object(mod, "_PCI_DRIVERS_AUTOPROBE", ap):
+        try:
+            with mod._pause_pci_autoprobe():
+                assert ap.read_text(encoding="utf-8").strip() == "0"
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert ap.read_text(encoding="utf-8").strip() == "1"

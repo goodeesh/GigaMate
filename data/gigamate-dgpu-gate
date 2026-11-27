@@ -34,6 +34,7 @@ stop that does not settle aborts with reason "powerd_stop_timeout" and the GPU
 is left untouched; a GPU left stuck is reported as reason "wedged".
 """
 
+from contextlib import contextmanager
 import argparse
 import fcntl
 import json
@@ -49,6 +50,8 @@ HELPER_VERSION = 4
 
 _PCI_DEVICES = Path("/sys/bus/pci/devices")
 _PCI_BUS_RESCAN = Path("/sys/bus/pci/rescan")
+_PCI_DRIVERS_AUTOPROBE = Path("/sys/bus/pci/drivers_autoprobe")
+_PCI_DRIVERS_PROBE = Path("/sys/bus/pci/drivers_probe")
 _DRM_SYSFS = Path("/sys/class/drm")
 _ACPI_EVAL = Path("/sys/devices/platform/gigamate_acpi/acpi_eval")
 _ACPI_CALL = Path("/proc/acpi/call")
@@ -1092,11 +1095,56 @@ def _pcie_retrain_link(bridge_bdf: str, wait_sec: float = 1.5) -> Optional[int]:
     return _read_int_sysfs(bdir / "current_link_width")
 
 
+@contextmanager
+def _pause_pci_autoprobe():
+    """Temporarily pause PCI driver auto-binding during gate-on bring-up.
+
+    Prevents ``pciehp`` from binding ``nvidia`` (and booting GSP) onto a
+    degraded ``x4`` link before ``PG00._ON`` timeout recovery (``EC0.DSMD=0``,
+    ``\\_SB.ALIB(0x18, 1)``) and an unbound Secondary Bus Reset complete.
+    Always restores ``drivers_autoprobe`` in ``finally``.
+    """
+    prev: Optional[str] = None
+    if _PCI_DRIVERS_AUTOPROBE.exists():
+        try:
+            prev = _PCI_DRIVERS_AUTOPROBE.read_text(encoding="utf-8").strip()
+            if prev == "1":
+                _PCI_DRIVERS_AUTOPROBE.write_text("0\n", encoding="utf-8")
+        except OSError:
+            prev = None
+    try:
+        yield prev == "1"
+    finally:
+        if prev == "1" and _PCI_DRIVERS_AUTOPROBE.exists():
+            try:
+                _PCI_DRIVERS_AUTOPROBE.write_text("1\n", encoding="utf-8")
+            except OSError:
+                pass
+
+
+def _probe_pci_devices(bdfs: List[str]) -> None:
+    """Explicitly trigger driver probing for unbound PCI BDFs."""
+    if not _PCI_DRIVERS_PROBE.exists():
+        return
+    for bdf in bdfs:
+        if not bdf or not _is_valid_bdf(bdf):
+            continue
+        dev_dir = _PCI_DEVICES / bdf
+        if not dev_dir.exists() or (dev_dir / "driver").exists():
+            continue
+        try:
+            _PCI_DRIVERS_PROBE.write_text(f"{bdf}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+
 def _ensure_full_pcie_link_width(
     bridge_bdf: Optional[str],
     gpu_bdf: str,
+    *,
+    allow_sbr: bool = False,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Verify PCIe link width after rescan; retrain once if degraded (e.g. x1 vs x8)."""
+    """Verify PCIe link width; run Secondary Bus Reset (only when unbound) or retrain if degraded."""
     target_bdf = bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else gpu_bdf
     tdir = _PCI_DEVICES / target_bdf
     cur_w = _read_int_sysfs(tdir / "current_link_width")
@@ -1108,9 +1156,27 @@ def _ensure_full_pcie_link_width(
         and max_w is not None
         and 0 < cur_w < max_w
     ):
-        retr = _pcie_retrain_link(bridge_bdf)
-        if retr is not None:
-            cur_w = retr
+        # Secondary Bus Reset (SBR) is ONLY safe when NO driver is bound to the
+        # GPU (running SBR while nvidia is bound causes GSP Xid 154).
+        gpu_unbound = not (_PCI_DEVICES / gpu_bdf / "driver").exists()
+        sbr_path = _PCI_DEVICES / bridge_bdf / "reset_subordinate"
+        if allow_sbr and gpu_unbound and sbr_path.exists():
+            try:
+                sbr_path.write_text("1\n", encoding="utf-8")
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    new_w = _read_int_sysfs(tdir / "current_link_width")
+                    if new_w is not None:
+                        cur_w = new_w
+                        if cur_w >= max_w:
+                            break
+                    time.sleep(0.1)
+            except OSError:
+                pass
+        if cur_w < max_w:
+            retr = _pcie_retrain_link(bridge_bdf)
+            if retr is not None:
+                cur_w = retr
     return cur_w, max_w
 
 
@@ -1125,49 +1191,51 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
 
     prev_state = _read_state()
     bridge_bdf = args.bridge_bdf or prev_state.get("bridge_bdf")
-
-    # Wake the upstream PCIe root port to D0 BEFORE evaluating PG00._ON so its
-    # config space is reachable when PG00._ON polls NVID == 0x10DE and clears
-    # EC0.DSMD = 0 (otherwise PG00._ON aborts on AE_AML_LOOP_TIMEOUT).
-    _wake_bridge_to_d0(bridge_bdf)
-
     full_on = f"{args.path}.{args.method}"
-    ok_eval, _, backend, eval_err = _eval_acpi_method(full_on)
-    if ok_eval:
-        time.sleep(0.2)
 
-    if bridge_bdf and _is_valid_bdf(bridge_bdf):
-        bridge_rescan = _PCI_DEVICES / bridge_bdf / "rescan"
-        if bridge_rescan.exists():
-            try:
-                bridge_rescan.write_text("1\n", encoding="utf-8")
-            except OSError:
-                pass
-
-    rescan_err: Optional[str] = None
-    try:
-        _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
-    except OSError as exc:
-        rescan_err = str(exc)
-
-    # Even if PG00._ON hit AE_AML_LOOP_TIMEOUT (~30.5s), pciehp often already
-    # hot-added and bound the GPU when L23D brought the link up. Wait/check
-    # for enumeration before deciding whether recovery failed.
-    deadline = time.monotonic() + 10.0
     found_bdf: Optional[str] = None
     found_vendor: Optional[str] = None
     driver_name: Optional[str] = None
-    while time.monotonic() < deadline:
-        found_bdf, found_vendor = _find_dgpu()
-        if found_bdf is not None:
-            drv_link = _PCI_DEVICES / found_bdf / "driver"
-            if drv_link.exists():
+    rescan_err: Optional[str] = None
+    link_width: Optional[int] = None
+    max_link_width: Optional[int] = None
+
+    # Pause PCI driver autoprobe so pciehp does not bind nvidia before
+    # PG00._ON recovery (EC0.DSMD=0 + \_SB.ALIB(0x18, 1)) and an unbound
+    # Secondary Bus Reset restore full PCIe x8 link width.
+    with _pause_pci_autoprobe():
+        _wake_bridge_to_d0(bridge_bdf)
+
+        ok_eval, _, backend, eval_err = _eval_acpi_method(full_on)
+        if ok_eval:
+            time.sleep(0.2)
+
+        if bridge_bdf and _is_valid_bdf(bridge_bdf):
+            bridge_rescan = _PCI_DEVICES / bridge_bdf / "rescan"
+            if bridge_rescan.exists():
                 try:
-                    driver_name = os.path.basename(os.path.realpath(drv_link))
+                    bridge_rescan.write_text("1\n", encoding="utf-8")
                 except OSError:
-                    driver_name = "bound"
+                    pass
+
+        try:
+            _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
+        except OSError as exc:
+            rescan_err = str(exc)
+
+        # Wait for PCI enumeration (device present on bus, driver still unbound).
+        enum_deadline = time.monotonic() + 10.0
+        while time.monotonic() < enum_deadline:
+            found_bdf, found_vendor = _find_dgpu()
+            if found_bdf is not None:
                 break
-        time.sleep(0.25)
+            time.sleep(0.2)
+
+        if found_bdf is not None:
+            # Retrain degraded link (e.g. x4 -> x8) via SBR while strictly unbound.
+            link_width, max_link_width = _ensure_full_pcie_link_width(
+                bridge_bdf, found_bdf, allow_sbr=True
+            )
 
     if found_bdf is None:
         msg = eval_err or (f"PCI rescan failed ({rescan_err})" if rescan_err else "dGPU did not re-enumerate after ACPI power-on and PCI rescan")
@@ -1179,8 +1247,26 @@ def _cmd_gate_on(args: argparse.Namespace) -> int:
             "error": f"{msg}. Reboot your laptop to recover the discrete GPU cleanly.",
         })
 
-    # Verify PCIe link width (retrain root port once if degraded, e.g. x1 vs x8).
-    link_width, max_link_width = _ensure_full_pcie_link_width(bridge_bdf, found_bdf)
+    # drivers_autoprobe is now restored to 1: probe GPU + audio sibling cleanly
+    # onto the full-width link AFTER EC0.DSMD=0 and \_SB.ALIB(0x18, 1) ran.
+    _probe_pci_devices([found_bdf, f"{found_bdf[:-1]}1"])
+
+    bind_deadline = time.monotonic() + 10.0
+    while time.monotonic() < bind_deadline:
+        drv_link = _PCI_DEVICES / found_bdf / "driver"
+        if drv_link.exists():
+            try:
+                driver_name = os.path.basename(os.path.realpath(drv_link))
+            except OSError:
+                driver_name = "bound"
+            break
+        time.sleep(0.25)
+
+    # Re-read final link width after driver bind.
+    tdir = _PCI_DEVICES / (bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else found_bdf)
+    final_w = _read_int_sysfs(tdir / "current_link_width")
+    if final_w is not None:
+        link_width = final_w
 
     # Ensure kernel runtime PM is enabled again on GPU, audio sibling, and root port.
     pm_targets = [found_bdf, f"{found_bdf[:-1]}1"]
