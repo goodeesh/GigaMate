@@ -35,7 +35,13 @@ from .pages.gpu_page import GpuPage
 from .pages.rgb_page import RgbPage
 from .pages.settings_page import SettingsPage
 from .styles import apply_theme
-from .theme import PROFILE_ACCENTS, THEME
+from .theme import (
+    PROFILE_ACCENTS,
+    THEME,
+    detect_system_color_scheme,
+    get_active_scheme,
+    resolve_color_scheme,
+)
 from .widgets import highlight_widget
 from ..capabilities import detect_system_capabilities, invalidate_capabilities
 from ..config import CONFIG_FILE, load as load_config
@@ -160,10 +166,22 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.debug(f"Could not apply saved hardware settings on launch: {exc}")
 
+        self._ui_theme_pref = str(load_config().get("ui_theme", "system")).lower()
+        self._rebuilding_theme = False
         self._last_config_mtime = self._get_config_mtime()
         self.config_timer = QTimer(self)
         self.config_timer.timeout.connect(self._check_config_mtime)
         self.config_timer.start(1000)
+
+        app = QApplication.instance()
+        if app is not None:
+            hints = app.styleHints()
+            sig = getattr(hints, "colorSchemeChanged", None)
+            if sig is not None:
+                try:
+                    sig.connect(self._on_system_color_scheme_changed)
+                except Exception:
+                    pass
 
         # First-run setup, deferred until the window/event loop is up.
         QTimer.singleShot(0, self._maybe_show_onboarding)
@@ -387,6 +405,8 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.page_dashboard, "profile_accent_changed"):
             self.page_dashboard.profile_accent_changed.connect(self._on_profile_accent_changed)
+        if hasattr(self.page_settings, "theme_changed"):
+            self.page_settings.theme_changed.connect(self._on_user_theme_changed)
 
         content_col_layout.addWidget(self.stack, stretch=1)
         root_layout.addWidget(content_col, stretch=1)
@@ -545,12 +565,76 @@ class MainWindow(QMainWindow):
         self._last_highlighted_widget = target
         highlight_widget(target, getattr(self, "_current_accent", THEME.primary))
 
+    def _on_user_theme_changed(self, pref: str) -> None:
+        """Apply a user-selected theme preference ('system' | 'dark' | 'light')."""
+        pref = pref if pref in ("system", "dark", "light") else "system"
+        self._ui_theme_pref = pref
+        app = QApplication.instance()
+        if pref == "system" and app is not None:
+            # Clear any Qt override before reading the live desktop color scheme.
+            unset_cs = getattr(app.styleHints(), "unsetColorScheme", None)
+            if unset_cs is not None:
+                self._rebuilding_theme = True
+                try:
+                    unset_cs()
+                finally:
+                    self._rebuilding_theme = False
+        target = resolve_color_scheme(pref, app)
+        self._apply_color_scheme(target, follow_system=(pref == "system"))
+
+    def _on_system_color_scheme_changed(self, _qt_scheme=None) -> None:
+        """Live-switch when the desktop OS toggles Dark / Light mode."""
+        if getattr(self, "_rebuilding_theme", False):
+            return
+        if getattr(self, "_ui_theme_pref", "system") != "system":
+            return
+        target = detect_system_color_scheme(QApplication.instance())
+        self._apply_color_scheme(target, follow_system=True)
+
+    def _apply_color_scheme(self, scheme: str, *, follow_system: bool = False) -> None:
+        """Switch active Dark/Light tokens, re-apply QSS/palette, and re-mount pages."""
+        app = QApplication.instance()
+        accent = getattr(self, "_current_accent", THEME.primary)
+        if scheme == get_active_scheme():
+            if app is not None:
+                self._rebuilding_theme = True
+                try:
+                    apply_theme(app, accent, scheme=scheme, follow_system=follow_system)
+                finally:
+                    self._rebuilding_theme = False
+            return
+
+        curr_idx = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        self._rebuilding_theme = True
+        try:
+            for page in getattr(self, "_pages_by_idx", {}).values():
+                for timer_attr in ("timer", "poll_timer", "_poll_timer"):
+                    t = getattr(page, timer_attr, None)
+                    if t is not None and hasattr(t, "stop"):
+                        try:
+                            t.stop()
+                        except Exception:
+                            pass
+            if app is not None:
+                apply_theme(app, accent, scheme=scheme, follow_system=follow_system)
+            self._init_ui()
+            if curr_idx in self._pages_by_idx:
+                self.stack.setCurrentIndex(curr_idx)
+                btn = self._nav_by_idx.get(curr_idx)
+                if btn is not None:
+                    btn.setChecked(True)
+            self._update_nav_icons(getattr(self, "_current_accent", THEME.primary))
+        finally:
+            self._rebuilding_theme = False
+
     def _on_profile_accent_changed(self, profile_id: int) -> None:
         """Apply dynamic accent color for the active power profile."""
         accent_hex = PROFILE_ACCENTS.get(profile_id, THEME.primary)
+        self._current_accent = accent_hex
         app = QApplication.instance()
         if app is not None:
-            apply_theme(app, accent_hex)
+            follow = getattr(self, "_ui_theme_pref", "system") == "system"
+            apply_theme(app, accent_hex, follow_system=follow)
         self._update_nav_icons(accent_hex)
         for page in (
             self.page_dashboard,
@@ -756,7 +840,9 @@ def run_gui() -> None:
     if icon_path and Path(icon_path).exists():
         app.setWindowIcon(QIcon(icon_path))
 
-    apply_theme(app)
+    theme_pref = str(load_config().get("ui_theme", "system")).lower()
+    resolved_scheme = resolve_color_scheme(theme_pref, app)
+    apply_theme(app, scheme=resolved_scheme, follow_system=(theme_pref == "system"))
     window = MainWindow()
     server = SingleInstanceServer(window, IPC_SOCKET_PATH, app)
     window._ipc_server = server  # Prevent GC

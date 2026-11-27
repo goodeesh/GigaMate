@@ -87,6 +87,7 @@ DEFAULT_CONFIG = {
     "dgpu_power_mode": "optimus",
     "dgpu_gate_disclaimer_accepted": False,
     "sync_system_power": False,
+    "ui_theme": "system",
     "last_brightness": 2,
     # Set once the first-run setup has been shown (so it never nags again).
     "onboarding_complete": False,
@@ -164,6 +165,12 @@ def profile_rgb_for(cfg: dict, profile_id: int) -> str:
     if fallback is not None:
         return fallback
     return "#ffffff"
+
+
+def _coerce_ui_theme(value) -> str:
+    """Validate UI color-scheme preference ('system' | 'dark' | 'light')."""
+    s = str(value or "").strip().lower()
+    return s if s in ("system", "dark", "light") else "system"
 
 
 def _coerce_ac_profile_mode(value) -> str:
@@ -380,6 +387,8 @@ def load():
             data["idle_internal_only"] = bool(data["idle_internal_only"])
         if "sync_system_power" in data:
             data["sync_system_power"] = bool(data["sync_system_power"])
+        if "ui_theme" in data:
+            data["ui_theme"] = _coerce_ui_theme(data["ui_theme"])
         if "startup_apply" in data:
             data["startup_apply"] = bool(data["startup_apply"])
         if "charge_topup_active" in data:
@@ -661,6 +670,7 @@ def _write_config(config):
         "dgpu_gate_disclaimer_accepted": bool(config.get(
             "dgpu_gate_disclaimer_accepted", DEFAULT_CONFIG["dgpu_gate_disclaimer_accepted"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
+        "ui_theme": _coerce_ui_theme(config.get("ui_theme", DEFAULT_CONFIG["ui_theme"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),
         "onboarding_complete": bool(config.get("onboarding_complete", DEFAULT_CONFIG["onboarding_complete"])),
         "hotkey_overrides": _sanitize_hotkey_overrides(config.get("hotkey_overrides")),

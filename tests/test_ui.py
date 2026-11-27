@@ -2352,3 +2352,72 @@ def test_aero_instrument_visual_widgets_and_dynamic_accent(qapp):
     finally:
         win.close()
         win.deleteLater()
+
+
+def test_theme_dark_light_tokens_and_system_detection(qapp):
+    """THEME proxy, tone_colors, accent_tokens, and stylesheet switch dynamically."""
+    from PyQt6.QtCore import Qt
+    from gigamate.ui import styles, theme
+
+    try:
+        theme.set_active_scheme("dark")
+        assert theme.get_active_scheme() == "dark"
+        assert theme.is_light_theme() is False
+        assert theme.THEME.surface == theme.DARK_TOKENS.surface
+        dark_qss = styles.build_stylesheet()
+        assert theme.DARK_TOKENS.surface in dark_qss
+        assert theme.tone_colors("success")[0] == theme.DARK_TOKENS.success
+
+        theme.set_active_scheme("light")
+        assert theme.get_active_scheme() == "light"
+        assert theme.is_light_theme() is True
+        assert theme.THEME.surface == theme.LIGHT_TOKENS.surface
+        light_qss = styles.build_stylesheet()
+        assert theme.LIGHT_TOKENS.surface in light_qss
+        assert theme.tone_colors("success")[0] == theme.LIGHT_TOKENS.success
+        assert theme.accent_tokens("#14B8A6")["on_accent"] == "#FFFFFF"
+
+        # resolve_color_scheme respects explicit overrides and system detection
+        assert theme.resolve_color_scheme("dark") == "dark"
+        assert theme.resolve_color_scheme("light") == "light"
+        fake_hints = MagicMock()
+        fake_hints.colorScheme.return_value = Qt.ColorScheme.Light
+        fake_app = MagicMock()
+        fake_app.styleHints.return_value = fake_hints
+        assert theme.resolve_color_scheme("system", app=fake_app) == "light"
+        fake_hints.colorScheme.return_value = Qt.ColorScheme.Dark
+        assert theme.resolve_color_scheme("system", app=fake_app) == "dark"
+    finally:
+        theme.set_active_scheme("dark")
+
+
+def test_settings_appearance_and_live_theme_switch(qapp):
+    """Settings Appearance selector persists ui_theme and MainWindow live-switches keeping tab."""
+    from gigamate.config import load as load_config
+    from gigamate.ui import theme
+    from gigamate.ui.main_window import MainWindow
+
+    theme.set_active_scheme("dark")
+    win = MainWindow()
+    try:
+        win.navigate_to("settings")
+        assert win.stack.currentIndex() == 5
+
+        # Click Light in Settings -> persists ui_theme='light', switches active scheme, keeps Settings tab
+        win.page_settings._theme_buttons["light"].click()
+        qapp.processEvents()
+        assert load_config()["ui_theme"] == "light"
+        assert theme.get_active_scheme() == "light"
+        assert win.stack.currentIndex() == 5
+        assert win.page_settings._theme_buttons["light"].isChecked() is True
+
+        # Switch back to Dark -> persists ui_theme='dark', keeps Settings tab
+        win.page_settings._theme_buttons["dark"].click()
+        qapp.processEvents()
+        assert load_config()["ui_theme"] == "dark"
+        assert theme.get_active_scheme() == "dark"
+        assert win.stack.currentIndex() == 5
+    finally:
+        theme.set_active_scheme("dark")
+        win.close()
+        win.deleteLater()

@@ -46,6 +46,7 @@ from ..widgets import (
     M3IconHelpButton,
     M3PageHeader,
     M3ResponsiveGrid,
+    M3SegmentButton,
     M3StatusPill,
 )
 
@@ -93,13 +94,15 @@ class _UpdateCheckThread(QThread):
 
 
 class SettingsPage(QWidget):
-    """Settings page for visible profiles, shortcuts, daemon, diagnostics & updates."""
+    """Settings page for appearance, visible profiles, shortcuts, daemon, diagnostics & updates."""
 
     navigate_requested = pyqtSignal(str)
+    theme_changed = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.cfg = load_config()
+        self._theme_buttons: Dict[str, M3SegmentButton] = {}
         self._profile_enable_checks: Dict[int, QCheckBox] = {}
         self._hotkey_labels: Dict[str, QLabel] = {}
         self._record_buttons: Dict[str, QPushButton] = {}
@@ -135,9 +138,51 @@ class SettingsPage(QWidget):
         layout.addWidget(
             M3PageHeader(
                 "Settings",
-                "Visible profiles, shortcuts, background daemon, diagnostics & updates",
+                "Appearance, visible profiles, shortcuts, background daemon, diagnostics & updates",
             )
         )
+
+        # ── Card 0: Appearance (Dark / Light / System) ──
+        self.appearance_card = M3Card()
+        a_layout = QVBoxLayout(self.appearance_card)
+        a_layout.setContentsMargins(20, 18, 20, 18)
+        a_layout.setSpacing(10)
+        a_layout.addLayout(
+            self._make_card_header(
+                "Appearance",
+                "Follow your desktop color scheme automatically, or force Dark / Light mode.",
+            )
+        )
+        theme_row = QHBoxLayout()
+        theme_row.setSpacing(12)
+        theme_info = QVBoxLayout()
+        theme_info.setSpacing(2)
+        theme_lbl = QLabel("Color scheme")
+        theme_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: 13px; font-weight: 500; background: transparent;"
+        )
+        theme_sub = QLabel("Automatically follows KDE / GNOME dark & light mode when set to System.")
+        theme_sub.setWordWrap(True)
+        theme_sub.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: 12px; background: transparent;"
+        )
+        theme_info.addWidget(theme_lbl)
+        theme_info.addWidget(theme_sub)
+        theme_row.addLayout(theme_info, stretch=1)
+
+        seg_row = QHBoxLayout()
+        seg_row.setSpacing(6)
+        current_pref = str(self.cfg.get("ui_theme", "system")).lower()
+        for key, label in (("system", "System"), ("dark", "Dark"), ("light", "Light")):
+            btn = M3SegmentButton(label)
+            btn.setChecked(key == current_pref)
+            btn.setMinimumWidth(72)
+            btn.clicked.connect(lambda _checked=False, k=key: self._on_theme_selected(k))
+            self._theme_buttons[key] = btn
+            seg_row.addWidget(btn)
+        theme_row.addLayout(seg_row)
+        a_layout.addLayout(theme_row)
+        layout.addWidget(self.appearance_card)
 
         # ── Card 1: Visible Power Profiles ──
         self.profiles_card = M3Card()
@@ -790,9 +835,29 @@ class SettingsPage(QWidget):
             self.service_status_label.setText("Daemon Inactive · service stopped")
             self.service_status_label.set_tone("error")
 
+    def _on_theme_selected(self, pref: str) -> None:
+        pref = pref if pref in ("system", "dark", "light") else "system"
+        for k, btn in self._theme_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(k == pref)
+            btn.blockSignals(False)
+        self.cfg["ui_theme"] = pref
+        update_config(lambda c: {**c, "ui_theme": pref})
+        self.theme_changed.emit(pref)
+
+    def _sync_theme_buttons(self) -> None:
+        pref = str(self.cfg.get("ui_theme", "system")).lower()
+        if pref not in self._theme_buttons:
+            pref = "system"
+        for k, btn in self._theme_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(k == pref)
+            btn.blockSignals(False)
+
     def reload_from_config(self) -> None:
         """Reload and update settings widgets from on-disk config."""
         self.cfg = load_config()
+        self._sync_theme_buttons()
         self._sync_profile_enable_checks()
         for action, _title, default_key in _SHORTCUT_ACTIONS:
             lbl = self._hotkey_labels.get(action)

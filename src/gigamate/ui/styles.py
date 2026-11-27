@@ -58,7 +58,7 @@ QScrollBar:vertical {{
 }}
 
 QScrollBar::handle:vertical {{
-    background-color: #3A332E;
+    background-color: {THEME.outline};
     min-height: 32px;
     margin: 2px;
     border-radius: 3px;
@@ -66,7 +66,7 @@ QScrollBar::handle:vertical {{
 
 QScrollBar::handle:vertical:hover,
 QScrollBar::handle:vertical:pressed {{
-    background-color: #524942;
+    background-color: {THEME.on_surface_muted};
 }}
 
 QScrollBar:horizontal {{
@@ -77,7 +77,7 @@ QScrollBar:horizontal {{
 }}
 
 QScrollBar::handle:horizontal {{
-    background-color: #3A332E;
+    background-color: {THEME.outline};
     min-width: 32px;
     margin: 2px;
     border-radius: 3px;
@@ -85,7 +85,7 @@ QScrollBar::handle:horizontal {{
 
 QScrollBar::handle:horizontal:hover,
 QScrollBar::handle:horizontal:pressed {{
-    background-color: #524942;
+    background-color: {THEME.on_surface_muted};
 }}
 
 QScrollBar::add-line, QScrollBar::sub-line {{
@@ -407,7 +407,7 @@ QPushButton.DangerTonalButton {{
 }}
 
 QPushButton.DangerTonalButton:hover {{
-    background-color: #4D2320;
+    background-color: {THEME.error_border};
 }}
 
 QPushButton.DangerTonalButton:disabled {{
@@ -423,7 +423,7 @@ QPushButton.SuccessButton {{
 }}
 
 QPushButton.SuccessButton:hover {{
-    background-color: #203D2F;
+    background-color: {THEME.success_border};
 }}
 
 QPushButton.SuccessButton:disabled {{
@@ -520,7 +520,7 @@ QSlider::handle:horizontal {{
 }}
 
 QSlider::handle:horizontal:hover {{
-    background: #FFDBCD;
+    background: {t['accent_hover']};
 }}
 
 QSlider::handle:horizontal:disabled {{
@@ -611,12 +611,12 @@ DARK_THEME = build_stylesheet()
 
 
 def dialog_stylesheet() -> str:
-    """Return the Warm Obsidian stylesheet for standalone dialogs."""
-    return DARK_THEME
+    """Return the active Aero Instrument stylesheet for standalone dialogs."""
+    return build_stylesheet()
 
 
-def build_dark_palette(accent_hex: Optional[str] = None):
-    """Return the Warm Obsidian :class:`QPalette` that backs the stylesheet."""
+def build_palette(accent_hex: Optional[str] = None):
+    """Return the active Aero Instrument :class:`QPalette` (Dark or Light)."""
     from PyQt6.QtGui import QColor, QPalette
 
     t = accent_tokens(accent_hex or THEME.primary)
@@ -645,7 +645,7 @@ def build_dark_palette(accent_hex: Optional[str] = None):
         QPalette.ColorRole.Midlight: QColor(THEME.surface_container_high),
         QPalette.ColorRole.Mid: QColor(THEME.outline_variant),
         QPalette.ColorRole.Dark: surface,
-        QPalette.ColorRole.Shadow: QColor("#0B0A09"),
+        QPalette.ColorRole.Shadow: QColor(THEME.outline_variant),
     }
     for role, color in roles.items():
         palette.setColor(QPalette.ColorGroup.Normal, role, color)
@@ -671,19 +671,42 @@ def build_dark_palette(accent_hex: Optional[str] = None):
     return palette
 
 
-def apply_theme(app, accent_hex: Optional[str] = None) -> None:
-    """Apply GigaMate's Warm Obsidian M3 theme independently of desktop settings."""
+build_dark_palette = build_palette
+
+
+def apply_theme(
+    app,
+    accent_hex: Optional[str] = None,
+    *,
+    scheme: Optional[str] = None,
+    follow_system: bool = False,
+) -> None:
+    """Apply GigaMate's Aero Instrument theme (Dark or Light)."""
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QStyleFactory
+    from .theme import get_active_scheme, set_active_scheme
+
+    if scheme is not None:
+        set_active_scheme(scheme)
 
     style = QStyleFactory.create("Fusion")
     if style is not None:
         app.setStyle(style)
 
     hints = app.styleHints()
-    set_color_scheme = getattr(hints, "setColorScheme", None)  # Qt 6.8+
-    if set_color_scheme is not None:
-        set_color_scheme(Qt.ColorScheme.Dark)
+    if follow_system:
+        unset_cs = getattr(hints, "unsetColorScheme", None)  # Qt 6.8+
+        if unset_cs is not None:
+            unset_cs()
+    else:
+        set_cs = getattr(hints, "setColorScheme", None)  # Qt 6.8+
+        if set_cs is not None:
+            qt_scheme = (
+                Qt.ColorScheme.Light
+                if get_active_scheme() == "light"
+                else Qt.ColorScheme.Dark
+            )
+            set_cs(qt_scheme)
 
-    app.setPalette(build_dark_palette(accent_hex))
+    app.setPalette(build_palette(accent_hex))
     app.setStyleSheet(build_stylesheet(accent_hex))
