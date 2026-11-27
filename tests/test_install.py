@@ -61,3 +61,34 @@ def test_repair_helper_installed():
     assert "gigamate-repair" in text
     assert "org.gigamate.repair.policy" in text
     assert "50-gigamate-repair.rules" in text
+
+
+def test_install_and_uninstall_bash_syntax():
+    uninstall = Path(__file__).resolve().parent.parent / "uninstall.sh"
+    for script in (INSTALL, uninstall):
+        res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert res.returncode == 0, f"{script.name} failed bash -n:\n{res.stderr}"
+
+
+def test_v5_install_uses_pyqt6_drops_gtk3_and_includes_compat_guard():
+    text = INSTALL.read_text()
+    assert "python-pyqt6" in text
+    assert "python3-pyqt6" in text
+    assert "python3-PyQt6" in text
+    assert "libappindicator-gtk3" not in text
+    assert "gir1.2-gtk-3.0" not in text
+    assert "python3-usb" not in text
+    assert "gigabyte-rgb-tray" not in text
+    assert "gigamate profile contribute" not in text
+    assert '<<<"$status_out"' in text
+    assert '<<<"$status_out}"' not in text
+    assert "check_v5_upgrade_compat" in text
+    assert "--tag v4.5.3" in text
+
+
+def test_uninstall_cleans_up_repair_helper_and_polkit():
+    uninstall = Path(__file__).resolve().parent.parent / "uninstall.sh"
+    text = uninstall.read_text()
+    assert "/usr/lib/gigamate/gigamate-repair" in text
+    assert "50-gigamate-repair.rules" in text
+    assert "org.gigamate.repair.policy" in text

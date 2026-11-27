@@ -129,7 +129,6 @@ fi
 if [ -x /usr/lib/gigamate/gigamate-dgpu-gate ]; then
     info "Removing dGPU power-gate helper (needs sudo)..."
     sudo rm -f /usr/lib/gigamate/gigamate-dgpu-gate
-    sudo rmdir /usr/lib/gigamate 2>/dev/null || true
     info "dGPU power-gate helper removed."
 fi
 if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu-gate.rules ]; then
@@ -139,6 +138,21 @@ fi
 if [ -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy ]; then
     sudo rm -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy
     info "dGPU power-gate polkit action removed."
+fi
+
+# --- Remove ACPI driver repair helper + polkit policy ---
+if [ -x /usr/lib/gigamate/gigamate-repair ]; then
+    info "Removing ACPI driver repair helper (needs sudo)..."
+    sudo rm -f /usr/lib/gigamate/gigamate-repair
+    info "ACPI driver repair helper removed."
+fi
+if [ -f /etc/polkit-1/rules.d/50-gigamate-repair.rules ]; then
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-repair.rules
+    info "ACPI repair polkit rule removed."
+fi
+if [ -f /usr/share/polkit-1/actions/org.gigamate.repair.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/org.gigamate.repair.policy
+    info "ACPI repair polkit action removed."
 fi
 
 # --- Remove polkit rule ---
@@ -154,9 +168,9 @@ if [ -x /usr/lib/gigamate/gigamate-dgpu-nvml ]; then
     sudo /usr/lib/gigamate/gigamate-dgpu-nvml clear 2>/dev/null || true
     info "Removing dGPU undervolt helper (needs sudo)..."
     sudo rm -f /usr/lib/gigamate/gigamate-dgpu-nvml
-    sudo rmdir /usr/lib/gigamate 2>/dev/null || true
     info "dGPU undervolt helper removed."
 fi
+[ -d /usr/lib/gigamate ] && sudo rmdir /usr/lib/gigamate 2>/dev/null || true
 if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules ]; then
     sudo rm -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules
     info "dGPU polkit rule removed."

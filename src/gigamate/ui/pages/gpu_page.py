@@ -283,7 +283,11 @@ class GpuPage(QWidget):
         self.gpu_meta_lbl.setVisible(False)
         hdr.addWidget(self.gpu_meta_lbl)
 
-        self.gate_exp_badge = M3StatusPill("Auto-discovered ACPI", tone="success")
+        self.gate_exp_badge = M3StatusPill("Auto-discovered ACPI", tone="warning")
+        self.gate_exp_badge.setToolTip(
+            "Hardware rail gating is firmware-dependent (verified on Gigabyte AERO X16 1VH). "
+            "Optimus is the safe default; reboot recovers if wake ever fails."
+        )
         self.gate_exp_badge.setVisible(False)
         hdr.addWidget(self.gate_exp_badge)
 
@@ -354,8 +358,9 @@ class GpuPage(QWidget):
         note_icon.setStyleSheet("background: transparent;")
         note_row.addWidget(note_icon, alignment=Qt.AlignmentFlag.AlignTop)
         note = QLabel(
-            "HDMI/DisplayPort outputs wired directly to the dGPU stop working while gated off, "
-            "and audio pauses briefly (~0.5 s) while detaching HDMI audio. Reboot recovers if wake ever fails."
+            "Firmware-dependent (Optimus is always the safe default). HDMI/DisplayPort outputs "
+            "wired directly to the dGPU stop working while gated off, and audio pauses briefly "
+            "(~0.5 s) while detaching HDMI audio. Reboot recovers if wake ever fails."
         )
         note.setStyleSheet(
             f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
@@ -929,10 +934,8 @@ class GpuPage(QWidget):
         if mode in ("eco", "auto") and not load_config().get("dgpu_gate_disclaimer_accepted", False):
             reply = QMessageBox.warning(
                 self,
-                "dGPU Power Gate",
-                "dGPU Power Gate cuts the discrete GPU PCIe power rail using auto-discovered ACPI methods. "
-                "HDMI/DisplayPort outputs wired to the dGPU stop working while gated, and firmware behavior "
-                "varies by model — use at your own risk. Continue?",
+                dgpu_gate.DISCLAIMER_TITLE,
+                dgpu_gate.DISCLAIMER_TEXT,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -1096,7 +1099,11 @@ class GpuPage(QWidget):
             return
 
         self.gate_exp_badge.setText("Auto-discovered ACPI")
-        self.gate_exp_badge.set_tone("success")
+        self.gate_exp_badge.set_tone("warning")
+        self.gate_exp_badge.setToolTip(
+            "Hardware rail gating is firmware-dependent (verified on Gigabyte AERO X16 1VH). "
+            "Optimus is the safe default; reboot recovers if wake ever fails."
+        )
         self.gate_exp_badge.setVisible(True)
         try:
             cfg = load_config()

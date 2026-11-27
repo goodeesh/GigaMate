@@ -96,10 +96,10 @@ class DgpuGateConfirmDialog(QDialog):
         self._scan_state()
         self._build_ui()
 
-        if start_timers and self.trigger == "auto_ac_unplug":
+        if start_timers and self.trigger in ("auto_ac_unplug", "boot_battery"):
             self._ac_timer.start()
         if start_timers and (
-            self.displays or self.closable or self.trigger == "auto_ac_unplug"
+            self.displays or self.closable or self.trigger in ("auto_ac_unplug", "boot_battery")
         ):
             self._holders_timer.start()
 
@@ -125,6 +125,18 @@ class DgpuGateConfirmDialog(QDialog):
                 "AC power was disconnected while GigaMate is in Auto mode. "
                 "Power off the discrete GPU rail now to maximize battery life, or "
                 "keep the dGPU on for now (stays in Auto mode).",
+            )
+        if self.trigger == "boot_battery":
+            mode_note = (
+                "(stays in Auto mode)"
+                if self.target_mode == dgpu_gate.MODE_AUTO
+                else "(reverts to Optimus)"
+            )
+            return (
+                "On Battery Power — Power Off dGPU?",
+                "Laptop booted on battery while dGPU power gating is enabled, and apps "
+                f"are using the discrete GPU. Close them and cut the power rail now, or "
+                f"keep the dGPU on for now {mode_note}.",
             )
         if self.trigger == "auto":
             return (
@@ -626,7 +638,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--trigger",
         default="eco",
-        choices=("eco", "auto", "auto_ac_unplug"),
+        choices=("eco", "auto", "auto_ac_unplug", "boot_battery"),
     )
     parser.add_argument(
         "--target-mode",

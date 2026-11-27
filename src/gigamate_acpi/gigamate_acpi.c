@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/acpi.h>
+#include <linux/dmi.h>
 #include <linux/pci.h>
 #include <linux/ctype.h>
 #include <linux/string.h>
@@ -23,7 +24,7 @@
 #include <linux/version.h>
 
 #define DRIVER_NAME "gigamate_acpi"
-#define DRIVER_VERSION "3.0.0"
+#define DRIVER_VERSION "5.0.0"
 
 static acpi_handle amw0_handle;
 static struct platform_device *gigamate_pdev;
@@ -553,6 +554,21 @@ static ssize_t acpi_eval_show(struct device *dev,
 	return sysfs_emit(buf, "%s\n", res);
 }
 
+static bool gigamate_is_aero_x16_ec_dsmd(void)
+{
+	const char *vendor = dmi_get_system_info(DMI_SYS_VENDOR);
+	const char *product = dmi_get_system_info(DMI_PRODUCT_NAME);
+	acpi_handle dsmd_handle = NULL;
+
+	if (!vendor || !product)
+		return false;
+	if (!strstr(vendor, "GIGABYTE") && !strstr(vendor, "Gigabyte"))
+		return false;
+	if (!strstr(product, "AERO X16"))
+		return false;
+	return ACPI_SUCCESS(acpi_get_handle(NULL, "\\_SB.PCI0.SBRG.EC0.DSMD", &dsmd_handle));
+}
+
 static void gigamate_recover_pg00_on_timeout(const char *path)
 {
 	size_t len = strlen(path);
@@ -565,13 +581,14 @@ static void gigamate_recover_pg00_on_timeout(const char *path)
 		return;
 
 	/*
-	 * On AMD + NVIDIA Gigabyte laptops (e.g. AERO X16), PG00._ON calls
+	 * On verified AMD + NVIDIA Gigabyte AERO X16 laptops, PG00._ON calls
 	 * \_SB.ALIB(0x18, 0) at entry and clears EC0.DSMD (EC 0x2D bit 0)
 	 * plus calls \_SB.ALIB(0x18, 1) only after its While(NVID != 0x10DE)
-	 * loop. If that loop hits AE_AML_LOOP_TIMEOUT, replay those two
-	 * tail steps so the EC and AMD SMU re-enable full Dynamic Boost.
+	 * loop. If that loop hits AE_AML_LOOP_TIMEOUT, replay the EC0.DSMD
+	 * clear only on verified AERO X16 hardware exposing EC0.DSMD, and call
+	 * \_SB.ALIB(0x18, 1) if present so the EC and AMD SMU restore Dynamic Boost.
 	 */
-	if (ec_read(0x2D, &ec_val) == 0 && (ec_val & 0x01)) {
+	if (gigamate_is_aero_x16_ec_dsmd() && ec_read(0x2D, &ec_val) == 0 && (ec_val & 0x01)) {
 		u8 next_val = ec_val & ~0x01;
 		if (ec_write(0x2D, next_val) == 0)
 			pr_info(DRIVER_NAME ": PG00._ON timeout recovery: cleared EC0.DSMD (0x2D: 0x%02x -> 0x%02x)\n",

@@ -671,13 +671,14 @@ class TestDgpuGateFastPaths:
              patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
              patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
              patch.object(dgpu_gate, "boot_settle_remaining", return_value=0.0), \
-             patch.object(dgpu_gate, "list_gpu_holder_processes", return_value=[{"pid": 1234, "comm": "python"}]), \
+             patch.object(dgpu_gate, "list_gpu_holder_processes", return_value=[{"pid": 1234, "comm": "python"}]) as holders_mock, \
              patch.object(dgpu_gate, "_publish_policy"), \
              patch.object(dgpu_gate, "launch_confirm_dialog") as dialog_mock, \
              patch.dict("os.environ", {"DISPLAY": ":0"}):
             dgpu_gate.watcher_tick(now=200.0)
             dialog_mock.assert_not_called()
             dgpu_gate.watcher_tick(now=213.0)
+            holders_mock.assert_called_once_with()
             dialog_mock.assert_called_once_with(
                 trigger="boot_battery",
                 target_mode=dgpu_gate.MODE_ECO,
@@ -822,3 +823,106 @@ def test_dgpu_gate_helper_wakes_bridge_and_retrains_degraded_pcie_link(tmp_path)
         except RuntimeError:
             pass
         assert ap.read_text(encoding="utf-8").strip() == "1"
+
+
+def test_dgpu_gate_helper_blocks_sbr_on_non_exclusive_or_bound_bridge(tmp_path):
+    """_bridge_exclusively_hosts_unbound_dgpu blocks SBR if sibling slots, USB-C funcs, or bound drivers exist."""
+    import importlib.machinery
+    import importlib.util
+    import shutil
+    from pathlib import Path
+
+    helper_path = Path(__file__).resolve().parents[1] / "data" / "gigamate-dgpu-gate"
+    loader = importlib.machinery.SourceFileLoader("gigamate_dgpu_gate_sbr_test", str(helper_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+
+    pci_root = tmp_path / "pci"
+    bridge = "0000:00:03.1"
+    bdir = pci_root / bridge
+    bdir.mkdir(parents=True)
+    (bdir / "class").write_text("0x060400\n", encoding="utf-8")
+
+    # Downstream devices nested under bridge (real sysfs topology).
+    gpu = bdir / "0000:64:00.0"
+    aud = bdir / "0000:64:00.1"
+    gpu.mkdir()
+    aud.mkdir()
+    (gpu / "class").write_text("0x030000\n", encoding="utf-8")
+    (aud / "class").write_text("0x040300\n", encoding="utf-8")
+    (pci_root / "0000:64:00.0").symlink_to(gpu)
+    (pci_root / "0000:64:00.1").symlink_to(aud)
+
+    with patch.object(mod, "_PCI_DEVICES", pci_root):
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is True
+
+        # Bound audio sibling blocks SBR
+        (aud / "driver").mkdir()
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+        (aud / "driver").rmdir()
+
+        # USB-C xHCI/UCSI function (.2) on GPU slot blocks SBR
+        ucsi = bdir / "0000:64:00.2"
+        ucsi.mkdir()
+        (ucsi / "class").write_text("0x0c0330\n", encoding="utf-8")
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+        shutil.rmtree(ucsi)
+
+        # Non-GPU sibling slot on the same root bridge blocks SBR
+        nvme = bdir / "0000:64:01.0"
+        nvme.mkdir()
+        (nvme / "class").write_text("0x010802\n", encoding="utf-8")
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+
+
+def test_probe_dgpu_gate_handles_cached_tuple_with_none_match(monkeypatch):
+    """probe_dgpu_gate() must not crash when get_gate_config() returns (cfg, None)."""
+    from gigamate import dgpu_gate
+
+    topo = dgpu_gate.DgpuTopology(
+        bdf="0000:64:00.0",
+        vendor="nvidia",
+        bridge_bdf="0000:00:03.1",
+        acpi_path="\\_SB.PCI0.GPP9.PEGP",
+        power_resources=["\\_SB.PCI0.GPP9.PG00"],
+    )
+    cfg = dgpu_gate.DgpuGateConfig(path="\\_SB.PCI0.GPP9.PG00", source="auto")
+
+    monkeypatch.setattr(dgpu_gate, "_GATE_PROBE_IN_PROGRESS", False)
+    monkeypatch.setattr(dgpu_gate, "find_dgpu_topology", lambda: topo)
+    monkeypatch.setattr(dgpu_gate, "acpi_eval_backend", lambda: "none")
+    monkeypatch.setattr(dgpu_gate, "get_gate_config", lambda: (cfg, None))
+
+    res = dgpu_gate.probe_dgpu_gate(live_test=False)
+    assert res["candidates"]
+    assert res["candidates"][0]["source"] == "auto"
+    assert res["profile_match"]["source"] == "auto"
+
+
+def test_cli_gpu_power_confirm_dialog_accepts_boot_battery_trigger(monkeypatch):
+    """`gigamate gpu power confirm-dialog --trigger boot_battery` parses and forwards args."""
+    import sys
+    import types
+    import pytest
+    from gigamate import cli
+
+    captured = {}
+    fake_mod = types.ModuleType("gigamate.ui.dgpu_gate_dialog")
+
+    def fake_main(argv):
+        captured["argv"] = argv
+        return 0
+
+    fake_mod.main = fake_main
+    monkeypatch.setitem(sys.modules, "gigamate.ui.dgpu_gate_dialog", fake_mod)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gigamate", "gpu", "power", "confirm-dialog", "--trigger", "boot_battery", "--target-mode", "auto"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert "--trigger" in captured["argv"]
+    assert "boot_battery" in captured["argv"]

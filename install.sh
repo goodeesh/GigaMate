@@ -222,10 +222,10 @@ install_system_deps() {
 
     case "$distro" in
         arch|archlinux|endeavouros|cachyos)
-            info "Installing: python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel"
-            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-gobject gtk3 libappindicator-gtk3 dkms python-evdev python-pip base-devel
+            info "Installing: python-pyqt6 python-gobject dkms python-evdev python-pip base-devel"
+            sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-gobject dkms python-evdev python-pip base-devel
             sudo pacman -S --needed ${ASSUME_YES:+--noconfirm} python-pyqt6 2>/dev/null || \
-                warn "python-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
+                warn "python-pyqt6 unavailable — GigaMate Tray and Center will use pip PyQt6"
             if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
                 local headers_pkg
                 headers_pkg="$(arch_headers_pkg)"
@@ -237,41 +237,35 @@ install_system_deps() {
             fi
             ;;
         debian|ubuntu|pop|mint)
-            info "Installing: python3-usb python3-gi python3-gi-cairo gir1.2-gtk-3.0 dkms python3-evdev python3-pip build-essential"
+            info "Installing: python3-pyqt6 python3-gi dkms python3-evdev python3-pip build-essential"
             sudo apt update
-            sudo apt install -y python3-usb python3-gi python3-gi-cairo gir1.2-gtk-3.0 dkms python3-evdev python3-pip build-essential
-            sudo apt install -y gir1.2-ayatanaappindicator3-0.1 2>/dev/null || \
-                sudo apt install -y gir1.2-appindicator3-0.1 2>/dev/null || true
+            sudo apt install -y python3-gi dkms python3-evdev python3-pip build-essential
             sudo apt install -y python3-pyqt6 2>/dev/null || \
-                warn "python3-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
+                warn "python3-pyqt6 unavailable — GigaMate Tray and Center will use pip PyQt6"
             info "Installing kernel headers..."
             sudo apt install -y linux-headers-$(uname -r) 2>/dev/null || warn "Could not install linux-headers"
             ;;
         fedora|rhel|centos)
-            info "Installing: python3-gobject gtk3 dkms python3-evdev python3-pip"
-            sudo dnf install -y python3-gobject gtk3 dkms python3-evdev python3-pip
-            sudo dnf install -y libayatana-appindicator-gtk3 2>/dev/null || \
-                sudo dnf install -y libappindicator-gtk3 2>/dev/null || true
+            info "Installing: python3-pyqt6 python3-gobject dkms python3-evdev python3-pip"
+            sudo dnf install -y python3-gobject dkms python3-evdev python3-pip
             sudo dnf install -y python3-pyqt6 2>/dev/null || \
-                warn "python3-pyqt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
+                warn "python3-pyqt6 unavailable — GigaMate Tray and Center will use pip PyQt6"
             info "Installing kernel headers..."
             sudo dnf install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         suse|opensuse*|sles)
-            info "Installing: python3-gobject gtk3 dkms python3-evdev python3-pip"
-            sudo zypper install -y python3-gobject gtk3 dkms python3-evdev python3-pip
-            sudo zypper install -y typelib-1_0-AyatanaAppIndicator3-0_1 2>/dev/null || \
-                sudo zypper install -y libappindicator3 2>/dev/null || true
+            info "Installing: python3-PyQt6 python3-gobject dkms python3-evdev python3-pip"
+            sudo zypper install -y python3-gobject dkms python3-evdev python3-pip
             sudo zypper install -y python3-PyQt6 2>/dev/null || \
-                warn "python3-PyQt6 unavailable — GigaMate Center will use the pip-installed PyQt6"
+                warn "python3-PyQt6 unavailable — GigaMate Tray and Center will use pip PyQt6"
             info "Installing kernel headers..."
             sudo zypper install -y kernel-devel 2>/dev/null || warn "Could not install kernel-devel"
             ;;
         *)
             warn "Unsupported distro: $distro"
             warn "You must manually install:"
+            warn "  - PyQt6 >= 6.4 (for GigaMate System Tray and Center)"
             warn "  - evdev (Python input monitoring, for keyboard idle auto-off)"
-            warn "  - PyGObject + Gtk 3.0 + AppIndicator3"
             warn "  - Linux kernel headers (for ACPI kernel module)"
             warn "  - Python 3.10+"
             echo
@@ -297,7 +291,7 @@ dkms_registered() {
     # tree already contains"). Collect the output first, then match.
     local status_out
     status_out="$(dkms status 2>/dev/null || true)"
-    grep -q "^gigamate_acpi/$1[ ,]" <<<"$status_out}"
+    grep -q "^gigamate_acpi/$1[ ,]" <<<"$status_out"
 }
 
 # Prune stale gigamate_acpi DKMS registrations (and their /usr/src source
@@ -546,13 +540,12 @@ install_python_pkg() {
 
     info "Installing gigamate with pip..."
     if command -v pipx &>/dev/null; then
-        # The tray needs system packages (PyGObject/gi), which are not
-        # installable into an isolated venv, so install with
-        # --system-site-packages. pipx backed by uv cannot recreate an
-        # existing venv for `install --force` ("A virtual environment
-        # already exists"), so remove any existing venv first — this makes
-        # every upgrade install cleanly via pipx instead of silently
-        # falling back to pip --user.
+        # Give pipx --system-site-packages so distro-shipped PyQt6 / evdev /
+        # optional GObject bindings are reachable inside the isolated venv.
+        # pipx backed by uv cannot recreate an existing venv for
+        # `install --force` ("A virtual environment already exists"), so
+        # remove any existing venv first — this makes every upgrade install
+        # cleanly via pipx instead of silently falling back to pip --user.
         local venv_dir="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate"
         if [ -d "$venv_dir" ]; then
             info "Removing existing pipx venv for a clean reinstall..."
@@ -645,7 +638,7 @@ verify_udev_access() {
         [ -e "$h/device/uevent" ] || continue
         id="$(grep -h '^HID_ID=' "$h/device/uevent" 2>/dev/null || true)"
         case "$id" in
-            *0003:00000414:*)
+            *0003:00000414:*|*0003:00001044:*|*0003:000004D9:00008105*)
                 node="/dev/$(basename "$h")"
                 break
                 ;;
@@ -933,30 +926,38 @@ install_repair_helper() {
     fi
 }
 
-# --- Install dGPU undervolt watcher service (NVIDIA only) ---
+# --- Install dGPU watcher service (NVIDIA or discrete AMD GPU) ---
 install_dgpu_service() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local svc_src="$script_dir/data/gigamate-dgpu.service"
     local svc_dst="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gigamate-dgpu.service"
 
-    # Only meaningful with a discrete NVIDIA GPU (including while gated off).
-    local has_nvidia=false
+    # Meaningful for discrete NVIDIA or AMD GPUs (including while gated off).
+    local has_dgpu=false
     if [ -f /run/gigamate-dgpu-gate.json ]; then
-        has_nvidia=true
+        has_dgpu=true
     elif [ -d /sys/bus/pci/devices ]; then
-        for v in /sys/bus/pci/devices/*/vendor; do
-            if [ -f "$v" ] && grep -qi "0x10de" "$v"; then
-                has_nvidia=true
+        for d in /sys/bus/pci/devices/*; do
+            [ -f "$d/vendor" ] && [ -f "$d/class" ] || continue
+            local v c
+            v="$(tr '[:upper:]' '[:lower:]' < "$d/vendor" 2>/dev/null || true)"
+            c="$(tr '[:upper:]' '[:lower:]' < "$d/class" 2>/dev/null || true)"
+            if [ "$v" = "0x10de" ] && [[ "$c" == 0x0300* || "$c" == 0x0302* ]]; then
+                has_dgpu=true
+                break
+            fi
+            if [ "$v" = "0x1002" ] && [[ "$c" == 0x0302* ]] && [ ! -d "$d/uma" ]; then
+                has_dgpu=true
                 break
             fi
         done
     fi
-    if [ "$has_nvidia" != true ] || [ ! -f "$svc_src" ]; then
+    if [ "$has_dgpu" != true ] || [ ! -f "$svc_src" ]; then
         return
     fi
 
-    header "Installing dGPU undervolt watcher service"
+    header "Installing dGPU watcher service"
     mkdir -p "$(dirname "$svc_dst")"
     cp "$svc_src" "$svc_dst"
 
@@ -1066,6 +1067,53 @@ migrate_config() {
     fi
 }
 
+# --- Warn clearly on pre-2025 hardware lacking LampArray / WMBD(0xED) ---
+check_v5_upgrade_compat() {
+    local py_bin="${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/gigamate/bin/python"
+    [ -x "$py_bin" ] || py_bin="$(command -v python3 2>/dev/null || true)"
+    [ -n "$py_bin" ] || return 0
+
+    local report
+    report="$("$py_bin" -c "
+import os
+warnings = []
+try:
+    from gigamate.lamparray import diagnose_lamparray
+    diag = diagnose_lamparray() or {}
+    if diag.get('status') in ('unsupported_firmware', 'unsupported_layout'):
+        warnings.append('legacy_rgb:' + str(diag.get('reason') or diag.get('status')))
+except Exception:
+    pass
+try:
+    if os.path.isdir('/sys/devices/platform/gigamate_acpi'):
+        from gigamate.power_limits import discover_acpi_profiles
+        if not discover_acpi_profiles():
+            warnings.append('no_wmbd_ed:ACPI driver bound, but WMBD(0xED) power profiles were not found in DSDT.')
+except Exception:
+    pass
+for w in warnings:
+    print(w)
+" 2>/dev/null || true)"
+
+    [ -n "$report" ] || return 0
+
+    echo
+    warn "======================================================================"
+    warn "GigaMate 5.0.0 Hardware Compatibility Notice"
+    warn "======================================================================"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        warn "  • ${line#*:}"
+    done <<< "$report"
+    warn "GigaMate 5.0.0 uses pure zero-profile automatic discovery (HID LampArray"
+    warn "and WMBD(0xED) AML) and dropped legacy 0x08 RGB & static JSON profiles."
+    warn "Your existing ~/.config/gigamate settings & profiles were left intact."
+    warn "To roll back safely to the final v4.x release (v4.5.3), run:"
+    warn "  curl -fsSL https://raw.githubusercontent.com/goodeesh/GigaMate/v4.5.3/install.sh | bash -s -- --tag v4.5.3"
+    warn "======================================================================"
+    echo
+}
+
 main() {
     parse_args "$@"
 
@@ -1143,6 +1191,8 @@ main() {
         info "Cleared cached update state."
     fi
 
+    check_v5_upgrade_compat
+
     echo
     echo "============================================"
     if [ "$DO_UPDATE" = true ]; then
@@ -1174,18 +1224,16 @@ main() {
 
     echo
     echo "  Commands:"
+    echo "    gigamate center                  Launch GigaMate Center GUI"
     echo "    gigamate status                  Show hardware status"
-    echo "    gigamate rgb static purple       Set keyboard colour"
-    echo "    gigamate profile gaming          Set Gaming mode"
-    echo "    gigamate-tray                    Launch system tray app"
-    echo ""
-    echo "  Legacy commands (still work):"
-    echo "    gigabyte-rgb static purple       Same as gigamate rgb static purple"
-    echo "    gigabyte-rgb-tray                Same as gigamate-tray"
+    echo "    gigamate rgb static purple       Set keyboard colour (or #RRGGBB)"
+    echo "    gigamate profile gaming          Set Gaming power profile"
+    echo "    gigamate gpu power status        Check dGPU power gate status"
+    echo "    gigamate-tray                    Launch system tray daemon"
     echo
-    echo "  To contribute your profile:"
-    echo "    gigamate doctor                  Check hardware & driver status"
-    echo "    gigamate profile contribute      Guide to create a Pull Request"
+    echo "  Diagnostics & reporting:"
+    echo "    gigamate doctor                  Check hardware, permissions & drivers"
+    echo "    gigamate profile report          Print hardware discovery summary"
     echo
     echo "  Tray app auto-starts on login via systemd."
     echo "  Manage: systemctl --user status gigamate.service"

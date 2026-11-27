@@ -1138,13 +1138,51 @@ def _probe_pci_devices(bdfs: List[str]) -> None:
             pass
 
 
+def _bridge_exclusively_hosts_unbound_dgpu(bridge_bdf: str, gpu_bdf: str) -> bool:
+    """Return True only when ``bridge_bdf`` downstream has no bound drivers or non-dGPU siblings.
+
+    Prevents Secondary Bus Reset (``reset_subordinate``) from resetting
+    unrelated sibling PCI/Thunderbolt/USB4/NVMe devices sharing a root bridge or
+    multi-function USB-C controllers (.2/.3) or still-bound drivers (e.g. Xid 154).
+    """
+    if not bridge_bdf or not _is_valid_bdf(bridge_bdf) or not gpu_bdf or not _is_valid_bdf(gpu_bdf):
+        return False
+    if (_PCI_DEVICES / gpu_bdf / "driver").exists():
+        return False
+
+    bridge_path = _PCI_DEVICES / bridge_bdf
+    bklass = (_read_text(bridge_path / "class") or "").lower()
+    if bklass and not bklass.startswith("0x0604"):
+        return False
+
+    try:
+        bdir_real = Path(os.path.realpath(bridge_path))
+        entries = list(bdir_real.iterdir()) if bdir_real.is_dir() else []
+    except OSError:
+        return False
+
+    gpu_slot_prefix = gpu_bdf[:-1]
+    for child in entries:
+        if not child.is_dir() or not _is_valid_bdf(child.name):
+            continue
+        if (child / "driver").exists():
+            return False
+        if child.name[:-1] != gpu_slot_prefix:
+            return False
+        cklass = (_read_text(child / "class") or "").lower()
+        if cklass and not (cklass.startswith("0x03") or cklass.startswith("0x0403")):
+            return False
+
+    return True
+
+
 def _ensure_full_pcie_link_width(
     bridge_bdf: Optional[str],
     gpu_bdf: str,
     *,
     allow_sbr: bool = False,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Verify PCIe link width; run Secondary Bus Reset (only when unbound) or retrain if degraded."""
+    """Verify PCIe link width; run Secondary Bus Reset (only when unbound & exclusive) or retrain if degraded."""
     target_bdf = bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else gpu_bdf
     tdir = _PCI_DEVICES / target_bdf
     cur_w = _read_int_sysfs(tdir / "current_link_width")
@@ -1157,10 +1195,10 @@ def _ensure_full_pcie_link_width(
         and 0 < cur_w < max_w
     ):
         # Secondary Bus Reset (SBR) is ONLY safe when NO driver is bound to the
-        # GPU (running SBR while nvidia is bound causes GSP Xid 154).
-        gpu_unbound = not (_PCI_DEVICES / gpu_bdf / "driver").exists()
+        # downstream GPU/audio and no non-dGPU siblings share the root bridge.
+        sbr_safe = _bridge_exclusively_hosts_unbound_dgpu(bridge_bdf, gpu_bdf)
         sbr_path = _PCI_DEVICES / bridge_bdf / "reset_subordinate"
-        if allow_sbr and gpu_unbound and sbr_path.exists():
+        if allow_sbr and sbr_safe and sbr_path.exists():
             try:
                 sbr_path.write_text("1\n", encoding="utf-8")
                 deadline = time.monotonic() + 2.0

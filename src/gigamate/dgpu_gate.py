@@ -126,6 +126,19 @@ MODE_ECO = "eco"
 MODE_AUTO = "auto"
 VALID_MODES = (MODE_OPTIMUS, MODE_ECO, MODE_AUTO)
 
+DISCLAIMER_TITLE = "dGPU Power Gate — Hardware Notice"
+DISCLAIMER_TEXT = (
+    "dGPU Power Gate cuts the discrete GPU PCIe power rail via auto-discovered ACPI "
+    "(_OFF/_PS3) and removes its PCI device (~0 W idle draw).\n\n"
+    "• Optimus is always the safe default.\n"
+    "• ECO / Auto rail gating is firmware-dependent (verified on Gigabyte AERO X16 1VH "
+    "AMD + NVIDIA; untested models may hit ACPI wake timeouts or require a reboot to recover).\n"
+    "• HDMI/DisplayPort outputs wired directly to the dGPU stop working while gated off, "
+    "and desktop audio pauses briefly (~0.5 s) while detaching HDMI audio.\n"
+    "• Active apps holding the dGPU must close or suspend before cutting power.\n\n"
+    "Continue with hardware rail gating?"
+)
+
 PCI_SYSFS = Path("/sys/bus/pci/devices")
 DRM_SYSFS = Path("/sys/class/drm")
 STATE_FILE = Path("/run/gigamate-dgpu-gate.json")
@@ -1345,8 +1358,8 @@ def availability_message(reason: Optional[str]) -> str:
     messages = {
         "no_dgpu": "No discrete GPU detected on this system.",
         "no_profile": (
-            "Your laptop model profile does not define an ACPI dGPU power gate yet. "
-            "Run 'gigamate gpu power probe' or 'gigamate calibrate acpi' to discover candidate paths."
+            "No ACPI dGPU power-gate resource was auto-discovered on this laptop. "
+            "Run 'gigamate gpu power probe' or 'gigamate doctor' to inspect ACPI paths."
         ),
         "no_acpi_backend": (
             "No ACPI method evaluation backend found (install/load gigamate_acpi or acpi_call)."
@@ -1419,13 +1432,14 @@ def probe_dgpu_gate(live_test: bool = False) -> Dict:
 
     if resolved is not None:
         cfg_gate, match = resolved
+        src = getattr(match, "source", None) if match is not None else None
         _add_candidate(
             cfg_gate.path,
             cfg_gate.method,
             cfg_gate.effective_sta_method,
             cfg_gate.effective_on_method,
             cfg_gate.quirks,
-            f"profile:{match.source}",
+            f"profile:{src}" if src else cfg_gate.source,
         )
 
     for pr in topo.power_resources:
@@ -1697,7 +1711,10 @@ def _gate_off_locked(
         return {
             "ok": False,
             "reason": "unsupported",
-            "error": "No dGPU power-gate profile found for this laptop model. Run 'gigamate calibrate acpi' or 'gigamate gpu power probe'.",
+            "error": (
+                "No ACPI dGPU power-gate resource was auto-discovered on this laptop. "
+                "Run 'gigamate gpu power probe' or 'gigamate doctor' to inspect ACPI paths."
+            ),
         }
     gate_cfg, _match = resolved
 
@@ -2243,7 +2260,7 @@ def watcher_tick(now: Optional[float] = None) -> None:
         return
 
     if rstatus == "active" and not displays and (now - want_off_since) >= 12.0 and not boot_prompted:
-        holders = list_gpu_holder_processes(topo.bdf)
+        holders = list_gpu_holder_processes()
         with _WATCHER_LOCK:
             _watcher_state["boot_prompted"] = True
             _watcher_state["last_attempt_at"] = now

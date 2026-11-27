@@ -699,9 +699,8 @@ class AutomationPage(QWidget):
             if not fresh.get("dgpu_gate_disclaimer_accepted", False):
                 res = QMessageBox.warning(
                     self,
-                    "Enable dGPU Auto-Gate?",
-                    "Auto-Gate cuts the discrete GPU power rail when on battery. "
-                    "Active GPU workloads or external displays wired to the dGPU may be interrupted.",
+                    dgpu_gate.DISCLAIMER_TITLE,
+                    dgpu_gate.DISCLAIMER_TEXT,
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel,
                 )
@@ -723,7 +722,7 @@ class AutomationPage(QWidget):
             if on_battery:
                 try:
                     topo = dgpu_gate.find_dgpu_topology()
-                    holders = dgpu_gate.list_gpu_holder_processes(topo.bdf) if topo.bdf else []
+                    holders = dgpu_gate.list_gpu_holder_processes() if topo.bdf else []
                 except Exception:
                     holders = []
 

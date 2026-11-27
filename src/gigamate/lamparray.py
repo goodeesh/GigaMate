@@ -267,7 +267,7 @@ def diagnose_lamparray(vid: int, pid: int, legacy_mode: bool = False) -> Dict[st
         "node": None,
         "interface": None,
         "lamp_count": None,
-        "reason": "Keyboard firmware does not expose HID LampArray (Usage Page 0x59); using legacy protocol.",
+        "reason": "Keyboard firmware does not expose HID LampArray (Usage Page 0x59); legacy 0x08 keyboards require GigaMate v4.5.x.",
     }
 
 

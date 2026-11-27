@@ -2421,3 +2421,21 @@ def test_settings_appearance_and_live_theme_switch(qapp):
         theme.set_active_scheme("dark")
         win.close()
         win.deleteLater()
+
+
+def test_dgpu_gate_dialog_supports_boot_battery_trigger(qapp):
+    """DgpuGateConfirmDialog accepts trigger='boot_battery' cleanly without ValueError."""
+    from gigamate import dgpu_gate
+    from gigamate.ui.dgpu_gate_dialog import DgpuGateConfirmDialog
+
+    with patch("gigamate.ui.dgpu_gate_dialog.dgpu_gate.find_dgpu_topology", return_value=dgpu_gate.DgpuTopology()), \
+         patch("gigamate.ui.dgpu_gate_dialog.dgpu_gate.closable_gpu_holders", return_value=[]):
+        dlg = DgpuGateConfirmDialog(
+            trigger="boot_battery",
+            target_mode=dgpu_gate.MODE_AUTO,
+            prev_mode=dgpu_gate.MODE_AUTO,
+            start_timers=False,
+        )
+        assert "Battery" in dlg.title_lbl.text()
+        assert dlg._is_auto_session() is True
+        dlg.deleteLater()

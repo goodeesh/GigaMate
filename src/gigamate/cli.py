@@ -10,14 +10,13 @@ Usage:
     gigamate gpu power <mode|off|on|probe>     dGPU power gate (Optimus / ECO / Auto)
     gigamate gpu memoffset 300               Memory-clock V/F offset (MHz; + = overclock)
     gigamate profile [name]                    Show/set power profile
-    gigamate profile contribute                Pull Request instructions
+    gigamate profile report                    Print auto-discovered hardware report
     gigamate detect [--acpi]                   Detect hardware
     gigamate doctor                            Diagnose hardware and permissions
     gigamate version                           Show version
     gigamate update [--check] [--yes]          Check for / install updates
-
-Legacy (still works):
-    gigabyte-rgb static purple                 Same as `gigamate rgb static purple`
+    gigamate center                            Launch GigaMate Center GUI
+    gigamate tray                              Launch GigaMate System Tray daemon
 """
 
 import sys
@@ -714,7 +713,7 @@ def cmd_gpu_power(args) -> None:
             import json as _json
 
             print()
-            print("  Recommended schema v4 block (acpi.dgpu_gate):")
+            print("  Recommended auto-discovered gate target:")
             print("  " + _json.dumps(res["recommended"], indent=2).replace("\n", "\n  "))
         if live:
             lt = res.get("live_test") or {}
@@ -1040,7 +1039,11 @@ def cmd_profile_report(args) -> None:
         from . import dgpu_gate
 
         gst = dgpu_gate.get_status(check_helper=False)
-        gcfg = gst.get("gate_config") or dgpu_gate.resolve_gate_config()
+        gcfg = gst.get("gate_config")
+        if gcfg is None:
+            resolved = dgpu_gate.resolve_gate_config()
+            if resolved is not None:
+                gcfg = resolved[0].to_dict()
         if gcfg:
             print(
                 f"  dGPU power gate:     {gcfg['path']}.{gcfg['method']} "
@@ -1486,7 +1489,7 @@ def cmd_legacy(args) -> None:
         print("Legacy usage: gigabyte-rgb <effect> <colour> [options]")
         print("New usage:    gigamate <subcommand> [options]")
         print()
-        print("Available subcommands: rgb, status, profile, detect, calibrate, version")
+        print("Available subcommands: rgb, status, profile, detect, doctor, battery, gpu, hotkeys, version")
         print("For help: gigamate --help")
         return
 
@@ -1495,17 +1498,14 @@ def cmd_legacy(args) -> None:
 
 
 def cmd_rgb_reset(args) -> None:
-    """Re-attach kernel keyboard drivers."""
+    """Report LampArray driver status (no kernel driver detach needed in v5.0)."""
     dev = get_keyboard(args.vid, args.pid)
     if dev is None:
         print("Keyboard not found")
+        if detect_keyboards() and not hardware_supports_lamparray(args.vid, args.pid):
+            print("Note: Non-LampArray pre-2025 keyboards require GigaMate v4.5.x.")
         sys.exit(1)
-    for i in [0, 2, 4]:
-        try:
-            dev.attach_kernel_driver(i)
-        except Exception:
-            pass
-    print("Keyboard drivers re-attached for interfaces 0/2/4. Typing should work.")
+    print("GigaMate 5.0 uses HID LampArray (/dev/hidraw*) without detaching kernel drivers; typing remains active.")
 
 
 def list_options():
@@ -1514,9 +1514,9 @@ def list_options():
     print()
     print("Available palette colours (or any #RRGGBB hex):")
     for name in sorted(PALETTE_HEX.keys()):
-        print(f"  {name:15s} (#{PALETTE_HEX[name]})")
+        print(f"  {name:15s} ({PALETTE_HEX[name]})")
     print()
-    print("Brightness: 0-100% (or legacy: off, dim, full)")
+    print("Brightness: 0 (off) or 5-100%")
 
 
 # ────────────────────────────────────────────
@@ -1712,15 +1712,14 @@ def _subcommand_main() -> None:
         description="GigaMate — Gigabyte laptop management for Linux",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
-  gigamate rgb static purple         Set keyboard colour
+  gigamate rgb static purple         Set keyboard colour (or #RRGGBB)
   gigamate rgb off                   Turn backlight off
   gigamate status                    Show hardware status
   gigamate profile gaming            Set Gaming power profile
+  gigamate gpu power status          Check dGPU power gate status
   gigamate detect                    Detect hardware
   gigamate doctor                    Diagnose hardware and permissions
-  gigamate calibrate rgb             Interactive RGB calibration
-        
-Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
+  gigamate center                    Launch GigaMate Center GUI""",
     )
     parser.add_argument("--center", "-c", action="store_true", help="Launch GigaMate Center GUI")
     parser.add_argument("--tray", "-t", action="store_true", help="Launch GigaMate System Tray daemon")
@@ -1850,7 +1849,7 @@ Legacy: gigabyte-rgb <effect> <colour>  (still works)""",
         "--force-close", action="store_true",
         help="With 'off', 'eco', or 'auto', close user apps/services holding the dGPU and wait briefly for suspend before gating off")
     gpu_power_parser.add_argument(
-        "--trigger", default="eco", choices=["eco", "auto", "auto_ac_unplug"],
+        "--trigger", default="eco", choices=["eco", "auto", "auto_ac_unplug", "boot_battery"],
         help="With 'confirm-dialog', origin trigger label")
     gpu_power_parser.add_argument(
         "--target-mode", default="eco", choices=["eco", "auto"],

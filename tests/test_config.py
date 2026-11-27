@@ -508,3 +508,55 @@ def test_enabled_acpi_profiles_filtering_and_guard():
     all_disabled = config_module.enabled_acpi_profiles(discovered, {"disabled_profiles": [0, 1, 2]})
     assert all_disabled == discovered
     assert all_disabled is not discovered
+
+
+def test_v453_config_upgrade_preserves_settings_and_rollback_keys(isolated_config):
+    """Upgrading from a realistic v4.5.3 config.json preserves preferences & rollback keys."""
+    import json
+
+    v453_payload = {
+        "colour": "purple",
+        "brightness": 2,
+        "startup_apply": True,
+        "idle_off_enabled": True,
+        "idle_timeout_sec": 120,
+        "charge_limit": 75,
+        "charge_limit_enabled": True,
+        "dgpu_undervolt_enabled": True,
+        "dgpu_undervolt_offset_mhz": 150,
+        "dgpu_power_mode": "optimus",
+        "profile_id": [1044, 33029],
+        "rgb_legacy_mode": True,
+        "experimental_profiles_enabled": True,
+        "vid": "0414",
+        "pid": "8105",
+        "dgpu_telemetry": True,
+    }
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(json.dumps(v453_payload), encoding="utf-8")
+
+    cfg = config_module.load()
+    assert cfg["colour"] == "purple"
+    assert cfg["brightness"] == 2
+    assert cfg["startup_apply"] is True
+    assert cfg["idle_off_enabled"] is True
+    assert cfg["idle_timeout_sec"] == 120
+    assert cfg["charge_limit"] == 75
+    assert cfg["charge_limit_enabled"] is True
+    assert cfg["dgpu_undervolt_enabled"] is True
+    assert cfg["dgpu_undervolt_offset_mhz"] == 150
+    assert cfg["dgpu_power_mode"] == "optimus"
+    assert cfg["ui_theme"] == "system"
+    assert cfg["idle_internal_only"] is False
+    assert cfg["dgpu_gate_disclaimer_accepted"] is False
+    assert "profile_id" not in cfg
+    assert "rgb_legacy_mode" not in cfg
+    assert "experimental_profiles_enabled" not in cfg
+
+    assert config_module.save(cfg) is True
+    raw_saved = json.loads(isolated_config.read_text(encoding="utf-8"))
+    # Obsolete keys dropped, but rollback-safe keys on disk preserved
+    for dropped in ("vid", "pid", "dgpu_telemetry"):
+        assert dropped not in raw_saved
+    assert raw_saved["profile_id"] == [1044, 33029]
+    assert raw_saved["rgb_legacy_mode"] is True

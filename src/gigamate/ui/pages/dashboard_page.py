@@ -833,9 +833,8 @@ class DashboardPage(QWidget):
             if not cfg.get("dgpu_gate_disclaimer_accepted"):
                 reply = QMessageBox.warning(
                     self,
-                    "Power Off Discrete GPU",
-                    "Turning off the discrete GPU cuts its power rail (~0 W) while on battery. "
-                    "External displays wired to the dGPU and CUDA/Vulkan dGPU apps will be unavailable until re-enabled.",
+                    dgpu_gate.DISCLAIMER_TITLE,
+                    dgpu_gate.DISCLAIMER_TEXT,
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel,
                 )
