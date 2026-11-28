@@ -869,3 +869,61 @@ def test_find_nvidia_bdf_caches_and_recovers(tmp_path):
 
         shutil.rmtree(dev)
         assert dgpu_tune.find_nvidia_bdf() is None
+
+
+def test_has_discrete_gpu_detection(tmp_path):
+    gate = tmp_path / "gate.json"
+
+    # iGPU-only Intel laptop -> False
+    pci_intel = tmp_path / "pci_intel"
+    intel = pci_intel / "0000:00:02.0"
+    intel.mkdir(parents=True)
+    (intel / "vendor").write_text("0x8086\n")
+    (intel / "class").write_text("0x030000\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_intel, gate_state_path=gate) is False
+
+    # NVIDIA VGA (0x0300) -> True
+    pci_nv_vga = tmp_path / "pci_nv_vga"
+    nv_vga = pci_nv_vga / "0000:01:00.0"
+    nv_vga.mkdir(parents=True)
+    (nv_vga / "vendor").write_text("0x10DE\n")
+    (nv_vga / "class").write_text("0x030000\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_nv_vga, gate_state_path=gate) is True
+
+    # NVIDIA 3D controller (0x0302) -> True
+    pci_nv_3d = tmp_path / "pci_nv_3d"
+    nv_3d = pci_nv_3d / "0000:01:00.0"
+    nv_3d.mkdir(parents=True)
+    (nv_3d / "vendor").write_text("0x10de\n")
+    (nv_3d / "class").write_text("0x030200\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_nv_3d, gate_state_path=gate) is True
+
+    # Discrete AMD (0x1002 + 0x0302, no uma) -> True
+    pci_amd_dgpu = tmp_path / "pci_amd_dgpu"
+    amd_d = pci_amd_dgpu / "0000:03:00.0"
+    amd_d.mkdir(parents=True)
+    (amd_d / "vendor").write_text("0x1002\n")
+    (amd_d / "class").write_text("0x030200\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_dgpu, gate_state_path=gate) is True
+
+    # Integrated AMD APU (0x1002 + 0x0302 with uma file) -> False
+    (amd_d / "uma").write_text("1\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_dgpu, gate_state_path=gate) is False
+
+    # Gated-off dGPU (no PCI device visible, gate state file exists) -> True
+    gate.write_text('{"gated": true}\n')
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_intel, gate_state_path=gate) is True
+
+
+def test_run_watcher_exits_cleanly_without_dgpu():
+    with mock.patch.object(dgpu_tune, "has_discrete_gpu", return_value=False), \
+         mock.patch.object(dgpu_tune.watcher, "load_desired_from_config") as load_cfg, \
+         mock.patch.object(dgpu_tune, "reset_legacy_mem_pin") as reset_mem, \
+         mock.patch.object(dgpu_tune.watcher, "write_state") as write_st, \
+         mock.patch.object(dgpu_tune.time, "sleep") as sleep_fn:
+        assert dgpu_tune.run_watcher() is None
+        load_cfg.assert_not_called()
+        reset_mem.assert_not_called()
+        write_st.assert_not_called()
+        sleep_fn.assert_not_called()
+

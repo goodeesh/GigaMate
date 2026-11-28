@@ -939,6 +939,39 @@ def _watcher_sleep_interval(watcher_inst: DgpuWatcher) -> float:
     return TICK_SEC
 
 
+def has_discrete_gpu(
+    pci_root: Path = Path("/sys/bus/pci/devices"),
+    gate_state_path: Path = Path("/run/gigamate-dgpu-gate.json"),
+) -> bool:
+    """Return True if a discrete GPU is present or currently gated off."""
+    try:
+        if gate_state_path.exists():
+            return True
+    except OSError:
+        pass
+    try:
+        entries = list(pci_root.iterdir())
+    except OSError:
+        return False
+    for dev in entries:
+        try:
+            vendor = (dev / "vendor").read_text().strip().lower()
+            cls = (dev / "class").read_text().strip().lower()
+            if vendor == "0x10de" and (
+                cls.startswith("0x0300") or cls.startswith("0x0302")
+            ):
+                return True
+            if (
+                vendor == "0x1002"
+                and cls.startswith("0x0302")
+                and not (dev / "uma").exists()
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def run_watcher() -> None:
     """Entry point for the watcher service (``gigamate-dgpu-watch``).
 
@@ -946,6 +979,10 @@ def run_watcher() -> None:
     the tuning is applied on wake and cleared on suspend/disable even when no UI
     process is running. Reloads the desired values when the config changes.
     """
+    if not has_discrete_gpu():
+        logger.info("No discrete GPU detected; exiting cleanly.")
+        return
+
     import signal
 
     from .config import CONFIG_FILE
