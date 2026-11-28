@@ -68,6 +68,8 @@ GigaMate Center automatically follows your desktop's **Dark & Light color scheme
   - Wakes suspended NVIDIA GPUs cleanly before stopping `nvidia-powerd`, verifies zero open `/dev/nvidia*` or ALSA holders, removes PCI functions before cutting ACPI power, and supports interactive holder confirmation (`DgpuGateConfirmDialog`).
   - Restores full PCIe link width (up to Gen4 `x8` / `x16`) on wake via autoprobe pause + unbound-only SBR/LNKCTL retrain + AERO X16 `PG00._ON` timeout recovery.
 - **Sleep-Aware NVIDIA V/F Tuning:** Core V/F curve offset (`0..+255 MHz`), Boost clock cap flattening, and VRAM clock offset (`-1000..+2000 MHz`) applied only while the dGPU is awake and paused cleanly when sleeping or gated off.
+- **Opt-In USB-C PD Power Budget:** Safely overrides NVIDIA's 30 W "Undersized Power Source" cap on `>= 90 W` USB-C PD chargers with a configurable `15%–25%` system safety buffer (default `25%`), bounded CPU <-> GPU power split, closed-loop battery drain auto-trim, and stock restoration on unplug.
+- **Hardware Hotkeys & Native Multi-Distro Packages:** Built-in Fn keyboard backlight cycling (`Off` / `15%` / `50%` / `100%`) with OSD feedback, plus GPG-signed native `apt`, `dnf`, `zypper`, and `pacman` repositories (and AUR) with transparent migration from `install.sh`.
 - **Automation Hub & Wayland Idle Intelligence:**
   - **Off / Follow System / GigaMate-Driven** AC/Battery rule engine with locked system power sync in GigaMate-Driven mode and reversible TLP / KDE PowerDevil / `power-profiles-daemon` hand-off.
   - **Built-in keyboard & touchpad only** idle mode (plus `/dev/hidraw*` `input0` bypass for **Toshy** / `xwaykeyz`) so docked external keyboards don't unexpectedly trigger laptop backlight wake.
@@ -242,9 +244,11 @@ Run `gigamate --help` or `gigamate <subcommand> --help` for full options.
 | `gigamate rgb static <COLOUR\|#RRGGBB> [5..100]` | Set 24-bit keyboard colour and brightness percentage (`0` turns off) |
 | `gigamate rgb off` | Turn keyboard backlight off |
 | `gigamate rgb detect` / `gigamate rgb cycle` | Scan for LampArray keyboards or cycle palette colours |
+| `gigamate rgb brightness-cycle` | Cycle keyboard backlight brightness (`Off` / `15%` / `50%` / `100%`) with OSD |
 | `gigamate rgb idle <off\|10\|30\|60\|120\|300\|900>` | Configure keyboard idle auto-off timeout in seconds |
 | `gigamate gpu status` | Show discrete GPU state, runtime PM, power gate & Dynamic Boost / SmartShift |
 | `gigamate gpu power <status\|optimus\|eco\|auto\|off\|on\|probe\|sync>` | Manage dGPU power gate (`--live-test` with `probe`; `--force-close` with `off`/`eco`/`auto`) |
+| `gigamate gpu usbc-budget [status\|on\|off\|set W\|buffer PCT]` | Manage opt-in USB-C PD power budget (`30–150 W` GPU target, `15–25%` buffer) |
 | `gigamate gpu undervolt [0..255\|off\|status]` | Configure sleep-aware NVIDIA Core V/F offset (`--probe`, `--auto`, `--no-auto`) |
 | `gigamate gpu maxclock [MHz\|off\|status]` | Configure sleep-aware NVIDIA boost clock cap (`--probe`) |
 | `gigamate gpu memoffset [-1000..2000\|off\|status]` | Configure sleep-aware NVIDIA VRAM V/F offset (`--probe`) |

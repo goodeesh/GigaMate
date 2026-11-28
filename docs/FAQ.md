@@ -41,7 +41,8 @@ If your keyboard uses the legacy vendor `0x08` protocol without HID LampArray, o
 
 ### Is upgrading from `v4.5.x` to `v5.0.0` safe? Will my settings survive?
 Yes:
-- `./install.sh --update` (and `gigamate update`) preserve `~/.config/gigamate/config.json` and never delete `~/.config/gigamate/profiles/`.
+- Whether you install a native distro package (`apt`, `dnf`, `zypper`, `pacman`, or AUR) or run `./install.sh --update` (`gigamate update`), `~/.config/gigamate/config.json` is preserved and `~/.config/gigamate/profiles/` is never deleted.
+- Installing a native package over an older `install.sh` setup automatically cleans up legacy `~/.local/bin/gigamate*` launchers, user units, and `/etc/` rules so nothing shadows the packaged binaries.
 - All common preferences (`colour`, `brightness`, `startup_apply`, `idle_off_enabled`, `idle_timeout_sec`, `charge_limit`, `dgpu_undervolt_*`, `dgpu_power_mode`, `hotkey_overrides`) carry forward cleanly.
 - If `install.sh` detects a pre-LampArray keyboard or missing `WMBD(0xED)` profile table after upgrading, it prints a compatibility banner showing the exact `v4.5.3` rollback command.
 
@@ -104,6 +105,9 @@ The discrete GPU exposes an HDMI/DP HDA audio controller (`.1`). If PipeWire/Wir
 
 ### Why didn't moving a slider on the GPU page change my clocks immediately?
 Moving **Core V/F Offset**, **Max Boost Cap**, or **VRAM Clock** stages changes locally until you click **Apply Tuning** (making a single atomic config update and helper call). Clicking **Reset** beside any individual control immediately resets that control back to stock.
+
+### How does USB-C PD Power Budget work? Is it safe for my charger and battery?
+On `>= 90 W` USB-C PD chargers, NVIDIA's driver normally caps the dGPU at 30 W ("Undersized Power Source"). **USB-C PD Power Budget** is an opt-in feature that reserves a configurable `15%–25%` safety buffer (default `25%`, minimum `15 W`) for the display and chassis, caps CPU + GPU within the remaining silicon budget, and runs a closed-loop battery drain guard: if sustained battery drain exceeds `3 W` for `5 s` (or battery drops below `15%`), GigaMate automatically trims CPU and GPU power. Unplugging immediately restores stock firmware limits. *(Some third-party bricks/cables can trip over-current protection on sudden spikes — lower the GPU wattage target or disable the feature if your charger resets.)*
 
 ---
 

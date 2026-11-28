@@ -48,6 +48,14 @@ GigaMate adjusts NVIDIA clocks cleanly without interfering with runtime `D3cold`
 > [!TIP]
 > Ensure **Boot Apply: ON** is enabled (links to **Automation → ON BOOT & SCHEDULE**) so the background watcher re-applies your saved tuning automatically whenever the dGPU wakes under load and clears it cleanly before sleep.
 
+### USB-C PD Power Budget (Opt-In)
+
+When plugged into a `>= 90 W` USB-C Power Delivery charger, NVIDIA drivers normally lock the dGPU to a 30 W "Undersized Power Source" Aux Power State. Enabling **USB-C PD Power Budget** (with a one-time safety confirmation) unlocks higher GPU wattage while protecting your charger and battery:
+- **Configurable Safety Buffer (`15%–25%`, default `25%`, min `15 W`):** Reserves power for the display, chassis electronics, and VRM conversion losses, clamping CPU + GPU limits inside the remaining silicon budget.
+- **Closed-Loop Battery Drain Guard:** If sustained battery drain exceeds `3 W` for `5 s` (or battery drops below `15%`), GigaMate automatically trims CPU then GPU limits and steps back toward 30 W / 20 W.
+- **Automatic Stock Restoration:** Unplugging or switching back to barrel AC restores stock firmware limits immediately.
+- CLI: `gigamate gpu usbc-budget status`, `gigamate gpu usbc-budget on`, `gigamate gpu usbc-budget set 60`, `gigamate gpu usbc-budget buffer 20`.
+
 ---
 
 ## 3. Keyboard Studio (24-Bit HID LampArray RGB)
@@ -60,6 +68,7 @@ GigaMate adjusts NVIDIA clocks cleanly without interfering with runtime `D3cold`
   - Brightness uses a **5% minimum active floor** (`5–100%`) so colours never shift hue from extreme 8-bit integer rounding; use **Turn Off / Turn On** (top right) for zero backlight.
   - Deep-link pills (**Profile Link** and **Idle timeout**) jump straight to the matching cards on the **Automation** page and glow-highlight the target section.
   - If **Profile Link** is enabled in Automation, picking any manual colour in Keyboard Studio automatically unlinks profile lighting so your custom pick isn't overwritten.
+  - Pressing the laptop's **Fn keyboard backlight** key cycles brightness (`Off` → `15%` → `50%` → `100%`) and displays an on-screen OSD indicator (also available via `gigamate rgb brightness-cycle`).
 
 ---
 
@@ -129,10 +138,12 @@ Right-clicking (or left-clicking) the tray icon gives instant access to:
 gigamate status                          # Full hardware summary
 gigamate profile balanced                # Switch EC profile (quiet/balanced/performance/gaming)
 gigamate rgb static "#14b8a6" 75         # Set custom 24-bit colour at 75% brightness
+gigamate rgb brightness-cycle            # Cycle backlight (Off / 15% / 50% / 100%)
 gigamate rgb idle 60                     # Auto-sleep keyboard backlight after 60s idle
 gigamate battery --limit 80              # Set 80% daily charge threshold
 gigamate battery --topup                 # Charge to 100% once, then restore limit
 gigamate gpu power eco                   # Cut dGPU rail on battery (prompts/checks safety)
+gigamate gpu usbc-budget on              # Enable opt-in USB-C PD power budget (>= 90 W)
 gigamate gpu power optimus               # Wake dGPU back onto PCI bus (full link width)
 gigamate gpu undervolt 150               # Set +150 MHz sleep-aware Core V/F offset
 gigamate gpu maxclock 2450               # Cap GPU boost clock at 2450 MHz
