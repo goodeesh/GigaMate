@@ -240,6 +240,12 @@ def test_arch_pkgbuild_template() -> None:
     assert "package_gigamate-dkms()" in text
     assert "install=gigamate.install" in text
     assert "packaging/stage.sh" in text
+    assert (
+        text.count(
+            'install -Dm644 "$srcdir/@SRC_SUBDIR@/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"'
+        )
+        == 2
+    )
 
     for placeholder in (
         "@PKGVER@",

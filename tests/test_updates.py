@@ -526,12 +526,17 @@ class TestDetectInstallMethod:
             which=lambda _: None,
         ) == expected
 
-    def test_marker_file_unknown_falls_back_to_script(self, tmp_path):
+    def test_marker_file_script_returns_immediately_without_probing(self, tmp_path):
         marker = tmp_path / "install-method"
         marker.write_text("script\n", encoding="utf-8")
+
+        def fail_probe(*a, **k):
+            raise AssertionError("must not probe when marker explicitly says 'script'")
+
         assert updates.detect_install_method(
             marker_path=marker,
-            which=lambda _: None,
+            which=fail_probe,
+            run=fail_probe,
         ) == "script"
 
     def test_fallback_pacman_probe(self, tmp_path):
@@ -799,6 +804,7 @@ class TestMigrateLegacyUserInstall:
 
     def test_package_managed_removes_legacy_files_and_preserves_custom(self, tmp_path):
         home = tmp_path / "home"
+        sys_share = tmp_path / "usr_share"
         marker = tmp_path / "install-method"
         marker.write_text("apt\n", encoding="utf-8")
         state_file = home / ".config" / "gigamate" / "update_state.json"
@@ -843,17 +849,25 @@ class TestMigrateLegacyUserInstall:
             "[Service]\nExecStart=/usr/bin/true\n",
         )
 
-        # Legacy desktop files
+        # Legacy desktop files: one byte-matches packaged desktop, one has legacy install.sh signature
+        pkg_desktop_content = "[Desktop Entry]\nName=GigaMate\nExec=/usr/bin/gigamate-center\n"
+        self._write(sys_share / "applications" / "gigamate.desktop", pkg_desktop_content)
         legacy_desktop = [
-            self._write(home / ".local" / "share" / "applications" / name, "[Desktop Entry]\n")
-            for name in ("gigamate.desktop", "gigamate-center.desktop")
+            self._write(
+                home / ".local" / "share" / "applications" / "gigamate.desktop",
+                pkg_desktop_content,
+            ),
+            self._write(
+                home / ".local" / "share" / "applications" / "gigamate-center.desktop",
+                "[Desktop Entry]\nExec=/home/u/.local/bin/gigamate-center\nStartupWMClass=gigamate-center\n",
+            ),
         ]
         other_desktop = self._write(
             home / ".local" / "share" / "applications" / "other.desktop",
             "[Desktop Entry]\n",
         )
 
-        # Legacy icons
+        # Legacy icons (byte-matching packaged icons under system_share_dir)
         icon_names = (
             "gigamate.svg",
             "gigamate-nvidia.svg",
@@ -863,13 +877,19 @@ class TestMigrateLegacyUserInstall:
             "gigamate-amd-update.svg",
             "checkbox-checked.svg",
         )
-        legacy_icons = [
+        legacy_icons = []
+        for name in icon_names:
+            svg_content = f"<svg data-name='{name}'/>"
             self._write(
-                home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / name,
-                "<svg/>",
+                sys_share / "icons" / "hicolor" / "scalable" / "apps" / name,
+                svg_content,
             )
-            for name in icon_names
-        ]
+            legacy_icons.append(
+                self._write(
+                    home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / name,
+                    svg_content,
+                )
+            )
         other_icon = self._write(
             home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "other.svg",
             "<svg/>",
@@ -893,6 +913,7 @@ class TestMigrateLegacyUserInstall:
             marker_path=marker,
             run=fake_run,
             which=fake_which,
+            system_share_dir=sys_share,
         )
 
         expected_removed = {
@@ -915,14 +936,19 @@ class TestMigrateLegacyUserInstall:
         # State persisted
         assert updates.load_state(state_file).get("migrated_to_pkg") is True
 
-        # Second call is a complete no-op
+        # Second call is a complete no-op and never invokes detect_install_method/subprocesses
         run_calls.clear()
+
+        def fail_if_called(*a, **k):
+            raise AssertionError("post-migration startup must not probe or spawn subprocesses")
+
         second = updates.migrate_legacy_user_install(
             home=home,
             state_file=state_file,
-            marker_path=marker,
-            run=fake_run,
-            which=fake_which,
+            marker_path=tmp_path / "missing-marker",
+            run=fail_if_called,
+            which=fail_if_called,
+            system_share_dir=sys_share,
         )
         assert second == []
         assert run_calls == []
@@ -1135,3 +1161,68 @@ class TestMigrateLegacyUserInstall:
         assert not legacy_wants.exists() and not legacy_wants.is_symlink()
         assert other_unit.exists()
         assert other_wants.is_symlink() and other_wants.exists()
+
+    def test_preserves_unrelated_checkbox_icon_custom_desktop_and_symlinks(self, tmp_path):
+        home = tmp_path / "home"
+        sys_share = tmp_path / "usr_share"
+        marker = tmp_path / "install-method"
+        marker.write_text("pacman\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        # Packaged files under system_share_dir
+        self._write(
+            sys_share / "applications" / "gigamate.desktop",
+            "[Desktop Entry]\nName=GigaMate\nExec=/usr/bin/gigamate-center\n",
+        )
+        self._write(
+            sys_share / "icons" / "hicolor" / "scalable" / "apps" / "checkbox-checked.svg",
+            "<svg>gigamate-packaged-checkbox</svg>",
+        )
+        self._write(
+            sys_share / "icons" / "hicolor" / "scalable" / "apps" / "gigamate.svg",
+            "<svg>gigamate-packaged-icon</svg>",
+        )
+
+        # User's custom desktop override (differs from packaged and no .local/bin/gigamate)
+        custom_desktop = self._write(
+            home / ".local" / "share" / "applications" / "gigamate.desktop",
+            "[Desktop Entry]\nName=My Custom GigaMate\nExec=env QT_SCALE_FACTOR=1.5 /usr/bin/gigamate-center\n",
+        )
+        # Symlinked desktop entry (even if target matches packaged) must be preserved
+        sym_desktop_target = self._write(
+            tmp_path / "real-center.desktop",
+            "[Desktop Entry]\nExec=/home/u/.local/bin/gigamate-center\nStartupWMClass=gigamate-center\n",
+        )
+        sym_desktop = home / ".local" / "share" / "applications" / "gigamate-center.desktop"
+        sym_desktop.symlink_to(sym_desktop_target)
+
+        # Unrelated user checkbox-checked.svg (different bytes than packaged)
+        unrelated_checkbox = self._write(
+            home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "checkbox-checked.svg",
+            "<svg>unrelated-theme-checkbox</svg>",
+        )
+        # Symlinked icon (even if target matches packaged) must be preserved
+        sym_icon_target = self._write(
+            tmp_path / "real-gigamate.svg",
+            "<svg>gigamate-packaged-icon</svg>",
+        )
+        sym_icon = (
+            home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "gigamate.svg"
+        )
+        sym_icon.symlink_to(sym_icon_target)
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=lambda *a, **k: None,
+            which=lambda _: None,
+            system_share_dir=sys_share,
+        )
+
+        assert removed == []
+        assert custom_desktop.exists()
+        assert sym_desktop.is_symlink() and sym_desktop.exists()
+        assert unrelated_checkbox.exists()
+        assert sym_icon.is_symlink() and sym_icon.exists()
+        assert updates.load_state(state_file).get("migrated_to_pkg") is True

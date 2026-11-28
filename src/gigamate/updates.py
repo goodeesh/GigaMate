@@ -353,6 +353,8 @@ def detect_install_method(
             val = marker_path.read_text(encoding="utf-8", errors="replace").strip().lower()
             if val in _PACKAGE_INSTALL_METHODS:
                 return val
+            if val == "script":
+                return "script"
     except Exception:
         pass
 
@@ -480,20 +482,21 @@ def migrate_legacy_user_install(
         state_file: Path = STATE_FILE,
         marker_path: Path = INSTALL_METHOD_FILE,
         run: Callable = subprocess.run,
-        which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+        which: Callable[[str], Optional[str]] = shutil.which,
+        system_share_dir: Path = Path("/usr/share")) -> list[str]:
     """One-time cleanup of legacy install.sh user files on packaged installs.
 
     No-op for script-managed installs or once ``migrated_to_pkg`` is persisted
     in ``state_file``. Preserves user configuration under ``~/.config/gigamate``
-    and any custom scripts or systemd units that do not match install.sh
-    signatures. Never raises on OSError.
+    and any custom scripts, desktop overrides, icons, or systemd units that do
+    not match install.sh signatures or packaged files. Never raises on OSError.
     """
+    if load_state(state_file).get("migrated_to_pkg"):
+        return []
     method = detect_install_method(
         marker_path=marker_path, which=which, run=run
     )
     if not is_package_managed(method):
-        return []
-    if load_state(state_file).get("migrated_to_pkg"):
         return []
 
     user_home = home if home is not None else Path.home()
@@ -540,10 +543,25 @@ def migrate_legacy_user_install(
             continue
 
     apps_dir = user_home / ".local" / "share" / "applications"
+    sys_apps_dir = system_share_dir / "applications"
     for name in _LEGACY_DESKTOP_NAMES:
         path = apps_dir / name
         try:
-            if path.is_file() or path.is_symlink():
+            if not (path.is_file() and not path.is_symlink()):
+                continue
+            pkg_desktop = sys_apps_dir / name
+            matches_pkg = (
+                pkg_desktop.is_file()
+                and path.read_bytes() == pkg_desktop.read_bytes()
+            )
+            matches_legacy = False
+            if not matches_pkg:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                matches_legacy = (
+                    "StartupWMClass=gigamate-center" in text
+                    and ".local/bin/gigamate" in text
+                )
+            if matches_pkg or matches_legacy:
                 path.unlink()
                 removed.append(str(path))
         except OSError:
@@ -552,10 +570,16 @@ def migrate_legacy_user_install(
     icons_dir = (
         user_home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
     )
+    sys_icons_dir = (
+        system_share_dir / "icons" / "hicolor" / "scalable" / "apps"
+    )
     for name in _LEGACY_ICON_NAMES:
         path = icons_dir / name
         try:
-            if path.is_file() or path.is_symlink():
+            if not (path.is_file() and not path.is_symlink()):
+                continue
+            pkg_icon = sys_icons_dir / name
+            if pkg_icon.is_file() and path.read_bytes() == pkg_icon.read_bytes():
                 path.unlink()
                 removed.append(str(path))
         except OSError:

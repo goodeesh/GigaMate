@@ -20,6 +20,7 @@ package_gigamate() {
 
     mkdir -p "$pkgdir/usr"
     cp -a "$srcdir/stage/app/usr/." "$pkgdir/usr/"
+    install -Dm644 "$srcdir/@SRC_SUBDIR@/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
 
 package_gigamate-dkms() {
@@ -33,4 +34,5 @@ package_gigamate-dkms() {
 
     mkdir -p "$pkgdir/usr"
     cp -a "$srcdir/stage/dkms/usr/." "$pkgdir/usr/"
+    install -Dm644 "$srcdir/@SRC_SUBDIR@/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

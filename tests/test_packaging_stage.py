@@ -173,6 +173,9 @@ def test_staged_launcher_executes_cli_help(tmp_path: Path) -> None:
         ["5.0.0"],
         ["5.0.0", "pacman"],
         ["", "pacman", "/tmp/out"],
+        ["5.0.0;rm -rf /", "pacman", "/tmp/out"],
+        ["5.0.0/bad", "pacman", "/tmp/out"],
+        ["5.0.0 bad", "pacman", "/tmp/out"],
         ["5.0.0", "invalid-method", "/tmp/out"],
         ["5.0.0", "pip", "/tmp/out"],
         ["5.0.0", "pacman", ""],
@@ -185,7 +188,7 @@ def test_stage_invalid_args_exit_nonzero(args: list[str]) -> None:
         text=True,
         check=False,
     )
-    assert res.returncode != 0
+    assert res.returncode == 2
 
 
 def test_shell_scripts_syntax_and_executable() -> None:

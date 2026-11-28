@@ -23,6 +23,12 @@ if [[ -z "$VERSION" ]]; then
     exit 2
 fi
 
+if [[ ! "$VERSION" =~ ^[A-Za-z0-9._~+-]+$ ]]; then
+    echo "Error: invalid <version>: '$VERSION'" >&2
+    usage
+    exit 2
+fi
+
 case "$INSTALL_METHOD" in
     apt|dnf|zypper|pacman|aur) ;;
     *)

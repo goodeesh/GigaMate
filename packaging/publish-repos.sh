@@ -295,6 +295,7 @@ if command -v repo-add >/dev/null 2>&1; then
         umask 077
         mkdir -p "$HOST_GNUPGHOME"
         export GNUPGHOME="$HOST_GNUPGHOME"
+        trap 'gpgconf --kill gpg-agent >/dev/null 2>&1 || true' EXIT
         printf "allow-loopback-pinentry\n" > "${GNUPGHOME}/gpg-agent.conf"
         printf "batch\npinentry-mode loopback\n" > "${GNUPGHOME}/gpg.conf"
         if [[ -f "${ARCH_GPG_DIR}/pass" ]]; then

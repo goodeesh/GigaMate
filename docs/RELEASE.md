@@ -149,7 +149,7 @@ git checkout main
 
 1. **Unmerged packaging branch:**
    ```sh
-   git branch -D feat/native-packaging
+   git branch -D <release-branch>
    ```
 2. **Bad or test prerelease tag & GitHub Release:**
    ```sh
@@ -164,7 +164,7 @@ git checkout main
    - Revert `gh-pages` to the previous known-good commit and force-push:
      ```sh
      git fetch origin gh-pages
-     git checkout gh-pages
+     git checkout -B gh-pages origin/gh-pages
      git reset --hard HEAD~1
      git push --force-with-lease origin gh-pages
      git checkout main
