@@ -2,6 +2,7 @@
 set -euo pipefail
 
 NAME="gigamate"
+KEEP_CONFIG=false
 
 COLOUR_GREEN='\033[0;32m'
 COLOUR_YELLOW='\033[1;33m'
@@ -12,6 +13,20 @@ info() { echo -e "${COLOUR_GREEN}[INFO]${COLOUR_RESET} $*"; }
 warn() { echo -e "${COLOUR_YELLOW}[WARN]${COLOUR_RESET} $*"; }
 
 header() { echo -e "\n[ $* ]\n"; }
+
+usage() {
+    echo "Usage: uninstall.sh [--keep-config] [-h|--help]"
+    echo "  --keep-config  Keep ~/.config/gigamate/ intact without prompting"
+    echo "  -h, --help     Show this help message and exit"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-config) KEEP_CONFIG=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) warn "Unknown option: $1"; usage >&2; exit 2 ;;
+    esac
+done
 
 # --- Stop and disable systemd user service ---
 header "Systemd user service"
@@ -253,14 +268,21 @@ fi
 # --- Config cleanup ---
 header "Configuration"
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gigamate"
+OLD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb"
+
 echo
 info "Uninstall complete."
 echo
-info "Configuration files left at:"
-info "  ${XDG_CONFIG_HOME:-$HOME/.config}/gigamate/"
-info "  ${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb/ (old, if migrated)"
-echo
-warn "To remove configuration, run:"
-warn "  rm -r ${XDG_CONFIG_HOME:-$HOME/.config}/gigamate"
-warn "  rm -r ${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb"
+if [ "$KEEP_CONFIG" = true ]; then
+    info "Preserving configuration (--keep-config): ${CONFIG_DIR}/"
+else
+    info "Configuration files left at:"
+    info "  ${CONFIG_DIR}/"
+    info "  ${OLD_CONFIG_DIR}/ (old, if migrated)"
+    echo
+    warn "To remove configuration, run:"
+    warn "  rm -r ${CONFIG_DIR}"
+    warn "  rm -r ${OLD_CONFIG_DIR}"
+fi
 echo

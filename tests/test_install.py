@@ -178,3 +178,63 @@ def test_doctor_surfaces_shadowed_legacy_files_warning(monkeypatch, capsys):
     assert "warning" in out.lower() or "shadow" in out.lower()
     for path in shadowed:
         assert path in out
+
+
+def test_consolidated_polkit_rule():
+    repo_root = Path(__file__).resolve().parent.parent
+    rule = repo_root / "data" / "50-gigamate.rules"
+    assert rule.exists(), "data/50-gigamate.rules must exist"
+    text = rule.read_text()
+    assert text.startswith("// GigaMate —")
+    assert text.count("polkit.addRule(") == 1
+    assert 'subject.isInGroup("wheel")' in text
+    assert 'subject.isInGroup("sudo")' in text
+    for action in (
+        "org.gigamate.dgpu.control",
+        "org.gigamate.dgpu-gate.control",
+        "org.gigamate.repair.driver",
+        "org.freedesktop.systemd1.manage-units",
+        "nvidia-powerd.service",
+    ):
+        assert action in text, f"Missing {action} in data/50-gigamate.rules"
+    # Legacy per-feature rules must remain intact for install.sh compatibility.
+    for legacy in (
+        "50-gigamate-dgpu.rules",
+        "50-gigamate-dgpu-gate.rules",
+        "50-gigamate-repair.rules",
+        "50-gigamate-powerd.rules",
+    ):
+        assert (repo_root / "data" / legacy).exists()
+
+
+def test_systemd_user_preset():
+    preset = Path(__file__).resolve().parent.parent / "data" / "90-gigamate.preset"
+    assert preset.exists(), "data/90-gigamate.preset must exist"
+    lines = [ln.strip() for ln in preset.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    assert "enable gigamate.service" in lines
+    assert "enable gigamate-dgpu.service" in lines
+
+
+def test_smartshift_udev_rule_has_dmi_vendor_guard():
+    rule = Path(__file__).resolve().parent.parent / "data" / "99-gigamate-smartshift.rules"
+    text = rule.read_text()
+    assert text.startswith("# GigaMate")
+    assert "dmi/id" in text
+    assert 'ATTR{[dmi/id]sys_vendor}=="*[Gg][Ii][Gg][Aa][Bb][Yy][Tt][Ee]*|*[Aa][Oo][Rr][Uu][Ss]*|*[Gg][Ii][Gg][Aa]-[Bb][Yy][Tt][Ee]*"' in text
+    assert 'SUBSYSTEM=="pci"' in text
+    assert 'ATTRS{vendor}=="0x1002"' in text
+    assert 'TEST=="smartshift_bias"' in text
+    assert "smartshift_bias" in text
+
+
+def test_uninstall_help_and_keep_config_flag():
+    uninstall = Path(__file__).resolve().parent.parent / "uninstall.sh"
+    res = subprocess.run(["bash", str(uninstall), "--help"], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert "--keep-config" in res.stdout
+    res_short = subprocess.run(["bash", str(uninstall), "-h"], capture_output=True, text=True)
+    assert res_short.returncode == 0, res_short.stderr
+    assert "--keep-config" in res_short.stdout
+    # Also ensure bash -n passes.
+    res_syntax = subprocess.run(["bash", "-n", str(uninstall)], capture_output=True, text=True)
+    assert res_syntax.returncode == 0, res_syntax.stderr
