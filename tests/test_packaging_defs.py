@@ -20,6 +20,7 @@ ARCH_DIR = REPO_ROOT / "packaging" / "arch"
 PKGBUILD_TMPL = ARCH_DIR / "PKGBUILD.tmpl"
 ARCH_INSTALL = ARCH_DIR / "gigamate.install"
 BUILD_LOCAL_ARCH = REPO_ROOT / "packaging" / "build-local-arch.sh"
+TEST_CONTAINERS = REPO_ROOT / "packaging" / "test-containers.sh"
 
 
 def _parse_yaml_fallback(text: str) -> dict[str, Any]:
@@ -350,3 +351,123 @@ _gigamate_cleanup_etc_modules_load "{sym_mod}"
     assert sym_mod_target.is_file()
     assert not (tmp_path / "sym-mod.conf.pre-pkg.bak").exists()
 
+
+def test_container_smoke_script_syntax_and_executable() -> None:
+    assert TEST_CONTAINERS.is_file(), f"Missing {TEST_CONTAINERS}"
+    assert os.access(TEST_CONTAINERS, os.X_OK), f"Not executable: {TEST_CONTAINERS}"
+    res = subprocess.run(
+        ["bash", "-n", str(TEST_CONTAINERS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"bash -n failed for test-containers.sh: {res.stderr}"
+
+
+def test_container_smoke_script_help_and_invalid_distro(tmp_path: Path) -> None:
+    # --help must work even without docker or podman on PATH
+    clean_env = {"PATH": str(tmp_path)}
+    res_help = subprocess.run(
+        ["/usr/bin/env", "bash", str(TEST_CONTAINERS), "--help"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert res_help.returncode == 0, f"--help failed: {res_help.stderr}"
+    assert "--distro" in res_help.stdout
+    assert "--pkg-dir" in res_help.stdout
+
+    # Also verify --help works with no container runtime in PATH at all
+    res_help_no_rt = subprocess.run(
+        ["/bin/bash", str(TEST_CONTAINERS), "--help"],
+        capture_output=True,
+        text=True,
+        env=clean_env,
+        check=False,
+    )
+    assert res_help_no_rt.returncode == 0, f"--help without runtime failed: {res_help_no_rt.stderr}"
+    assert "--distro" in res_help_no_rt.stdout
+    assert "--pkg-dir" in res_help_no_rt.stdout
+
+    # Invalid --distro must exit non-zero
+    res_invalid = subprocess.run(
+        ["/bin/bash", str(TEST_CONTAINERS), "--distro", "gentoo"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert res_invalid.returncode != 0
+    assert "gentoo" in res_invalid.stderr or "distro" in res_invalid.stderr.lower()
+
+    # Missing container runtime must exit non-zero with a clear error message
+    res_no_rt = subprocess.run(
+        ["/bin/bash", str(TEST_CONTAINERS), "--distro", "ubuntu", "--pkg-dir", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=clean_env,
+        check=False,
+    )
+    assert res_no_rt.returncode != 0
+    assert "docker" in res_no_rt.stderr.lower() or "podman" in res_no_rt.stderr.lower()
+
+
+def test_container_smoke_script_invokes_all_four_distros(tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "pkgs"
+    pkg_dir.mkdir()
+    log_dir = tmp_path / "invocations"
+    log_dir.mkdir()
+
+    fake_rt = tmp_path / "fake-runtime"
+    fake_rt.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+idx="$(find "{log_dir}" -maxdepth 1 -name 'call-*.txt' | wc -l)"
+out="{log_dir}/call-${{idx}}.txt"
+printf '%s\\n' "$@" > "$out"
+# The last argument is the in-container bash script; syntax-check it
+bash -n <<< "${{@: -1}}"
+""",
+        encoding="utf-8",
+    )
+    fake_rt.chmod(0o755)
+
+    env = dict(os.environ)
+    env["CONTAINER_RUNTIME"] = str(fake_rt)
+
+    res = subprocess.run(
+        [str(TEST_CONTAINERS), "--distro", "all", "--pkg-dir", str(pkg_dir)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert res.returncode == 0, f"test-containers.sh failed: {res.stderr}\n{res.stdout}"
+
+    calls = sorted(log_dir.glob("call-*.txt"))
+    assert len(calls) == 4
+
+    expected = [
+        ("ubuntu:24.04", "apt", "apt-get install -y /pkgs/deb/gigamate-dkms_*.deb /pkgs/deb/gigamate_*.deb", "apt-get remove -y gigamate gigamate-dkms"),
+        ("fedora:41", "dnf", "dnf install -y /pkgs/fedora/gigamate-dkms-*.rpm /pkgs/fedora/gigamate-*.rpm", "dnf remove -y gigamate gigamate-dkms"),
+        ("opensuse/tumbleweed", "zypper", "zypper --non-interactive --no-gpg-checks install /pkgs/opensuse/gigamate-dkms-*.rpm /pkgs/opensuse/gigamate-*.rpm", "zypper --non-interactive remove gigamate gigamate-dkms"),
+        ("archlinux:latest", "pacman", "pacman -Sy --noconfirm && pacman -U --noconfirm /pkgs/arch/gigamate-dkms-*.pkg.tar.zst /pkgs/arch/gigamate-*.pkg.tar.zst", "pacman -Rns --noconfirm gigamate gigamate-dkms"),
+    ]
+
+    for call_file, (image, method, install_cmd, remove_cmd) in zip(calls, expected):
+        text = call_file.read_text(encoding="utf-8")
+        assert f"{pkg_dir.resolve()}:/pkgs:ro" in text
+        assert image in text
+        assert install_cmd in text
+        assert remove_cmd in text
+        assert f'test "$(cat /usr/lib/gigamate/install-method)" = "{method}"' in text
+        assert "test ! -e /etc/udev/rules.d/70-gigamate.rules" in text
+        assert "test -f /etc/polkit-1/rules.d/50-gigamate-repair.rules.pre-pkg.bak" in text
+        assert "test -f /usr/lib/udev/rules.d/70-gigamate.rules" in text
+        assert "test -f /usr/share/polkit-1/rules.d/50-gigamate.rules" in text
+        assert "test -f /usr/lib/systemd/user/gigamate.service" in text
+        assert "/usr/bin/gigamate --help >/dev/null" in text
+        assert "/usr/bin/gigamate version" in text
+        assert "test ! -e /usr/bin/gigamate" in text
+        assert "test ! -e /usr/lib/gigamate/install-method" in text
