@@ -79,7 +79,7 @@ To live-test installation (or migration from `install.sh`) on CachyOS/Arch:
 cp -a ~/.config/gigamate ~/.config/gigamate.pre-pkg-backup
 
 # Install both split packages locally
-sudo pacman -U dist/arch/gigamate-dkms-*.pkg.tar.zst dist/arch/gigamate-*.pkg.tar.zst
+sudo pacman -U dist/arch/gigamate-dkms-*.pkg.tar.zst dist/arch/gigamate-[0-9]*.pkg.tar.zst
 
 # Verify DKMS, CLI, user services, and doctor diagnostics
 which gigamate

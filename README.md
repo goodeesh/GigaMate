@@ -99,7 +99,7 @@ Server = https://goodeesh.github.io/GigaMate/repo/arch/any
 EOF
 
 # 3. Install GigaMate (pulls in gigamate-dkms automatically)
-sudo pacman -Sy gigamate
+sudo pacman -Syu gigamate
 ```
 
 **AUR alternative:**
@@ -114,7 +114,7 @@ yay -S gigamate
 
 ```sh
 curl -fsSL https://goodeesh.github.io/GigaMate/repo/gigamate.gpg | sudo tee /usr/share/keyrings/gigamate.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/gigamate.gpg] https://goodeesh.github.io/GigaMate/repo/apt stable main" | sudo tee /etc/apt/sources.list.d/gigamate.list >/dev/null
+echo "deb [arch=all signed-by=/usr/share/keyrings/gigamate.gpg] https://goodeesh.github.io/GigaMate/repo/apt stable main" | sudo tee /etc/apt/sources.list.d/gigamate.list >/dev/null
 sudo apt update && sudo apt install gigamate
 ```
 
@@ -171,7 +171,7 @@ curl -fsSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh |
 
 ### Updating
 
-- **Native package installs (recommended):** Update through your distro's package manager (`sudo pacman -Syu`, `sudo apt update && sudo apt upgrade`, `sudo dnf upgrade gigamate`, `sudo zypper up gigamate`, or `paru -Syu` / `yay -Syu` for AUR). When a new release is available, the GigaMate system tray notifies you with the exact command for your install method.
+- **Native package installs (recommended):** Update through your distro's package manager (`sudo pacman -Syu`, `sudo apt update && sudo apt upgrade`, `sudo dnf upgrade gigamate gigamate-dkms`, `sudo zypper update gigamate gigamate-dkms`, or `paru -Syu` / `yay -Syu` for AUR). When a new release is available, the GigaMate system tray notifies you with the exact command for your install method.
 - **`install.sh` installs:** Continue using the built-in updater:
   ```sh
   gigamate update
