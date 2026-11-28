@@ -239,14 +239,22 @@ for distro in fedora opensuse; do
     fi
     cp -f "${rpm_files[@]}" "$RPM_DIR/"
 
+    RPM_GPG_WRAPPER="${TMP_DIR}/rpmsign-gpg.sh"
     if [[ -n "$PASS_FILE" ]]; then
-        gpg_sign_macro="%{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-file ${PASS_FILE} --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
+        cat > "$RPM_GPG_WRAPPER" <<EOF
+#!/usr/bin/env bash
+exec gpg --batch --no-verbose --pinentry-mode loopback --passphrase-file "${PASS_FILE}" "\$@"
+EOF
     else
-        gpg_sign_macro="%{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
+        cat > "$RPM_GPG_WRAPPER" <<'EOF'
+#!/usr/bin/env bash
+exec gpg --batch --no-verbose --pinentry-mode loopback "$@"
+EOF
     fi
+    chmod 0755 "$RPM_GPG_WRAPPER"
     rpmsign \
         -D "_gpg_name ${GPG_KEY}" \
-        -D "__gpg_sign_cmd ${gpg_sign_macro}" \
+        -D "__gpg ${RPM_GPG_WRAPPER}" \
         --addsign "$RPM_DIR"/*.rpm
 
     createrepo_c "$RPM_DIR"
