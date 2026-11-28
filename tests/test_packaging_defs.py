@@ -21,6 +21,8 @@ PKGBUILD_TMPL = ARCH_DIR / "PKGBUILD.tmpl"
 ARCH_INSTALL = ARCH_DIR / "gigamate.install"
 BUILD_LOCAL_ARCH = REPO_ROOT / "packaging" / "build-local-arch.sh"
 TEST_CONTAINERS = REPO_ROOT / "packaging" / "test-containers.sh"
+PUBLISH_REPOS = REPO_ROOT / "packaging" / "publish-repos.sh"
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 
 def _parse_yaml_fallback(text: str) -> dict[str, Any]:
@@ -471,3 +473,99 @@ bash -n <<< "${{@: -1}}"
         assert "/usr/bin/gigamate version" in text
         assert "test ! -e /usr/bin/gigamate" in text
         assert "test ! -e /usr/lib/gigamate/install-method" in text
+
+
+def test_publish_repos_script_syntax_and_executable() -> None:
+    assert PUBLISH_REPOS.is_file(), f"Missing {PUBLISH_REPOS}"
+    assert os.access(PUBLISH_REPOS, os.X_OK), f"Not executable: {PUBLISH_REPOS}"
+    res = subprocess.run(
+        ["bash", "-n", str(PUBLISH_REPOS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"bash -n failed for publish-repos.sh: {res.stderr}"
+
+
+def test_publish_repos_script_help_and_missing_args() -> None:
+    res_help = subprocess.run(
+        ["/bin/bash", str(PUBLISH_REPOS), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_help.returncode == 0, f"--help failed: {res_help.stderr}"
+    for flag in ("--pkg-dir", "--out-dir", "--gpg-key", "--gpg-passphrase-env"):
+        assert flag in res_help.stdout
+
+    res_missing = subprocess.run(
+        ["/bin/bash", str(PUBLISH_REPOS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_missing.returncode != 0
+
+
+def test_release_workflow_structure_and_gating() -> None:
+    assert RELEASE_WORKFLOW.is_file(), f"Missing {RELEASE_WORKFLOW}"
+    assert yaml is not None, "PyYAML is required to validate release.yml"
+    raw = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    data = yaml.safe_load(raw)
+    assert isinstance(data, dict)
+
+    # PyYAML 1.1 parses unquoted 'on:' as boolean True
+    triggers = data.get("on") if "on" in data else data.get(True)
+    assert isinstance(triggers, dict), "Missing 'on' triggers in release.yml"
+    assert "v*" in triggers.get("push", {}).get("tags", [])
+    assert "workflow_dispatch" in triggers
+    dry_run_input = triggers["workflow_dispatch"]["inputs"]["dry_run"]
+    assert dry_run_input["type"] == "boolean"
+    assert dry_run_input["default"] is True
+
+    jobs = data.get("jobs", {})
+    expected_jobs = {
+        "build-packages",
+        "verify-packages",
+        "publish-release",
+        "publish-repos",
+        "publish-aur",
+    }
+    assert expected_jobs.issubset(jobs.keys()), f"Missing jobs: {expected_jobs - set(jobs.keys())}"
+
+    # verify-packages must run all 4 distros and depend on build-packages
+    verify = jobs["verify-packages"]
+    verify_needs = verify["needs"] if isinstance(verify["needs"], list) else [verify["needs"]]
+    assert "build-packages" in verify_needs
+    assert set(verify["strategy"]["matrix"]["distro"]) == {
+        "ubuntu",
+        "fedora",
+        "opensuse",
+        "arch",
+    }
+
+    # All publish jobs must be gated by verify-packages
+    for pub_job in ("publish-release", "publish-repos", "publish-aur"):
+        needs = jobs[pub_job]["needs"]
+        needs_list = needs if isinstance(needs, list) else [needs]
+        assert "verify-packages" in needs_list, f"{pub_job} must depend on verify-packages"
+
+    aur_needs = jobs["publish-aur"]["needs"]
+    assert "publish-release" in (aur_needs if isinstance(aur_needs, list) else [aur_needs])
+
+    # Secrets isolation: GPG_PRIVATE_KEY only in publish-repos, AUR_SSH_PRIVATE_KEY only in publish-aur
+    for job_name, job_cfg in jobs.items():
+        job_yaml = yaml.safe_dump(job_cfg)
+        if job_name == "publish-repos":
+            assert "GPG_PRIVATE_KEY" in job_yaml
+        else:
+            assert "GPG_PRIVATE_KEY" not in job_yaml, f"GPG_PRIVATE_KEY leaked into {job_name}"
+
+        if job_name == "publish-aur":
+            assert "AUR_SSH_PRIVATE_KEY" in job_yaml
+        else:
+            assert "AUR_SSH_PRIVATE_KEY" not in job_yaml, f"AUR_SSH_PRIVATE_KEY leaked into {job_name}"
+
+    # Preserve install.sh fallback checksum assets
+    assert "install.sh.sha256" in raw
+    assert "gigamate.tar.gz.sha256" in raw

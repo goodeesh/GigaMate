@@ -4,37 +4,423 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify packages only without publishing"
+        type: boolean
+        default: true
+      version:
+        description: "Version override without leading 'v' (defaults to src/gigamate/__init__.py)"
+        type: string
+        default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  checksums:
+  build-packages:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build checksums
+      - name: Resolve version and release metadata
+        id: version
         env:
-          TAG: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          sha256sum install.sh | sed 's#  .*#  install.sh#' > install.sh.sha256
-          curl -fL --proto '=https' -o /tmp/gigamate.tar.gz \
-            "https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/refs/tags/${TAG}"
-          sha256sum /tmp/gigamate.tar.gz | sed 's#  .*#  gigamate.tar.gz#' > gigamate.tar.gz.sha256
-          cat install.sh.sha256 gigamate.tar.gz.sha256
+          if [[ "$REF" == refs/tags/v* ]]; then
+            TAG="$REF_NAME"
+            VERSION="${TAG#v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="${INPUT_VERSION#v}"
+            TAG="v${VERSION}"
+          else
+            VERSION="$(sed -nE 's/^__version__[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\'']/\1/p' src/gigamate/__init__.py | head -n 1)"
+            TAG="v${VERSION}"
+          fi
 
-      - name: Publish release assets
+          if [[ -z "$VERSION" ]]; then
+            echo "Error: could not resolve release version" >&2
+            exit 1
+          fi
+
+          IS_PRERELEASE="false"
+          case "$TAG" in
+            *[-.]a*|*[-.]b*|*[-.]rc*|*alpha*|*beta*) IS_PRERELEASE="true" ;;
+          esac
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "is_prerelease=${IS_PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved VERSION=${VERSION} TAG=${TAG} IS_PRERELEASE=${IS_PRERELEASE}"
+
+      - name: Install nFPM
+        env:
+          NFPM_VERSION: "2.41.1"
+        run: |
+          set -euo pipefail
+          curl -fL --proto '=https' -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/nfpm.tar.gz -C /tmp nfpm
+          sudo install -Dm0755 /tmp/nfpm /usr/local/bin/nfpm
+          rm -f /tmp/nfpm /tmp/nfpm.tar.gz
+          nfpm --version
+
+      - name: Build deb and rpm packages with nFPM
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/deb dist/fedora dist/opensuse dist/arch dist/aur
+
+          ./packaging/stage.sh "$VERSION" apt /tmp/stage-apt
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-apt nfpm package \
+            --config packaging/nfpm/gigamate-deb.yaml \
+            --packager deb \
+            --target dist/deb/
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-apt nfpm package \
+            --config packaging/nfpm/gigamate-dkms-deb.yaml \
+            --packager deb \
+            --target dist/deb/
+
+          ./packaging/stage.sh "$VERSION" dnf /tmp/stage-dnf
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-dnf nfpm package \
+            --config packaging/nfpm/gigamate-fedora.yaml \
+            --packager rpm \
+            --target "dist/fedora/gigamate-${VERSION}-1.fedora.noarch.rpm"
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-dnf nfpm package \
+            --config packaging/nfpm/gigamate-dkms-fedora.yaml \
+            --packager rpm \
+            --target "dist/fedora/gigamate-dkms-${VERSION}-1.fedora.noarch.rpm"
+
+          ./packaging/stage.sh "$VERSION" zypper /tmp/stage-zypper
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-zypper nfpm package \
+            --config packaging/nfpm/gigamate-opensuse.yaml \
+            --packager rpm \
+            --target "dist/opensuse/gigamate-${VERSION}-1.opensuse.noarch.rpm"
+          VERSION="$VERSION" STAGE_DIR=/tmp/stage-zypper nfpm package \
+            --config packaging/nfpm/gigamate-dkms-opensuse.yaml \
+            --packager rpm \
+            --target "dist/opensuse/gigamate-dkms-${VERSION}-1.opensuse.noarch.rpm"
+
+      - name: Build install.sh and source tarball checksums
+        id: tarball
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          sha256sum install.sh | sed 's#  .*#  install.sh#' > dist/install.sh.sha256
+
+          if [[ "$REF" == refs/tags/v* ]]; then
+            curl -fL --proto '=https' -o /tmp/gigamate.tar.gz \
+              "https://codeload.github.com/${GITHUB_REPOSITORY}/tar.gz/refs/tags/${TAG}"
+            sha256sum /tmp/gigamate.tar.gz | sed 's#  .*#  gigamate.tar.gz#' > dist/gigamate.tar.gz.sha256
+            TARBALL_SHA256="$(awk '{print $1}' dist/gigamate.tar.gz.sha256)"
+          else
+            tar \
+              --exclude='.git' \
+              --exclude='./dist' \
+              --exclude='./.pytest_cache' \
+              --exclude='__pycache__' \
+              --transform="s,^\.,GigaMate-${VERSION}," \
+              -czf /tmp/gigamate.tar.gz .
+            TARBALL_SHA256="$(sha256sum /tmp/gigamate.tar.gz | awk '{print $1}')"
+          fi
+
+          echo "sha256=${TARBALL_SHA256}" >> "$GITHUB_OUTPUT"
+          cat dist/install.sh.sha256
+          [[ -f dist/gigamate.tar.gz.sha256 ]] && cat dist/gigamate.tar.gz.sha256 || true
+
+      - name: Build Arch packages and AUR metadata in archlinux:base-devel
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TARBALL_SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          ARCH_PKGVER="${VERSION//-/_}"
+          docker run --rm \
+            -v "${PWD}:/repo" \
+            -e "VERSION=${VERSION}" \
+            -e "ARCH_PKGVER=${ARCH_PKGVER}" \
+            -e "TAG=${TAG}" \
+            -e "TARBALL_SHA256=${TARBALL_SHA256}" \
+            -e "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}" \
+            archlinux:base-devel \
+            bash -euo pipefail -c '
+              useradd -m -s /bin/bash builder
+              SRC_SUBDIR="GigaMate-${VERSION}"
+              TARBALL_NAME="${SRC_SUBDIR}.tar.gz"
+
+              # 1. Build pacman-method split packages from checkout
+              PACMAN_DIR="/tmp/build-pacman"
+              mkdir -p "$PACMAN_DIR"
+              tar \
+                --exclude=".git" \
+                --exclude="./dist" \
+                --exclude="./.pytest_cache" \
+                --exclude="__pycache__" \
+                --transform="s,^\.,${SRC_SUBDIR}," \
+                -czf "${PACMAN_DIR}/${TARBALL_NAME}" \
+                -C /repo .
+              LOCAL_SHA256="$(sha256sum "${PACMAN_DIR}/${TARBALL_NAME}" | awk "{print \$1}")"
+
+              sed \
+                -e "s|@PKGVER@|${ARCH_PKGVER}|g" \
+                -e "s|@SOURCE_URL@|${TARBALL_NAME}|g" \
+                -e "s|@SOURCE_SHA256@|${LOCAL_SHA256}|g" \
+                -e "s|@SRC_SUBDIR@|${SRC_SUBDIR}|g" \
+                -e "s|@INSTALL_METHOD@|pacman|g" \
+                /repo/packaging/arch/PKGBUILD.tmpl > "${PACMAN_DIR}/PKGBUILD"
+              cp /repo/packaging/arch/gigamate.install "${PACMAN_DIR}/gigamate.install"
+              chown -R builder:builder "$PACMAN_DIR"
+
+              su - builder -c "cd ${PACMAN_DIR} && PKGDEST=${PACMAN_DIR} SRCDEST=${PACMAN_DIR} PKGEXT=.pkg.tar.zst makepkg -sf --noconfirm"
+              mkdir -p /repo/dist/arch
+              cp -f "${PACMAN_DIR}"/gigamate-*.pkg.tar.zst /repo/dist/arch/
+
+              # 2. Render AUR PKGBUILD + .SRCINFO pointing at GitHub tag tarball
+              AUR_DIR="/tmp/build-aur"
+              mkdir -p "$AUR_DIR"
+              SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+              sed \
+                -e "s|@PKGVER@|${ARCH_PKGVER}|g" \
+                -e "s|@SOURCE_URL@|${SOURCE_URL}|g" \
+                -e "s|@SOURCE_SHA256@|${TARBALL_SHA256}|g" \
+                -e "s|@SRC_SUBDIR@|${SRC_SUBDIR}|g" \
+                -e "s|@INSTALL_METHOD@|aur|g" \
+                /repo/packaging/arch/PKGBUILD.tmpl > "${AUR_DIR}/PKGBUILD"
+              cp /repo/packaging/arch/gigamate.install "${AUR_DIR}/gigamate.install"
+              chown -R builder:builder "$AUR_DIR"
+
+              su - builder -c "cd ${AUR_DIR} && makepkg --printsrcinfo" > "${AUR_DIR}/.SRCINFO"
+              mkdir -p /repo/dist/aur
+              cp -f "${AUR_DIR}/PKGBUILD" "${AUR_DIR}/.SRCINFO" /repo/dist/aur/
+              chmod -R a+rX /repo/dist/arch /repo/dist/aur
+            '
+
+      - name: Generate package SHA256SUMS
+        run: |
+          set -euo pipefail
+          : > dist/SHA256SUMS
+          for pkg in dist/deb/*.deb dist/fedora/*.rpm dist/opensuse/*.rpm dist/arch/*.pkg.tar.zst; do
+            sha256sum "$pkg" | sed "s#  .*#  $(basename "$pkg")#" >> dist/SHA256SUMS
+          done
+          cat dist/SHA256SUMS
+
+      - name: Upload built packages artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+          if-no-files-found: error
+
+  verify-packages:
+    needs: build-packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [ubuntu, fedora, opensuse, arch]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Run container smoke test (${{ matrix.distro }})
+        run: ./packaging/test-containers.sh --distro "${{ matrix.distro }}" --pkg-dir dist
+
+  publish-release:
+    needs: [build-packages, verify-packages]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Create or update GitHub Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ needs.build-packages.outputs.is_prerelease }}
         run: |
           set -euo pipefail
           extra=()
-          case "$TAG" in
-            *[-.]a[0-9]*|*[-.]b[0-9]*|*[-.]rc[0-9]*|*alpha*|*beta*) extra+=(--prerelease) ;;
-          esac
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            extra+=(--prerelease)
+          fi
+
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --generate-notes "${extra[@]}"
-          gh release upload "$TAG" install.sh.sha256 gigamate.tar.gz.sha256 --clobber
+
+          gh release upload "$TAG" \
+            dist/install.sh.sha256 \
+            dist/gigamate.tar.gz.sha256 \
+            dist/SHA256SUMS \
+            dist/deb/*.deb \
+            dist/fedora/*.rpm \
+            dist/opensuse/*.rpm \
+            dist/arch/*.pkg.tar.zst \
+            --clobber
+
+  publish-repos:
+    needs: [build-packages, verify-packages]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.build-packages.outputs.is_prerelease != 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check GPG_PRIVATE_KEY availability
+        id: check_gpg
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GPG_PRIVATE_KEY" ]]; then
+            echo "::notice::GPG_PRIVATE_KEY secret is not configured; skipping GitHub Pages package repository publish."
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_key=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.check_gpg.outputs.has_key == 'true'
+
+      - name: Download built packages
+        if: steps.check_gpg.outputs.has_key == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Install repository publishing tools
+        if: steps.check_gpg.outputs.has_key == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils createrepo-c rpm
+
+      - name: Import GPG key and build signed repositories
+        if: steps.check_gpg.outputs.has_key == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_FPR="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
+          if [[ -z "$GPG_FPR" ]]; then
+            echo "Error: failed to determine imported GPG key fingerprint" >&2
+            exit 1
+          fi
+          ./packaging/publish-repos.sh \
+            --pkg-dir dist \
+            --out-dir site \
+            --gpg-key "$GPG_FPR" \
+            --gpg-passphrase-env GPG_PASSPHRASE
+
+      - name: Deploy signed repositories to gh-pages
+        if: steps.check_gpg.outputs.has_key == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+
+  publish-aur:
+    needs: [build-packages, verify-packages, publish-release]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.build-packages.outputs.is_prerelease != 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check AUR_SSH_PRIVATE_KEY and prerelease status
+        id: check_aur
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            *[-.]a*|*[-.]b*|*[-.]rc*|*alpha*|*beta*)
+              echo "::notice::Tag ${TAG} is a prerelease; skipping AUR publish."
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          if [[ -z "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo "::notice::AUR_SSH_PRIVATE_KEY secret is not configured; skipping AUR publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.check_aur.outputs.should_publish == 'true'
+
+      - name: Download built packages
+        if: steps.check_aur.outputs.should_publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - name: Push PKGBUILD and .SRCINFO to AUR
+        if: steps.check_aur.outputs.should_publish == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.build-packages.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p -m 700 ~/.ssh
+          (
+            umask 077
+            printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/id_aur
+          )
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_aur -o IdentitiesOnly=yes"
+
+          git clone ssh://aur@aur.archlinux.org/gigamate.git /tmp/aur-repo
+          cp -f dist/aur/PKGBUILD /tmp/aur-repo/PKGBUILD
+          cp -f dist/aur/.SRCINFO /tmp/aur-repo/.SRCINFO
+          cp -f packaging/arch/gigamate.install /tmp/aur-repo/gigamate.install
+
+          cd /tmp/aur-repo
+          git config user.name "GigaMate Release Bot"
+          git config user.email "goodeesh@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO gigamate.install
+          if git diff --cached --quiet; then
+            echo "AUR repository already up to date for v${VERSION}"
+          else
+            git commit -m "Update to v${VERSION}"
+            git push origin HEAD:master
+          fi
