@@ -77,7 +77,78 @@ GigaMate Center automatically follows your desktop's **Dark & Light color scheme
 
 ## Installation & Upgrading
 
-### Fresh Install
+GigaMate 5.0+ is distributed primarily through **GPG-signed native distro repositories** (`gigamate`, which automatically installs `gigamate-dkms` for the `gigamate_acpi` kernel module).
+
+### Arch Linux / CachyOS / EndeavourOS
+
+**Pacman repository (recommended):**
+
+```sh
+# 1. Download and locally trust the GigaMate release signing key
+curl -fsSL https://goodeesh.github.io/GigaMate/repo/gigamate.asc -o /tmp/gigamate.asc
+sudo pacman-key --add /tmp/gigamate.asc
+FPR="$(gpg --show-keys --with-colons /tmp/gigamate.asc | awk -F: '/^fpr:/ {print $10; exit}')"
+sudo pacman-key --lsign-key "$FPR"
+rm -f /tmp/gigamate.asc
+
+# 2. Add the repository to /etc/pacman.conf
+sudo tee -a /etc/pacman.conf >/dev/null <<'EOF'
+
+[gigamate]
+Server = https://goodeesh.github.io/GigaMate/repo/arch/any
+EOF
+
+# 3. Install GigaMate (pulls in gigamate-dkms automatically)
+sudo pacman -Sy gigamate
+```
+
+**AUR alternative:**
+
+```sh
+paru -S gigamate
+# or
+yay -S gigamate
+```
+
+### Debian / Ubuntu / Pop!_OS / Linux Mint (APT)
+
+```sh
+curl -fsSL https://goodeesh.github.io/GigaMate/repo/gigamate.gpg | sudo tee /usr/share/keyrings/gigamate.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/gigamate.gpg] https://goodeesh.github.io/GigaMate/repo/apt stable main" | sudo tee /etc/apt/sources.list.d/gigamate.list >/dev/null
+sudo apt update && sudo apt install gigamate
+```
+
+### Fedora (DNF)
+
+```sh
+sudo tee /etc/yum.repos.d/gigamate.repo >/dev/null <<'EOF'
+[gigamate]
+name=GigaMate Repository
+baseurl=https://goodeesh.github.io/GigaMate/repo/rpm/fedora
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://goodeesh.github.io/GigaMate/repo/gigamate.asc
+EOF
+
+sudo dnf install gigamate
+```
+
+### openSUSE Leap / Tumbleweed (Zypper)
+
+```sh
+sudo rpm --import https://goodeesh.github.io/GigaMate/repo/gigamate.asc
+sudo zypper addrepo -f https://goodeesh.github.io/GigaMate/repo/rpm/opensuse gigamate
+sudo zypper refresh && sudo zypper install gigamate
+```
+
+> [!TIP]
+> **Migrating from `install.sh`?** Just install the native `gigamate` package above. The package post-install hook automatically cleans up legacy `install.sh` files (`~/.local/bin/gigamate*`, user systemd units, udev/polkit rules, and old DKMS entries) while **preserving `~/.config/gigamate/`** intact.
+
+### Fallback / Other Distros (`install.sh`)
+
+<details>
+<summary><strong>Install via <code>install.sh</code> (for unsupported distros or source checkouts)</strong></summary>
 
 **Option A — Clone and inspect locally (recommended):**
 
@@ -96,27 +167,29 @@ curl -fsSL https://raw.githubusercontent.com/goodeesh/GigaMate/main/install.sh |
 > [!NOTE]
 > Run `./install.sh` as your **normal desktop user** (never with `sudo ./install.sh`). The script installs Python packages and systemd user units in user space, and only invokes `sudo` for system dependencies, DKMS module build, `/etc/udev/rules.d/`, and `/usr/lib/gigamate/` helpers.
 
+</details>
+
+### Updating
+
+- **Native package installs (recommended):** Update through your distro's package manager (`sudo pacman -Syu`, `sudo apt update && sudo apt upgrade`, `sudo dnf upgrade gigamate`, `sudo zypper up gigamate`, or `paru -Syu` / `yay -Syu` for AUR). When a new release is available, the GigaMate system tray notifies you with the exact command for your install method.
+- **`install.sh` installs:** Continue using the built-in updater:
+  ```sh
+  gigamate update
+  ```
+  or from a local checkout:
+  ```sh
+  git pull
+  ./install.sh --update
+  ```
+
 ### Upgrading from `v4.5.x` → `v5.0.0`
 
-Upgrading preserves `~/.config/gigamate/config.json` (your colour, brightness, charge threshold, GPU offsets, and idle settings) and leaves your old `~/.config/gigamate/profiles/` folder untouched on disk in case you ever decide to roll back.
-
-Run either:
-
-```sh
-gigamate update
-```
-
-or from a local checkout:
-
-```sh
-git pull
-./install.sh --update
-```
+Upgrading (either by installing a native `v5.0.0` package over your existing `install.sh` setup, or via `gigamate update`) preserves `~/.config/gigamate/config.json` (your colour, brightness, charge threshold, GPU offsets, and idle settings) and leaves your old `~/.config/gigamate/profiles/` folder untouched on disk in case you ever decide to roll back.
 
 **What changes automatically during the upgrade:**
-1. System packages switch from GTK3/`AppIndicator3`/`pyusb` to **PyQt6** (while cleanly cleaning up old `pip --user` installs and migrating into an isolated `--system-site-packages` `pipx` environment).
+1. System packages switch from GTK3/`AppIndicator3`/`pyusb` to **PyQt6** (native installs clean up legacy `install.sh` user/system files; `install.sh` upgrades migrate into an isolated `--system-site-packages` `pipx` environment).
 2. `gigamate_acpi` rebuilds via DKMS for every installed kernel (running kernel first) and prunes stale unreferenced DKMS versions.
-3. If `./install.sh` detects a **pre-LampArray keyboard** or a **non-`WMBD(0xED)` BIOS**, it displays a prominent compatibility notice at the end with the exact `v4.5.3` rollback command.
+3. If `install.sh` detects a **pre-LampArray keyboard** or a **non-`WMBD(0xED)` BIOS**, it displays a prominent compatibility notice at the end with the exact `v4.5.3` rollback command.
 
 ### Rolling Back to `v4.5.3`
 
@@ -140,9 +213,11 @@ Reboot and choose **Enroll MOK** in the EFI prompt. After kernel upgrades, if th
 
 ### Uninstalling
 
-```sh
-./uninstall.sh
-```
+- **Native packages:** Remove `gigamate` and `gigamate-dkms` with your package manager (e.g. `sudo pacman -Rns gigamate gigamate-dkms`, `sudo apt remove gigamate gigamate-dkms`, `sudo dnf remove gigamate gigamate-dkms`, or `sudo zypper rm gigamate gigamate-dkms`).
+- **`install.sh` installs:**
+  ```sh
+  ./uninstall.sh
+  ```
 
 Remove remaining user configuration (optional):
 
@@ -187,3 +262,4 @@ Run `gigamate --help` or `gigamate <subcommand> --help` for full options.
 - **[Hardware Discovery Architecture](docs/HARDWARE_DISCOVERY.md)** — Deep dive into `WMBD(0xED)` AML parsing, `NPCF`, HID LampArray, dGPU PCIe/ACPI topology, and safety guards.
 - **[RGB Protocol Notes](docs/RGB_PROTOCOL.md)** — HID LampArray `Usage Page 0x59` report layout, udev `uaccess` permissions, and historical `0x08` reference.
 - **[Contributing](CONTRIBUTING.md)** — Bug report requirements (`gigamate doctor` + `gigamate profile report`), local dev environment, and running `pytest`.
+- **[Release & Packaging Runbook](docs/RELEASE.md)** — Maintainer guide for GPG signing setup, dry-run testing, cutting releases, and rollback procedures.
