@@ -61,7 +61,7 @@ cp "$REPO_ROOT/packaging/arch/gigamate.install" "$BUILD_DIR/gigamate.install"
 
 (
     cd "$BUILD_DIR"
-    makepkg -sf --noconfirm
+    PKGDEST="$BUILD_DIR" SRCDEST="$BUILD_DIR" PKGEXT='.pkg.tar.zst' makepkg -sf --noconfirm
 )
 
 OUT_DIR="$REPO_ROOT/dist/arch"

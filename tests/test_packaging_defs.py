@@ -232,6 +232,7 @@ def test_arch_pkgbuild_template() -> None:
     assert "arch=('any')" in text
     assert "license=('MIT')" in text
     assert "url='https://github.com/goodeesh/GigaMate'" in text
+    assert "build()" in text
     assert "package_gigamate()" in text
     assert "package_gigamate-dkms()" in text
     assert "install=gigamate.install" in text
@@ -285,3 +286,67 @@ def test_build_local_arch_script_syntax_and_executable() -> None:
 def test_gitignore_ignores_dist() -> None:
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "dist/" in gitignore
+
+
+def test_arch_install_cleanup_etc_helpers_behavior(tmp_path: Path) -> None:
+    # 1. _gigamate_cleanup_etc_with_header
+    matched_udev = tmp_path / "70-gigamate.rules"
+    matched_udev.write_text("# GigaMate HID permissions\nSUBSYSTEM==\"hidraw\"\n", encoding="utf-8")
+
+    custom_udev = tmp_path / "99-custom.rules"
+    custom_udev.write_text("# Sysadmin custom udev rule\nACTION==\"add\"\n", encoding="utf-8")
+
+    sym_target = tmp_path / "real-rule.rules"
+    sym_target.write_text("# GigaMate symlinked rule\n", encoding="utf-8")
+    sym_udev = tmp_path / "sym-gigamate.rules"
+    sym_udev.symlink_to(sym_target)
+
+    # 2. _gigamate_cleanup_etc_modules_load
+    matched_mod = tmp_path / "gigamate_acpi.conf"
+    matched_mod.write_text("# Auto-load\ngigamate_acpi\n", encoding="utf-8")
+
+    custom_mod = tmp_path / "custom_mod.conf"
+    custom_mod.write_text("gigamate_acpi\nother_module\n", encoding="utf-8")
+
+    sym_mod_target = tmp_path / "real-mod.conf"
+    sym_mod_target.write_text("gigamate_acpi\n", encoding="utf-8")
+    sym_mod = tmp_path / "sym-mod.conf"
+    sym_mod.symlink_to(sym_mod_target)
+
+    script = f"""
+set -euo pipefail
+source "{ARCH_INSTALL}"
+_gigamate_cleanup_etc_with_header "{matched_udev}" '^#[[:space:]]*(GigaMate|Notify GigaMate)'
+_gigamate_cleanup_etc_with_header "{custom_udev}" '^#[[:space:]]*(GigaMate|Notify GigaMate)'
+_gigamate_cleanup_etc_with_header "{sym_udev}" '^#[[:space:]]*(GigaMate|Notify GigaMate)'
+_gigamate_cleanup_etc_modules_load "{matched_mod}"
+_gigamate_cleanup_etc_modules_load "{custom_mod}"
+_gigamate_cleanup_etc_modules_load "{sym_mod}"
+"""
+    res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, f"gigamate.install helper test failed: {res.stderr}"
+
+    # Recognized header / modules-load -> removed
+    assert not matched_udev.exists()
+    assert not (tmp_path / "70-gigamate.rules.pre-pkg.bak").exists()
+    assert not matched_mod.exists()
+    assert not (tmp_path / "gigamate_acpi.conf.pre-pkg.bak").exists()
+
+    # Unrecognized sysadmin file -> moved to *.pre-pkg.bak
+    assert not custom_udev.exists()
+    assert (tmp_path / "99-custom.rules.pre-pkg.bak").read_text(encoding="utf-8") == (
+        "# Sysadmin custom udev rule\nACTION==\"add\"\n"
+    )
+    assert not custom_mod.exists()
+    assert (tmp_path / "custom_mod.conf.pre-pkg.bak").read_text(encoding="utf-8") == (
+        "gigamate_acpi\nother_module\n"
+    )
+
+    # Symlinks -> untouched
+    assert sym_udev.is_symlink()
+    assert sym_target.is_file()
+    assert not (tmp_path / "sym-gigamate.rules.pre-pkg.bak").exists()
+    assert sym_mod.is_symlink()
+    assert sym_mod_target.is_file()
+    assert not (tmp_path / "sym-mod.conf.pre-pkg.bak").exists()
+
