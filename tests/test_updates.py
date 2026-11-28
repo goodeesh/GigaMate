@@ -789,3 +789,278 @@ class TestCliPackageManagedUpdate:
         out = capsys.readouterr().out
         assert "GigaMate is installed via apt. Update using your package manager:" in out
         assert "sudo apt update && sudo apt upgrade gigamate gigamate-dkms" in out
+
+
+class TestMigrateLegacyUserInstall:
+    def _write(self, path, content: str = ""):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_package_managed_removes_legacy_files_and_preserves_custom(self, tmp_path):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("apt\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        # User config must never be touched
+        user_cfg = self._write(
+            home / ".config" / "gigamate" / "config.json",
+            '{"charge_limit": 80}\n',
+        )
+
+        # Legacy pip console scripts
+        legacy_bins = [
+            self._write(
+                home / ".local" / "bin" / name,
+                f"#!/usr/bin/python3\nfrom gigamate.{mod} import main\nmain()\n",
+            )
+            for name, mod in [
+                ("gigamate", "cli"),
+                ("gigamate-tray", "tray"),
+                ("gigamate-center", "center"),
+                ("gigamate-dgpu-watch", "dgpu_watch"),
+            ]
+        ]
+        custom_bin = self._write(
+            home / ".local" / "bin" / "my-custom-script",
+            "#!/bin/sh\necho hello\n",
+        )
+
+        # Legacy systemd units
+        legacy_units = [
+            self._write(
+                home / ".config" / "systemd" / "user" / "gigamate.service",
+                "[Service]\nExecStart=%h/.local/bin/gigamate-tray\n",
+            ),
+            self._write(
+                home / ".config" / "systemd" / "user" / "gigamate-dgpu.service",
+                "[Service]\nExecStart=/home/u/.local/bin/gigamate-dgpu-watch\n",
+            ),
+        ]
+        custom_unit = self._write(
+            home / ".config" / "systemd" / "user" / "custom-user.service",
+            "[Service]\nExecStart=/usr/bin/true\n",
+        )
+
+        # Legacy desktop files
+        legacy_desktop = [
+            self._write(home / ".local" / "share" / "applications" / name, "[Desktop Entry]\n")
+            for name in ("gigamate.desktop", "gigamate-center.desktop")
+        ]
+        other_desktop = self._write(
+            home / ".local" / "share" / "applications" / "other.desktop",
+            "[Desktop Entry]\n",
+        )
+
+        # Legacy icons
+        icon_names = (
+            "gigamate.svg",
+            "gigamate-nvidia.svg",
+            "gigamate-amd.svg",
+            "gigamate-update.svg",
+            "gigamate-nvidia-update.svg",
+            "gigamate-amd-update.svg",
+            "checkbox-checked.svg",
+        )
+        legacy_icons = [
+            self._write(
+                home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / name,
+                "<svg/>",
+            )
+            for name in icon_names
+        ]
+        other_icon = self._write(
+            home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "other.svg",
+            "<svg/>",
+        )
+
+        run_calls = []
+
+        def fake_run(argv, **kwargs):
+            run_calls.append(argv)
+
+            class P:
+                returncode = 0
+
+            return P()
+
+        fake_which = lambda name: "/usr/bin/systemctl" if name == "systemctl" else None
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=fake_run,
+            which=fake_which,
+        )
+
+        expected_removed = {
+            str(p) for p in (*legacy_bins, *legacy_units, *legacy_desktop, *legacy_icons)
+        }
+        assert set(removed) == expected_removed
+        for p in (*legacy_bins, *legacy_units, *legacy_desktop, *legacy_icons):
+            assert not p.exists()
+
+        # Preserved files
+        assert user_cfg.read_text(encoding="utf-8") == '{"charge_limit": 80}\n'
+        assert custom_bin.exists()
+        assert custom_unit.exists()
+        assert other_desktop.exists()
+        assert other_icon.exists()
+
+        # systemctl daemon-reload called once
+        assert run_calls == [["systemctl", "--user", "daemon-reload"]]
+
+        # State persisted
+        assert updates.load_state(state_file).get("migrated_to_pkg") is True
+
+        # Second call is a complete no-op
+        run_calls.clear()
+        second = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=fake_run,
+            which=fake_which,
+        )
+        assert second == []
+        assert run_calls == []
+
+    def test_preserves_custom_gigamate_wrapper_and_non_local_unit(self, tmp_path):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("dnf\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        # Custom user wrapper with same filename, no pip console-script signature
+        custom_wrapper = self._write(
+            home / ".local" / "bin" / "gigamate",
+            "#!/bin/sh\nexec /usr/bin/gigamate --verbose \"$@\"\n",
+        )
+        # Custom user systemd unit not referencing .local/bin/gigamate
+        custom_unit = self._write(
+            home / ".config" / "systemd" / "user" / "gigamate.service",
+            "[Service]\nExecStart=/usr/bin/gigamate-tray\n",
+        )
+
+        run_calls = []
+
+        def fake_run(argv, **kwargs):
+            run_calls.append(argv)
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=fake_run,
+            which=lambda name: "/usr/bin/systemctl" if name == "systemctl" else None,
+        )
+
+        assert removed == []
+        assert custom_wrapper.exists()
+        assert custom_unit.exists()
+        assert run_calls == []
+        assert updates.load_state(state_file).get("migrated_to_pkg") is True
+
+    def test_script_install_is_complete_noop(self, tmp_path):
+        home = tmp_path / "home"
+        marker = tmp_path / "missing-marker"
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        legacy_bin = self._write(
+            home / ".local" / "bin" / "gigamate",
+            "#!/usr/bin/python3\nfrom gigamate.cli import main\n",
+        )
+        legacy_unit = self._write(
+            home / ".config" / "systemd" / "user" / "gigamate.service",
+            "[Service]\nExecStart=%h/.local/bin/gigamate-tray\n",
+        )
+        legacy_desktop = self._write(
+            home / ".local" / "share" / "applications" / "gigamate.desktop",
+            "[Desktop Entry]\n",
+        )
+        legacy_icon = self._write(
+            home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "gigamate.svg",
+            "<svg/>",
+        )
+
+        run_calls = []
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=lambda argv, **k: run_calls.append(argv),
+            which=lambda _: None,
+        )
+
+        assert removed == []
+        assert legacy_bin.exists()
+        assert legacy_unit.exists()
+        assert legacy_desktop.exists()
+        assert legacy_icon.exists()
+        assert not state_file.exists()
+        assert run_calls == []
+
+    def test_preserves_existing_state_and_handles_systemctl_failure(self, tmp_path):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("pacman\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+        updates.save_state({"dismissed_version": "v5.0.0", "last_check_ts": 42.0}, state_file)
+
+        legacy_unit = self._write(
+            home / ".config" / "systemd" / "user" / "gigamate.service",
+            "[Service]\nExecStart=%h/.local/bin/gigamate-tray\n",
+        )
+
+        def boom(*a, **k):
+            raise OSError("systemctl failed")
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=boom,
+            which=lambda name: "/usr/bin/systemctl" if name == "systemctl" else None,
+        )
+
+        assert removed == [str(legacy_unit)]
+        assert not legacy_unit.exists()
+        state = updates.load_state(state_file)
+        assert state["migrated_to_pkg"] is True
+        assert state["dismissed_version"] == "v5.0.0"
+        assert state["last_check_ts"] == 42.0
+
+    def test_removes_symlink_to_pip_script_and_swallows_state_oserror(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("zypper\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        target = self._write(
+            tmp_path / "venv_bin_gigamate",
+            "#!/usr/bin/python3\nfrom gigamate.cli import main\n",
+        )
+        link = home / ".local" / "bin" / "gigamate"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+
+        def fail_state(*a, **k):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(updates, "update_update_state", fail_state)
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=lambda *a, **k: None,
+            which=lambda _: None,
+        )
+
+        assert removed == [str(link)]
+        assert not link.exists() and not link.is_symlink()
+        assert target.exists()

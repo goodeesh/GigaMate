@@ -437,6 +437,129 @@ def build_package_terminal_update_command(
     )
 
 
+_LEGACY_BIN_NAMES = (
+    "gigamate",
+    "gigamate-tray",
+    "gigamate-center",
+    "gigamate-dgpu-watch",
+)
+_LEGACY_UNIT_NAMES = (
+    "gigamate.service",
+    "gigamate-dgpu.service",
+)
+_LEGACY_DESKTOP_NAMES = (
+    "gigamate.desktop",
+    "gigamate-center.desktop",
+)
+_LEGACY_ICON_NAMES = (
+    "gigamate.svg",
+    "gigamate-nvidia.svg",
+    "gigamate-amd.svg",
+    "gigamate-update.svg",
+    "gigamate-nvidia-update.svg",
+    "gigamate-amd-update.svg",
+    "checkbox-checked.svg",
+)
+
+
+def migrate_legacy_user_install(
+        home: Optional[Path] = None,
+        state_file: Path = STATE_FILE,
+        marker_path: Path = INSTALL_METHOD_FILE,
+        run: Callable = subprocess.run,
+        which: Callable[[str], Optional[str]] = shutil.which) -> list[str]:
+    """One-time cleanup of legacy install.sh user files on packaged installs.
+
+    No-op for script-managed installs or once ``migrated_to_pkg`` is persisted
+    in ``state_file``. Preserves user configuration under ``~/.config/gigamate``
+    and any custom scripts or systemd units that do not match install.sh
+    signatures. Never raises on OSError.
+    """
+    method = detect_install_method(
+        marker_path=marker_path, which=which, run=run
+    )
+    if not is_package_managed(method):
+        return []
+    if load_state(state_file).get("migrated_to_pkg"):
+        return []
+
+    user_home = home if home is not None else Path.home()
+    removed: list[str] = []
+    removed_unit = False
+
+    bin_dir = user_home / ".local" / "bin"
+    for name in _LEGACY_BIN_NAMES:
+        path = bin_dir / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "gigamate." in text:
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    unit_dir = user_home / ".config" / "systemd" / "user"
+    for name in _LEGACY_UNIT_NAMES:
+        path = unit_dir / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if ".local/bin/gigamate" in text:
+                path.unlink()
+                removed.append(str(path))
+                removed_unit = True
+        except OSError:
+            continue
+
+    apps_dir = user_home / ".local" / "share" / "applications"
+    for name in _LEGACY_DESKTOP_NAMES:
+        path = apps_dir / name
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    icons_dir = (
+        user_home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    )
+    for name in _LEGACY_ICON_NAMES:
+        path = icons_dir / name
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    if removed_unit:
+        try:
+            if which("systemctl"):
+                run(
+                    ["systemctl", "--user", "daemon-reload"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+        except Exception:
+            pass
+
+    try:
+        def _mark_migrated(state: Dict) -> Dict:
+            state["migrated_to_pkg"] = True
+            return state
+
+        update_update_state(_mark_migrated, state_file=state_file)
+    except OSError:
+        pass
+
+    return removed
+
+
 def install_script_url(tag: Optional[str] = None) -> str:
     """Return the install.sh URL pinned to a release tag.
 

@@ -497,6 +497,11 @@ def main() -> None:
             pass
         return
 
+    try:
+        update_checker.migrate_legacy_user_install()
+    except Exception:
+        logger.debug("Legacy user install migration failed", exc_info=True)
+
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName("GigaMate")
     qt_app.setDesktopFileName("gigamate")
