@@ -1,202 +1,124 @@
-import sys
-import time
-from typing import Optional
+"""Pure HID LampArray keyboard RGB protocol (zero PyUSB)."""
 
-import usb.core
-import usb.util
+from pathlib import Path
+from typing import List, Optional, Tuple
 
-from .profiles import (
-    DeviceProfile,
-    detect_device,
-    resolve_profile,
-    all_profiles,
-    load_builtin_profiles,
+from . import lamparray
+from .lamparray import (
+    KEYBOARD_VENDORS,
+    PALETTE_HEX,
+    LampArrayDevice,
+    _is_gigabyte_keyboard,
+    parse_hex_rgb,
 )
 
 VID = 0x0414
-PID = 0x8105
-INTERFACE = 3
-
-DEFAULT_PROFILE: Optional[DeviceProfile] = resolve_profile(VID, PID)
-
-COLOUR_MAP: dict = DEFAULT_PROFILE.colour_map if DEFAULT_PROFILE else {}
-COLOURS: dict = {name: mapping[2][0] for name, mapping in COLOUR_MAP.items()}
-COLOUR_NAMES: dict = {v: k for k, v in COLOURS.items()}
-
-BRIGHTNESS_LABELS = {0: "off", 1: "dim", 2: "full"}
-
-PROGRAMS = {
-    "static":    0x01,
-    "breathing": 0x02,
-    "wave":      0x03,
-    "fade":      0x04,
-    "marquee":   0x05,
-    "ripple":    0x06,
-    "flash":     0x07,
-    "neon":      0x08,
-    "rainbow-mq":0x09,
-    "raindrop":  0x0A,
-    "circle-mq": 0x0B,
-    "hedge":     0x0C,
-    "rotate":    0x0D,
-    "custom1":   0x33,
-    "custom2":   0x34,
-    "custom3":   0x35,
-    "custom4":   0x36,
-    "custom5":   0x37,
-}
-
-SPEEDS = {
-    "fastest": 0x01,
-    "fast":    0x03,
-    "medium":  0x06,
-    "slow":    0x08,
-    "slowest": 0x0A,
-}
+BRIGHTNESS_NAMES = ["Off", "Dim", "Full"]
 
 
-def make_checksum(data):
-    return (255 - sum(data[:7])) & 0xFF
-
-
-def make_command(program, speed, brightness, colour):
-    data = [0x08, 0x00, program, speed, brightness, colour, 0x01]
-    data.append(make_checksum(data))
-    return bytes(data)
-
-
-def get_keyboard(vid=None, pid=None, profile=None, interfaces=None):
-    if profile is not None:
-        vid, pid = profile.vid, profile.pid
-    if vid is None or pid is None:
-        detected = detect_device()
-        if detected is None:
-            return None
-        vid, pid = detected
-        if profile is None:
-            profile = resolve_profile(vid, pid)
-    if interfaces is None and profile is not None:
-        interfaces = profile.interfaces
-    if profile is not None and profile.rgb_protocol == "lamparray":
-        from .lamparray import find_device, LampArrayDevice
-        found = find_device(vid, pid, profile.control_interface)
-        return LampArrayDevice(found[0]) if found else None
-    dev = usb.core.find(idVendor=vid, idProduct=pid)
-    if dev is None:
-        return None
-    if interfaces is None:
-        interfaces = [1, 3]
-    for iface in interfaces:
+def detect_keyboards() -> List[Tuple[int, int]]:
+    """Scan /sys/class/hidraw for Gigabyte keyboards, returning unique (vid, pid) pairs."""
+    seen: set = set()
+    found: List[Tuple[int, int]] = []
+    for node in sorted(Path("/sys/class/hidraw").glob("hidraw*")):
+        device = node / "device"
         try:
-            if dev.is_kernel_driver_active(iface):
-                dev.detach_kernel_driver(iface)
-        except (usb.core.USBError, ValueError, NotImplementedError):
-            pass
-    return dev
-
-
-def send_command(dev, command, interface=INTERFACE):
-    try:
-        dev.ctrl_transfer(0x21, 0x09, 0x0300, interface, command)
-        return True
-    except (usb.core.USBError, ValueError):
-        return False
-
-
-def set_static(dev, colour, level=2, profile=None, interface=INTERFACE):
-    if profile is not None:
-        cmap = profile.colour_map
-    else:
-        cmap = COLOUR_MAP
-    if colour not in cmap:
-        return False
-    level = int(level)
-    if level not in (0, 1, 2):
-        level = 2
-    byte5, byte4 = cmap[colour][level]
-    if profile is not None and profile.rgb_protocol == "lamparray":
-        try:
-            return dev.set_colour(byte5, byte4)
-        except (OSError, ValueError):
-            return False
-    cmd = make_command(PROGRAMS["static"], SPEEDS["medium"], byte4, byte5)
-    iface = profile.control_interface if profile else interface
-    return send_command(dev, cmd, iface)
-
-
-def set_off(dev, profile=None, interface=INTERFACE):
-    if profile is not None and profile.rgb_protocol == "lamparray":
-        try:
-            return dev.set_colour(1, 0)
-        except (OSError, ValueError):
-            return False
-    cmd = make_command(PROGRAMS["static"], SPEEDS["medium"], 0x00, 0x01)
-    iface = profile.control_interface if profile else interface
-    return send_command(dev, cmd, iface)
-
-
-def detect_keyboards():
-    keyboards = []
-    seen = set()
-    try:
-        for cfg in usb.core.find(find_all=True):
-            if cfg is None:
+            lines = (device / "uevent").read_text().splitlines()
+            hid_id = next(line.split("=", 1)[1] for line in lines if line.startswith("HID_ID="))
+            _, vendor, product = hid_id.split(":")
+            vid, pid = int(vendor, 16), int(product, 16)
+            if vid not in KEYBOARD_VENDORS:
                 continue
-            try:
-                vid = cfg.idVendor
-                pid = cfg.idProduct
-            except (AttributeError, usb.core.USBError, ValueError):
-                continue
-            if vid == VID and (vid, pid) not in seen:
+            hid_name = next(
+                (line.split("=", 1)[1] for line in lines if line.startswith("HID_NAME=")),
+                "",
+            )
+            if _is_gigabyte_keyboard(vid, pid, hid_name) and (vid, pid) not in seen:
                 seen.add((vid, pid))
-                keyboards.append((vid, pid, cfg.bDeviceClass))
-        if not keyboards:
-            for dev in usb.core.find(find_all=True):
-                if dev is None:
-                    continue
-                try:
-                    mfr = (dev.manufacturer or "").upper()
-                    if "GIGABYTE" in mfr and (dev.idVendor, dev.idProduct) not in seen:
-                        seen.add((dev.idVendor, dev.idProduct))
-                        keyboards.append((dev.idVendor, dev.idProduct, dev.bDeviceClass))
-                except Exception:
-                    pass
+                found.append((vid, pid))
+        except (OSError, ValueError, StopIteration):
+            continue
+    return found
+
+
+def hardware_supports_lamparray(vid: Optional[int] = None, pid: Optional[int] = None) -> bool:
+    """Return True if the keyboard hardware exposes HID LampArray with >= 1 lamp."""
+    try:
+        if vid is not None and pid is not None:
+            found = lamparray.find_device(vid, pid)
+            if not found:
+                return False
+            node_path = found[0]
+        else:
+            detected = lamparray.detect_lamparray_keyboard()
+            if not detected:
+                return False
+            node_path = detected[2]
+        return LampArrayDevice(node_path).lamp_count() >= 1
     except Exception:
-        pass
-    return keyboards
+        return False
 
 
-def print_detect():
-    profiles = all_profiles()
-    print("Scanning for Gigabyte keyboards...")
-    found = detect_device()
-    if found is None:
-        print("  No Gigabyte USB keyboard detected.")
-        print()
-        print("  Try: lsusb | grep -i gigabyte")
-        print("  If you see a keyboard but it's not detected,")
-        print("  open an issue on GitHub so we can investigate!")
+def supports_full_rgb(vid: Optional[int] = None, pid: Optional[int] = None) -> bool:
+    """Return True if the active or detected keyboard supports 24-bit HID LampArray RGB."""
+    return hardware_supports_lamparray(vid, pid)
+
+
+def get_keyboard(vid: Optional[int] = None, pid: Optional[int] = None) -> Optional[LampArrayDevice]:
+    """Return a LampArrayDevice for the detected or specified Gigabyte keyboard, or None."""
+    if vid is not None and pid is not None:
+        found = lamparray.find_device(vid, pid)
+        return LampArrayDevice(found[0]) if found else None
+    detected = lamparray.detect_lamparray_keyboard()
+    return LampArrayDevice(detected[2]) if detected else None
+
+
+def set_rgb(dev: Optional[LampArrayDevice], rgb_hex: str, brightness_pct: int = 100) -> bool:
+    """Set 24-bit RGB colour from '#RRGGBB' (or named colour) at brightness_pct (0..100)."""
+    if dev is None:
+        return False
+    hex_val = PALETTE_HEX.get(rgb_hex.lower(), rgb_hex) if isinstance(rgb_hex, str) else ""
+    rgb = parse_hex_rgb(hex_val)
+    if rgb is None:
+        return False
+    try:
+        return dev.set_rgb(rgb[0], rgb[1], rgb[2], brightness_pct)
+    except OSError:
+        return False
+
+
+def set_off(dev: Optional[LampArrayDevice]) -> bool:
+    """Turn off keyboard RGB via HID LampArray."""
+    if dev is None:
+        return False
+    try:
+        return dev.set_rgb(0, 0, 0, 0)
+    except OSError:
+        return False
+
+
+def set_static(
+    dev: Optional[LampArrayDevice],
+    colour: str,
+    level: int = 2,
+    brightness_pct: Optional[int] = None,
+) -> bool:
+    """Set static colour (named palette colour or '#RRGGBB') at level (0=off, 1=dim, 2=full) or brightness_pct."""
+    if dev is None:
+        return False
+    if level == 0 or (brightness_pct is not None and brightness_pct <= 0):
+        return set_off(dev)
+    pct = brightness_pct if brightness_pct is not None else (25 if level == 1 else 100)
+    return set_rgb(dev, colour, pct)
+
+
+def print_detect() -> None:
+    """Print detected Gigabyte keyboard and HID LampArray status."""
+    kbd = lamparray.detect_gigabyte_hidraw_keyboard()
+    if kbd is None:
+        print("No Gigabyte/AORUS keyboard detected.")
         return
-    vid, pid = found
-    profile = resolve_profile(vid, pid) if found else None
-    if profile is not None:
-        print(f"  Found: VID={vid:04X} PID={pid:04X}  ({vid:04X}:{pid:04X})")
-        print(f"  Model: {profile.name}  \u2705 Supported")
-        print()
-        print(f"  Available colours: {', '.join(profile.colour_names)}")
-        print()
-        print("  To use:")
-        print(f"    gigamate rgb static <colour>")
-    else:
-        print(f"  Found: VID={vid:04X} PID={pid:04X}  ({vid:04X}:{pid:04X})")
-        print(f"  Model: unknown \u2014 not in profile database")
-        print(f"  \u2718 Unsupported. To add support:")
-        print(f"    gigamate rgb calibrate")
-        print()
-        print(f"  Safe action:")
-        print(f"    gigamate rgb off")
-    print()
-    print(f"Known profiles ({len(profiles)}):")
-    for key, p in sorted(profiles.items()):
-        v, pi = key
-        print(f"  {v:04X}:{pi:04X}  {p.name}")
+    vid, pid, hid_name = kbd
+    print(f"Detected keyboard: {hid_name or 'Gigabyte/AORUS'} ({vid:04x}:{pid:04x})")
+    diag = lamparray.diagnose_lamparray(vid, pid)
+    print(f"LampArray status:  {diag.get('status')} — {diag.get('reason')}")

@@ -1,27 +1,20 @@
----
-name: New model support
-about: Add a device profile for your Gigabyte laptop
-title: 'Add support for [Your Model Name]'
-labels: new-model
+## Summary
 
----
+<!-- Describe your changes cleanly and concisely. -->
 
-## Device information
+## Related Issue / Motivation
 
-- **Model name:**
-- **USB VID:PID:**
-- **ACPI available:** yes / no (run `gigamate detect --acpi` to check)
+<!-- Link any related issue or explain why this change is needed. -->
 
-## Changes
+## Hardware Tested (if applicable)
 
-- [ ] Added `src/gigamate/profile_data/{VID}_{PID}.json`
+- **Laptop model:**
+- **Distro & Desktop / Compositor:**
+- **Kernel (`uname -r`):**
 
 ## Checklist
 
-- [ ] I have run `gigamate calibrate rgb` — keyboard colours are mapped
-- [ ] I have run `gigamate detect --acpi` — ACPI capabilities are probed (if available)
-- [ ] I have tested: `gigamate status` shows correct sensor readings
-- [ ] I have tested: `gigamate profile gaming` switches power profile (if ACPI)
-- [ ] Profile JSON passes validation (`python -m pytest tests/`)
-
-## Additional notes
+- [ ] `QT_QPA_PLATFORM=offscreen pytest -q` passes with zero failures
+- [ ] `bash -n install.sh uninstall.sh` passes (if installer/packaging scripts were modified)
+- [ ] Relevant documentation updated (`README.md`, `docs/`)
+- [ ] Changes stay focused and scoped without adding hardcoded per-laptop JSON profiles

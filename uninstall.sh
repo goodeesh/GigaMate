@@ -2,6 +2,7 @@
 set -euo pipefail
 
 NAME="gigamate"
+KEEP_CONFIG=false
 
 COLOUR_GREEN='\033[0;32m'
 COLOUR_YELLOW='\033[1;33m'
@@ -12,6 +13,20 @@ info() { echo -e "${COLOUR_GREEN}[INFO]${COLOUR_RESET} $*"; }
 warn() { echo -e "${COLOUR_YELLOW}[WARN]${COLOUR_RESET} $*"; }
 
 header() { echo -e "\n[ $* ]\n"; }
+
+usage() {
+    echo "Usage: uninstall.sh [--keep-config] [-h|--help]"
+    echo "  --keep-config  Keep ~/.config/gigamate/ intact without prompting"
+    echo "  -h, --help     Show this help message and exit"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep-config) KEEP_CONFIG=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) warn "Unknown option: $1"; usage >&2; exit 2 ;;
+    esac
+done
 
 # --- Stop and disable systemd user service ---
 header "Systemd user service"
@@ -116,6 +131,45 @@ if [ -f /etc/udev/rules.d/99-gigamate-smartshift.rules ]; then
     info "Removed SmartShift udev rule."
 fi
 
+if [ -f /etc/udev/rules.d/99-gigamate-dgpu-ac.rules ]; then
+    sudo rm -f /etc/udev/rules.d/99-gigamate-dgpu-ac.rules
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    info "Removed dGPU AC event udev rule."
+fi
+
+# --- Remove dGPU power-gate helper + polkit policy ---
+if [ -f /run/gigamate-dgpu-gate.json ] && grep -q '"gated": *true' /run/gigamate-dgpu-gate.json 2>/dev/null; then
+    warn "dGPU appears currently gated off — switch to Optimus ('gigamate gpu power optimus') or reboot after uninstall."
+fi
+if [ -x /usr/lib/gigamate/gigamate-dgpu-gate ]; then
+    info "Removing dGPU power-gate helper (needs sudo)..."
+    sudo rm -f /usr/lib/gigamate/gigamate-dgpu-gate
+    info "dGPU power-gate helper removed."
+fi
+if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu-gate.rules ]; then
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-dgpu-gate.rules
+    info "dGPU power-gate polkit rule removed."
+fi
+if [ -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/org.gigamate.dgpu-gate.policy
+    info "dGPU power-gate polkit action removed."
+fi
+
+# --- Remove ACPI driver repair helper + polkit policy ---
+if [ -x /usr/lib/gigamate/gigamate-repair ]; then
+    info "Removing ACPI driver repair helper (needs sudo)..."
+    sudo rm -f /usr/lib/gigamate/gigamate-repair
+    info "ACPI driver repair helper removed."
+fi
+if [ -f /etc/polkit-1/rules.d/50-gigamate-repair.rules ]; then
+    sudo rm -f /etc/polkit-1/rules.d/50-gigamate-repair.rules
+    info "ACPI repair polkit rule removed."
+fi
+if [ -f /usr/share/polkit-1/actions/org.gigamate.repair.policy ]; then
+    sudo rm -f /usr/share/polkit-1/actions/org.gigamate.repair.policy
+    info "ACPI repair polkit action removed."
+fi
+
 # --- Remove polkit rule ---
 if [ -f /etc/polkit-1/rules.d/50-gigamate-powerd.rules ]; then
     info "Removing polkit rule (needs sudo)..."
@@ -129,9 +183,9 @@ if [ -x /usr/lib/gigamate/gigamate-dgpu-nvml ]; then
     sudo /usr/lib/gigamate/gigamate-dgpu-nvml clear 2>/dev/null || true
     info "Removing dGPU undervolt helper (needs sudo)..."
     sudo rm -f /usr/lib/gigamate/gigamate-dgpu-nvml
-    sudo rmdir /usr/lib/gigamate 2>/dev/null || true
     info "dGPU undervolt helper removed."
 fi
+[ -d /usr/lib/gigamate ] && sudo rmdir /usr/lib/gigamate 2>/dev/null || true
 if [ -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules ]; then
     sudo rm -f /etc/polkit-1/rules.d/50-gigamate-dgpu.rules
     info "dGPU polkit rule removed."
@@ -214,14 +268,21 @@ fi
 # --- Config cleanup ---
 header "Configuration"
 
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gigamate"
+OLD_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb"
+
 echo
 info "Uninstall complete."
 echo
-info "Configuration files left at:"
-info "  ${XDG_CONFIG_HOME:-$HOME/.config}/gigamate/"
-info "  ${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb/ (old, if migrated)"
-echo
-warn "To remove configuration, run:"
-warn "  rm -r ${XDG_CONFIG_HOME:-$HOME/.config}/gigamate"
-warn "  rm -r ${XDG_CONFIG_HOME:-$HOME/.config}/gigabyte-keyboard-rgb"
+if [ "$KEEP_CONFIG" = true ]; then
+    info "Preserving configuration (--keep-config): ${CONFIG_DIR}/"
+else
+    info "Configuration files left at:"
+    info "  ${CONFIG_DIR}/"
+    info "  ${OLD_CONFIG_DIR}/ (old, if migrated)"
+    echo
+    warn "To remove configuration, run:"
+    warn "  rm -r ${CONFIG_DIR}"
+    warn "  rm -r ${OLD_CONFIG_DIR}"
+fi
 echo

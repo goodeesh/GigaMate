@@ -1,0 +1,38 @@
+# Maintainer: adriansc <goodeesh@users.noreply.github.com>
+pkgbase=gigamate
+pkgname=('gigamate' 'gigamate-dkms')
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Gigabyte laptop management for Linux — keyboard RGB, fan monitoring, power profiles, and dGPU tuning"
+arch=('any')
+url='https://github.com/goodeesh/GigaMate'
+license=('MIT')
+source=("@SOURCE_URL@")
+sha256sums=('@SOURCE_SHA256@')
+
+build() {
+    "$srcdir/@SRC_SUBDIR@/packaging/stage.sh" "$pkgver" "@INSTALL_METHOD@" "$srcdir/stage"
+}
+
+package_gigamate() {
+    depends=('python' 'python-pyqt6' 'python-evdev' 'polkit' 'gigamate-dkms')
+    install=gigamate.install
+
+    mkdir -p "$pkgdir/usr"
+    cp -a "$srcdir/stage/app/usr/." "$pkgdir/usr/"
+    install -Dm644 "$srcdir/@SRC_SUBDIR@/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_gigamate-dkms() {
+    pkgdesc="GigaMate ACPI kernel driver (DKMS)"
+    depends=('dkms')
+    optdepends=(
+        'linux-headers: build module for default Arch kernel'
+        'linux-cachyos-headers: build module for CachyOS kernel'
+        'linux-lts-headers: build module for LTS kernel'
+    )
+
+    mkdir -p "$pkgdir/usr"
+    cp -a "$srcdir/stage/dkms/usr/." "$pkgdir/usr/"
+    install -Dm644 "$srcdir/@SRC_SUBDIR@/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

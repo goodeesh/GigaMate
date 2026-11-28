@@ -13,6 +13,8 @@ import glob
 import logging
 import os
 import select
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -31,7 +33,8 @@ except Exception:
 # schema in docs/PROFILE_SCHEMA.md.
 ACTION_MODE_SWITCH = "mode_switch"
 ACTION_OPEN_CENTER = "open_center"
-KNOWN_ACTIONS = (ACTION_MODE_SWITCH, ACTION_OPEN_CENTER)
+ACTION_BACKLIGHT_CYCLE = "backlight_cycle"
+KNOWN_ACTIONS = (ACTION_MODE_SWITCH, ACTION_OPEN_CENTER, ACTION_BACKLIGHT_CYCLE)
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,7 @@ class HotkeyListener:
         vid: Optional[int] = 0x0414,
         pid: Optional[int] = 0x8105,
         specs: Optional[List[HotkeySpec]] = None,
+        profile_hotkeys: Optional[Dict[str, dict]] = None,
         debounce_sec: float = 0.25,
     ) -> None:
         """Initialize hotkey listener.
@@ -202,13 +206,20 @@ class HotkeyListener:
             pid: Product ID.
             specs: Hotkey specs to watch (profile-driven). The listener
                 refuses to start when empty, so unmapped models are inert.
+            profile_hotkeys: Optional profile hotkey mapping; when ``specs`` is
+                omitted, merged with ``config.load().get("custom_hotkeys", {})``.
             debounce_sec: Minimum seconds between activations of one action.
         """
         self._on_mode_switch = on_mode_switch
         self._on_action = on_action
         self._vid = vid
         self._pid = pid
-        self._specs = list(specs) if specs else []
+        if specs is not None:
+            self._specs = list(specs)
+        elif profile_hotkeys is not None:
+            self._specs = resolve_hotkey_specs(profile_hotkeys)
+        else:
+            self._specs = []
         self._debounce_sec = debounce_sec
 
         self._running = False
@@ -366,3 +377,171 @@ class HotkeyListener:
                 cb()
             except Exception:
                 pass
+
+
+DEFAULT_GIGABYTE_HOTKEYS: Dict[str, dict] = {
+    "mode_switch": {
+        "interface": 2,
+        "report_id": 4,
+        "payload": "000084",
+        "key_name": "Mode",
+    },
+    "open_center": {
+        "interface": 2,
+        "report_id": 4,
+        "payload": "000091",
+        "key_name": "GigaMate",
+    },
+    "backlight_cycle": {
+        "interface": 2,
+        "report_id": 4,
+        "payload": "01",
+        "key_name": "Keyboard Backlight",
+    },
+}
+
+
+def resolve_hotkey_specs(
+    profile_hotkeys: Optional[Dict[str, dict]] = None,
+    custom_hotkeys: Optional[Dict[str, dict]] = None,
+    cfg: Optional[Dict] = None,
+) -> List[HotkeySpec]:
+    """Resolve active hotkey specs with ``custom_hotkeys`` taking precedence."""
+    if profile_hotkeys is None:
+        profile_hotkeys = DEFAULT_GIGABYTE_HOTKEYS
+    if custom_hotkeys is None:
+        if cfg is None:
+            from . import config
+            cfg = config.load()
+        custom_hotkeys = (cfg or {}).get("custom_hotkeys", {}) or {}
+    return merge_hotkey_specs(custom_hotkeys, profile_hotkeys)
+
+
+def capture_hardware_hotkey(
+    timeout_sec: float = 5.0,
+    vid: Optional[int] = None,
+    pid: Optional[int] = None,
+) -> Optional[dict]:
+    """Capture the next non-empty hardware hotkey HID report."""
+    targets = list_hotkey_hidraw(vid, pid)
+    if not targets:
+        return None
+
+    fds: Dict[int, int] = {}
+    try:
+        for iface, path in targets:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            fds[fd] = iface
+
+        if not fds:
+            return None
+
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            readable, _, _ = select.select(list(fds.keys()), [], [], remaining)
+            for fd in readable:
+                try:
+                    data = os.read(fd, 64)
+                except OSError:
+                    continue
+                if len(data) >= 2 and any(b != 0 for b in data[1:]):
+                    iface = fds[fd]
+                    payload_bytes = bytes(data[1:])
+                    # Gigabyte MCU cycles 04 01 {00,18,20,32} 00 on Fn+Space;
+                    # normalize to prefix "01" so every press matches.
+                    if (
+                        iface == 2
+                        and data[0] == 4
+                        and len(payload_bytes) == 3
+                        and payload_bytes[0] == 0x01
+                        and payload_bytes[2] == 0x00
+                    ):
+                        payload_hex = "01"
+                    else:
+                        payload_hex = payload_bytes.hex()
+                    return {
+                        "interface": iface,
+                        "report_id": data[0],
+                        "payload": payload_hex,
+                        "key_name": f"HID iface {iface} (0x{data[0]:02X})",
+                    }
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def desktop_shortcut_command(action: str) -> str:
+    """Return the CLI command string for a desktop shortcut action."""
+    commands = {
+        ACTION_OPEN_CENTER: "gigamate center",
+        ACTION_MODE_SWITCH: "gigamate profile next",
+        ACTION_BACKLIGHT_CYCLE: "gigamate rgb brightness-cycle",
+    }
+    if action not in commands:
+        raise ValueError(f"Unknown hotkey action: {action!r}")
+    return commands[action]
+
+
+def register_desktop_shortcut(action: str, shortcut: str) -> Tuple[bool, str]:
+    """Register a desktop environment global shortcut when supported."""
+    cmd = desktop_shortcut_command(action)
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+    kwrite = shutil.which("kwriteconfig6") or shutil.which("kwriteconfig5")
+    if kwrite and "KDE" in desktop:
+        try:
+            subprocess.run(
+                [
+                    kwrite,
+                    "--file",
+                    "kglobalshortcutsrc",
+                    "--group",
+                    f"gigamate-{action}.desktop",
+                    "--key",
+                    "_launch",
+                    f"{shortcut},none,{cmd}",
+                ],
+                check=True,
+            )
+            return True, f"Registered KDE shortcut {shortcut} for {cmd}"
+        except (subprocess.SubprocessError, OSError) as exc:
+            return False, str(exc)
+
+    gsettings = shutil.which("gsettings")
+    if gsettings and "GNOME" in desktop:
+        base_schema = "org.gnome.settings-daemon.plugins.media-keys"
+        binding_path = (
+            f"/org/gnome/settings-daemon/plugins/media-keys/"
+            f"custom-keybindings/gigamate-{action}/"
+        )
+        schema = f"{base_schema}.custom-keybinding:{binding_path}"
+        try:
+            subprocess.run(
+                [gsettings, "set", schema, "name", f"GigaMate {action}"],
+                check=True,
+            )
+            subprocess.run(
+                [gsettings, "set", schema, "command", cmd],
+                check=True,
+            )
+            subprocess.run(
+                [gsettings, "set", schema, "binding", shortcut],
+                check=True,
+            )
+            return True, f"Registered GNOME shortcut {shortcut} for {cmd}"
+        except (subprocess.SubprocessError, OSError) as exc:
+            return False, str(exc)
+
+    return (
+        False,
+        "Copy the command above and bind it in your desktop environment's Shortcuts settings.",
+    )

@@ -46,13 +46,14 @@ class GpuState:
     """
 
     present: bool = False
-    status: Optional[str] = None  # "active" or "suspended"
-    power_state: Optional[str] = None  # "D0", "D3hot", "D3cold", ...
+    status: Optional[str] = None  # "active", "suspended", or "gated_off"
+    power_state: Optional[str] = None  # "D0", "D3hot", "D3cold", "OFF", ...
     vendor: Optional[str] = None  # "nvidia", "amd", or None when absent
     dynamic_boost_supported: bool = False
     dynamic_boost_active: bool = False
     smartshift_supported: bool = False
     smartshift_bias: Optional[int] = None
+    gated_off: bool = False
 
 
 class NvidiaGpuMonitor:
@@ -95,14 +96,54 @@ class NvidiaGpuMonitor:
 
     @property
     def is_available(self) -> bool:
-        """Whether a discrete GPU is present."""
+        """Whether a discrete GPU is present on the PCI bus."""
+        if self._device is not None and not (self._device / "vendor").exists():
+            # Handle PCI hot-remove (dGPU gated off) cleanly.
+            self._device = None
+            self._vendor = None
         if self._device is None:
             self.detect()
         return self._device is not None
 
     def read_state(self) -> GpuState:
         """Read the current GPU power state (sysfs only, never wakes it)."""
+        if self._device is None and self._pci_sysfs is None:
+            try:
+                from .dgpu_gate import _BDF_RE, read_gate_state
+
+                gate_state = read_gate_state()
+                if gate_state.get("gated"):
+                    bdf = gate_state.get("bdf")
+                    if (
+                        isinstance(bdf, str)
+                        and _BDF_RE.fullmatch(bdf)
+                        and not (self._sysfs_root / bdf).is_dir()
+                    ):
+                        return GpuState(
+                            present=True,
+                            status="gated_off",
+                            power_state="OFF",
+                            vendor=gate_state.get("vendor") or "nvidia",
+                            gated_off=True,
+                        )
+            except Exception:
+                pass
         if not self.is_available:
+            if self._pci_sysfs is None:
+                try:
+                    from .dgpu_gate import read_gate_state
+
+                    gate_state = read_gate_state()
+                    if gate_state.get("gated"):
+                        return GpuState(
+                            present=True,
+                            status="gated_off",
+                            power_state="OFF",
+                            vendor=gate_state.get("vendor") or "nvidia",
+                            gated_off=True,
+                        )
+                except Exception:
+                    pass
             return GpuState(present=False)
 
         state = GpuState(present=True, vendor=self._vendor)
@@ -318,6 +359,16 @@ class NvidiaGpuMonitor:
                 "org.freedesktop.systemd1.Manager",
                 None,
             )
+            try:
+                proxy.call_sync(
+                    "ResetFailedUnit",
+                    GLib.Variant("(s)", ("nvidia-powerd.service",)),
+                    Gio.DBusCallFlags.NONE,
+                    500,
+                    None,
+                )
+            except Exception:
+                pass
             proxy.call_sync(
                 "StartUnit",
                 GLib.Variant("(ss)", ("nvidia-powerd.service", "replace")),
@@ -332,6 +383,12 @@ class NvidiaGpuMonitor:
         # 2. Fallback to systemctl start
         try:
             import subprocess
+            subprocess.run(
+                ["systemctl", "reset-failed", "nvidia-powerd.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
             res = subprocess.run(
                 ["systemctl", "start", "nvidia-powerd.service"],
                 stdout=subprocess.DEVNULL,
@@ -365,6 +422,14 @@ class NvidiaGpuMonitor:
 
     def sync_power(self, fan_profile_id: int) -> bool:
         """Apply GPU power tuning matching the selected fan profile."""
+        if self._pci_sysfs is None:
+            try:
+                from .dgpu_gate import is_gated_off
+
+                if is_gated_off():
+                    return True
+            except Exception:
+                pass
         if not self.is_available:
             return True
 
@@ -372,6 +437,13 @@ class NvidiaGpuMonitor:
         if self._vendor == "nvidia":
             # For Gaming (3) or Performance (2), ensure nvidia-powerd is running
             if fan_profile_id in (2, 3):
+                try:
+                    from . import dgpu_gate
+
+                    if dgpu_gate.is_gated_off() or dgpu_gate.should_pause_tuning():
+                        return True
+                except Exception:
+                    pass
                 if self._check_dynamic_boost_supported() and not self._check_dynamic_boost_active():
                     return self._start_nvidia_powerd()
             return True
@@ -402,6 +474,8 @@ def gpu_status_text(state: GpuState) -> str:
     """Human-readable GPU power status suitable for UI display."""
     if not state.present:
         return "Not present"
+    if state.gated_off or state.status == "gated_off":
+        return "Off (gated)"
     status = state.status
     power = state.power_state
     if status == "suspended":
@@ -416,9 +490,11 @@ def gpu_status_text(state: GpuState) -> str:
 
 
 def gpu_short_status_text(state: GpuState) -> str:
-    """Return a short status label: 'Asleep', 'Awake', 'Unknown', or 'Not present'."""
+    """Return a short status label: 'Off (gated)', 'Asleep', 'Awake', 'Unknown', or 'Not present'."""
     if not state.present:
         return "Not present"
+    if state.gated_off or state.status == "gated_off":
+        return "Off (gated)"
     status = state.status or ""
     if status == "suspended":
         return "Asleep"
@@ -438,9 +514,9 @@ GPU_ICON_KEYS = {
 
 
 def gpu_icon_key(state: GpuState) -> str:
-    """Map a GpuState to a tray icon key (plain when not awake/absent)."""
+    """Map a GpuState to a tray icon key (plain when not awake/absent/gated)."""
     try:
-        if not state.present or state.status != "active" or not state.vendor:
+        if not state.present or state.gated_off or state.status != "active" or not state.vendor:
             return "gigamate"
         return GPU_ICON_KEYS.get((state.vendor, True), "gigamate")
     except Exception:

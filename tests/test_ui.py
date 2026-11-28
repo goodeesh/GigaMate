@@ -22,12 +22,8 @@ def qapp():
 
 
 def _import_tray_app():
-    """Import the GTK tray app, skipping if the GUI stack is unavailable."""
-    pytest.importorskip("gi")
-    try:
-        from gigamate.tray import GigaMateTrayApp
-    except Exception as exc:  # gi.require_version / typelib failures
-        pytest.skip(f"GTK/AppIndicator stack unavailable: {exc}")
+    """Import the PyQt6 tray app."""
+    from gigamate.tray import GigaMateTrayApp
     return GigaMateTrayApp
 
 
@@ -38,9 +34,10 @@ def isolate_config(tmp_path, monkeypatch):
     cfg_file = cfg_dir / "config.json"
     monkeypatch.setattr(config_mod, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(config_mod, "CONFIG_FILE", cfg_file)
-    # main_window/onboarding bound CONFIG_FILE at import; redirect them too.
+    # main_window/onboarding/daemon bound CONFIG_FILE at import; redirect them too.
     monkeypatch.setattr("gigamate.ui.main_window.CONFIG_FILE", cfg_file, raising=False)
     monkeypatch.setattr("gigamate.ui.onboarding.CONFIG_FILE", cfg_file, raising=False)
+    monkeypatch.setattr("gigamate.daemon.CONFIG_FILE", cfg_file, raising=False)
     # Start each test with DEFAULT_CONFIG
     config_mod.save(dict(config_mod.DEFAULT_CONFIG))
 
@@ -50,7 +47,7 @@ def test_main_window_creation(qapp):
 
     win = MainWindow()
     assert win.windowTitle() == "GigaMate Center"
-    assert win.stack.count() == 5
+    assert win.stack.count() == 6
 
     # Check navigation switches pages
     win.btn_battery.click()
@@ -62,8 +59,11 @@ def test_main_window_creation(qapp):
     win.btn_gpu.click()
     assert win.stack.currentIndex() == 3
 
-    win.btn_settings.click()
+    win.btn_automation.click()
     assert win.stack.currentIndex() == 4
+
+    win.btn_settings.click()
+    assert win.stack.currentIndex() == 5
 
     win.btn_dashboard.click()
     assert win.stack.currentIndex() == 0
@@ -567,7 +567,7 @@ def test_every_page_fits_the_narrowest_window(qapp):
         available = win.stack.width()
         assert available > 0
 
-        for idx, name in enumerate(("dashboard", "battery", "rgb", "gpu", "settings")):
+        for idx, name in enumerate(("dashboard", "battery", "rgb", "gpu", "automation", "settings")):
             win.stack.setCurrentIndex(idx)
             qapp.processEvents()
             area = win.stack.currentWidget()
@@ -654,7 +654,7 @@ def test_gpu_sliders_do_not_eat_the_scroll_wheel(qapp):
 
     page = gp.GpuPage()
     page.uv_slider.setValue(120)
-    for slider in (page.uv_slider, page.max_slider, page.mem_slider):
+    for slider in (page.uv_slider, page.max_slider, page.mem_slider, page.usbc_split_slider, page.usbc_buffer_slider):
         before = slider.value()
         event = QWheelEvent(
             QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
@@ -668,16 +668,15 @@ def test_gpu_sliders_do_not_eat_the_scroll_wheel(qapp):
 def test_dashboard_profile_selection(qapp):
     from unittest.mock import patch
     from gigamate.ui.main_window import MainWindow
-    from gigamate.profiles import AcpiConfig, DeviceProfile, ModelMatch
 
-    prof = DeviceProfile(
-        vid=0x0414, pid=0x8105, name="Test",
-        acpi=AcpiConfig(has_power_profiles=True, profiles={
-            "0": {"name": "Quiet"}, "1": {"name": "Balanced"},
-            "2": {"name": "Performance"}, "3": {"name": "Gaming"}}))
-    match = ModelMatch(prof, "builtin-usb", False)
+    profiles = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
 
-    with patch("gigamate.ui.pages.dashboard_page.resolve_model", return_value=match):
+    with patch("gigamate.ui.pages.dashboard_page.discover_acpi_profiles", return_value=profiles):
         win = MainWindow()
         dash = win.page_dashboard
 
@@ -699,19 +698,12 @@ def test_rgb_page_color_highlighting(qapp):
     rgb = win.page_rgb
 
     # Select Red
-    rgb._set_colour("red")
-    assert "border: 2px solid #fc8181" in rgb.color_buttons["red"].styleSheet()
-    assert "✓" in rgb.color_buttons["red"].text()
-    assert "border: 1px solid #2f3a4e" in rgb.color_buttons["blue"].styleSheet()
-    assert "✓" not in rgb.color_buttons["blue"].text()
+    rgb.hex_input.setText("#ff0000")
+    assert rgb.hex_input.text().upper() == "#FF0000"
 
     # Select Blue
-    rgb._set_colour("blue")
-    assert "border: 2px solid #63b3ed" in rgb.color_buttons["blue"].styleSheet()
-    assert "✓" in rgb.color_buttons["blue"].text()
-    # Red must be reset!
-    assert "border: 1px solid #2f3a4e" in rgb.color_buttons["red"].styleSheet()
-    assert "✓" not in rgb.color_buttons["red"].text()
+    rgb.hex_input.setText("#0000ff")
+    assert rgb.hex_input.text().upper() == "#0000FF"
 
 
 def test_single_instance_ipc(qapp):
@@ -751,9 +743,11 @@ def test_battery_page(qapp):
 
 def test_battery_page_topup_and_calibration(qapp):
     from gigamate.ui.pages.battery_page import BatteryPage
+    from gigamate.ui.pages.automation_page import AutomationPage
     from gigamate.config import load as load_config, save as save_config
 
     page = BatteryPage()
+    auto_page = AutomationPage()
 
     # Verify topup button exists
     assert page.topup_btn is not None
@@ -770,58 +764,33 @@ def test_battery_page_topup_and_calibration(qapp):
             page._on_topup_clicked()
             mock_start.assert_called_once()
 
-    # Auto calibration checkbox
-    assert page.auto_cal_chk is not None
-    assert page.auto_cal_chk.isChecked() is False  # Opt-in default False
+    # Auto calibration checkbox (moved to AutomationPage)
+    assert auto_page.auto_cal_chk is not None
+    assert auto_page.auto_cal_chk.switch.isChecked() is False  # Opt-in default False
 
     # Check auto calibration
-    page.auto_cal_chk.setChecked(True)
+    auto_page.auto_cal_chk.switch.setChecked(True)
     cfg = load_config()
     assert cfg.get("charge_calibration_auto") is True
-    assert page.interval_row_widget.isEnabled() is True
+    assert auto_page.interval_row_widget.isEnabled() is True
 
     # Interval buttons
-    assert 30 in page.interval_buttons
-    assert 14 in page.interval_buttons
-    assert 60 in page.interval_buttons
+    assert 30 in auto_page.interval_buttons
+    assert 14 in auto_page.interval_buttons
+    assert 60 in auto_page.interval_buttons
 
-    page.interval_buttons[14].click()
+    auto_page.interval_buttons[14].click()
     cfg = load_config()
     assert cfg.get("charge_calibration_interval_days") == 14
-    assert page.interval_buttons[14].isChecked() is True
+    assert auto_page.interval_buttons[14].isChecked() is True
 
     # Reload from config with topup active
     cfg["charge_topup_active"] = True
     save_config(cfg)
     page.reload_from_config()
     assert "Cancel 100% Top-Up" in page.topup_btn.text()
-    assert "Top-Up Active" in page.topup_status_label.text()
+    assert "Top-Up active" in page.topup_status_label.text()
 
-
-
-def test_rgb_page_all_profile_colours(qapp):
-    from gigamate.ui.main_window import MainWindow
-
-    win = MainWindow()
-    rgb = win.page_rgb
-
-    # All profile colours must exist as interactive buttons
-    expected_colours = [
-        "red", "green", "yellow", "blue", "orange", "dark_yellow",
-        "purple", "light_purple", "white", "light_blue", "blush_pink"
-    ]
-    for col in expected_colours:
-        assert col in rgb.color_buttons, f"Colour {col} missing from RGB page!"
-
-    # Test selecting yellow (previously missing from Center)
-    rgb._set_colour("yellow")
-    assert "border: 2px solid #f6e05e" in rgb.color_buttons["yellow"].styleSheet()
-    assert "Active: Yellow" in rgb.active_color_badge.text()
-
-    # Test selecting dark_yellow
-    rgb._set_colour("dark_yellow")
-    assert "border: 2px solid #ecc94b" in rgb.color_buttons["dark_yellow"].styleSheet()
-    assert "Active: Dark Yellow" in rgb.active_color_badge.text()
 
 
 def test_rgb_page_reload_from_config(qapp):
@@ -843,9 +812,10 @@ def test_rgb_page_reload_from_config(qapp):
     win.sync_all_from_config()
 
     assert "Active: Light Blue" in rgb.active_color_badge.text()
-    assert rgb.brightness_buttons[1].isChecked()
-    # 5m is now a canonical step, so it is preserved exactly.
-    assert rgb.idle_combo.currentData() == 300
+    assert rgb.brightness_slider.value() >= 5
+    # 5m is now a canonical step, so it is preserved exactly (idle_combo moved to AutomationPage).
+    win.page_automation.reload_from_config()
+    assert win.page_automation.idle_combo.currentData() == 300
 
 
 def test_rgb_page_idle_options_match_tray_steps(qapp):
@@ -854,56 +824,42 @@ def test_rgb_page_idle_options_match_tray_steps(qapp):
     from gigamate.idle import IDLE_TIMEOUT_STEPS
 
     win = MainWindow()
-    rgb = win.page_rgb
+    auto_page = win.page_automation
 
     canonical = [sec for sec, _ in IDLE_TIMEOUT_STEPS]
-    assert [sec for _, sec in rgb.idle_options] == canonical
+    assert [sec for sec, _ in auto_page.idle_options] == canonical
     assert 15 not in canonical
 
 
 def test_tray_sync_from_external_config():
-    from unittest.mock import MagicMock, patch
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "white"
-        tray._current_brightness = 2
-        tray._current_acpi_profile = 1
-        tray._idle_enabled = True
-        tray._idle_timeout = 60
-        tray._startup_apply = True
-        tray._sync_system_power = False
-        tray._building = False
-        tray._last_config_mtime = 0.0
-        tray._colour_items = {"red": MagicMock(), "white": MagicMock()}
-        tray._brightness_items = {1: MagicMock(), 2: MagicMock()}
-        tray._profile_items = {3: MagicMock()}
-        tray._idle_timeout_items = {}
-        tray._startup_item = MagicMock()
-        tray._sync_power_item = MagicMock()
-        tray._idle_parent_item = MagicMock()
-        tray._init_idle = MagicMock()
+    d = GigaMateDaemon()
+    d._current_acpi_profile = 1
+    d._idle_enabled = False
+    d._idle_timeout = 60
+    d._last_config_mtime = 0.0
+    d._init_idle = MagicMock()
 
-        with patch("gigamate.tray.load_config", return_value={
-            "colour": "red",
-            "brightness": 1,
-            "acpi_profile": 3,
-            "idle_off_enabled": True,
-            "idle_timeout_sec": 60,
-            "startup_apply": False,
-            "sync_system_power": True,
-        }), patch.object(tray, "_get_config_mtime", return_value=12345.0):
-            tray._sync_from_external_config()
-
-            assert tray._current_colour == "red"
-            assert tray._current_brightness == 1
-            assert tray._current_acpi_profile == 3
-            assert tray._startup_apply is False
-            assert tray._sync_system_power is True
-            tray._colour_items["red"].set_active.assert_called_with(True)
-            tray._brightness_items[1].set_active.assert_called_with(True)
-            tray._profile_items[3].set_active.assert_called_with(True)
+    with patch("gigamate.daemon.load_config", return_value={
+        "colour": "red",
+        "brightness": 1,
+        "brightness_pct": 50,
+        "rgb_enabled": True,
+        "acpi_profile": 3,
+        "idle_off_enabled": True,
+        "idle_timeout_sec": 30,
+        "startup_apply": False,
+        "sync_system_power": True,
+    }), patch.object(d, "_get_config_mtime", return_value=12345.0):
+        assert d.sync_from_external_config() is True
+        assert d._current_acpi_profile == 3
+        assert d._idle_enabled is True
+        assert d._idle_timeout == 30
+        d._init_idle.assert_called_once()
+        state = d.get_menu_state()
+        assert state["active_profile"] == 3
+        assert state["backlight_pct"] == 50
 
 
 def test_single_instance_quit_ipc(qapp):
@@ -952,26 +908,21 @@ def test_ensure_tray_running():
         assert fake_run.called_start is True
 
 
-def test_tray_on_quit_signals_center():
+def test_tray_on_quit_signals_center(qapp):
     GigaMateTrayApp = _import_tray_app()
-    from unittest.mock import patch, MagicMock
 
-    with patch("gigamate.tray.load_config", return_value={}), \
-         patch("gigamate.tray.get_keyboard", return_value=None), \
-         patch("gi.repository.AppIndicator3.Indicator.new_with_path", return_value=MagicMock()):
-        tray = GigaMateTrayApp()
+    tray = GigaMateTrayApp(start_daemon=False)
 
-        # Mock socket
-        mock_socket_cls = MagicMock()
-        mock_socket_instance = MagicMock()
-        mock_socket_cls.return_value.__enter__.return_value = mock_socket_instance
+    mock_socket_cls = MagicMock()
+    mock_socket_instance = MagicMock()
+    mock_socket_cls.return_value.__enter__.return_value = mock_socket_instance
 
-        with patch("os.path.exists", return_value=True), \
-             patch("socket.socket", mock_socket_cls), \
-             patch("gi.repository.Gtk.main_quit"):
-            tray._on_quit()
-            assert mock_socket_instance.sendall.called
-            assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
+    with patch("os.path.exists", return_value=True), \
+         patch("gigamate.daemon.socket.socket", mock_socket_cls), \
+         patch("gigamate.tray.QApplication.instance", return_value=MagicMock()):
+        tray.quit()
+        assert mock_socket_instance.sendall.called
+        assert b"QUIT\n" in mock_socket_instance.sendall.call_args[0][0]
 
 
 def test_battery_page_reload_from_config(qapp):
@@ -989,69 +940,53 @@ def test_battery_page_reload_from_config(qapp):
 
 
 def test_tray_save_config_preserves_memory_keys():
-    GigaMateTrayApp = _import_tray_app()
-    from unittest.mock import patch, MagicMock
+    """Daemon backlight writes must never clobber unrelated keys like charge_limit."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "red"
-        tray._current_brightness = 2
-        tray._startup_apply = True
-        tray._sync_system_power = True
-        tray._idle_enabled = True
-        tray._idle_timeout = 60
-        tray._current_acpi_profile = 2
-        tray._config = {"charge_limit": 65, "charge_limit_enabled": True}
-        tray._battery_dirty = True  # simulate a tray-originated battery change
-        tray._get_config_mtime = MagicMock(return_value=100.0)
+    update_config(lambda c: {**c, "charge_limit": 65, "charge_limit_enabled": True, "acpi_profile": 2})
+    d = GigaMateDaemon()
+    d.set_backlight_pct(50)
 
-        captured = {}
-
-        def fake_update(mutate):
-            cfg = mutate({"charge_limit": 80})
-            captured.update(cfg)
-            return cfg
-
-        with patch("gigamate.tray.update_config", side_effect=fake_update) as mock_update:
-            tray._save_config()
-
-            mock_update.assert_called_once()
-            # Must preserve the charge limit set in memory (65), not revert to 80
-            assert captured["charge_limit"] == 65
-            assert captured["acpi_profile"] == 2
-            assert captured["colour"] == "red"
+    cfg = load_config()
+    assert cfg["charge_limit"] == 65
+    assert cfg["charge_limit_enabled"] is True
+    assert cfg["acpi_profile"] == 2
+    assert cfg["brightness_pct"] == 50
+    assert cfg["rgb_enabled"] is True
 
 
 def test_settings_page(qapp):
+    from gigamate.ui.pages.automation_page import AutomationPage
     from gigamate.ui.pages.settings_page import SettingsPage
     from gigamate.config import load as load_config, save as save_config
 
-    page = SettingsPage()
-    assert page.chk_startup_apply is not None
-    assert page.chk_sync_power is not None
-    assert page.chk_dgpu_auto is not None
+    auto_page = AutomationPage()
+    assert auto_page.chk_startup_apply is not None
+    assert auto_page.chk_sync_power is not None
+    assert auto_page.chk_dgpu_auto is not None
 
     # Test toggling startup apply
-    page.chk_startup_apply.setChecked(False)
+    auto_page.chk_startup_apply.switch.setChecked(False)
     assert load_config()["startup_apply"] is False
 
-    page.chk_startup_apply.setChecked(True)
+    auto_page.chk_startup_apply.switch.setChecked(True)
     assert load_config()["startup_apply"] is True
 
     # Test toggling sync power
-    page.chk_sync_power.setChecked(False)
+    auto_page.chk_sync_power.switch.setChecked(False)
     assert load_config()["sync_system_power"] is False
 
-    page.chk_sync_power.setChecked(True)
+    auto_page.chk_sync_power.switch.setChecked(True)
     assert load_config()["sync_system_power"] is True
 
     # Test toggling dGPU auto-apply (patched: no real GPU/helper access).
     with patch("gigamate.dgpu_tune.find_nvidia_bdf", return_value=None), \
          patch("gigamate.dgpu_tune._write_state_file"):
-        page.chk_dgpu_auto.setChecked(False)
+        auto_page.chk_dgpu_auto.switch.setChecked(False)
         assert load_config()["dgpu_undervolt_auto"] is False
 
-        page.chk_dgpu_auto.setChecked(True)
+        auto_page.chk_dgpu_auto.switch.setChecked(True)
         assert load_config()["dgpu_undervolt_auto"] is True
 
     # Test external config reload
@@ -1061,46 +996,65 @@ def test_settings_page(qapp):
     cfg["dgpu_undervolt_auto"] = False
     save_config(cfg)
 
-    page.reload_from_config()
-    assert page.chk_startup_apply.isChecked() is False
-    assert page.chk_sync_power.isChecked() is False
-    assert page.chk_dgpu_auto.isChecked() is False
+    auto_page.reload_from_config()
+    assert auto_page.chk_startup_apply.switch.isChecked() is False
+    assert auto_page.chk_sync_power.switch.isChecked() is False
+    assert auto_page.chk_dgpu_auto.switch.isChecked() is False
+
+    # Test built-in keyboard & touchpad only idle toggle
+    auto_page.idle_combo.setCurrentIndex(1)  # enable idle timeout (10s)
+    assert auto_page.internal_only_row.isEnabled() is True
+    auto_page.internal_only_row.switch.setChecked(True)
+    assert load_config()["idle_internal_only"] is True
+    auto_page.internal_only_row.switch.setChecked(False)
+    assert load_config()["idle_internal_only"] is False
+
+    # Test SettingsPage controls
+    settings_page = SettingsPage()
+    assert settings_page._profile_enable_checks is not None
+    assert settings_page.btn_restart_service is not None
+    assert settings_page.btn_copy_doctor is not None
+    assert settings_page.btn_check_updates is not None
+
+    settings_page._service_status_cache = (9999999999.0, "active")
+    with patch("gigamate.ui.pages.settings_page.QTimer.singleShot"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        settings_page.btn_restart_service.click()
+        settings_page._finish_restart_service()
+    assert settings_page._service_status_cache != (9999999999.0, "active")
 
 
 def test_tray_self_heals_acpi_after_repair():
-    """The tray must recover its ACPI status once the driver is back."""
-    GigaMateTrayApp = _import_tray_app()
+    """The daemon must recover its ACPI status once the driver is back."""
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = None
-        tray._acpi_caps = None
-        tray._acpi_retry_at = 0.0
-        tray._last_status_text = "Status: reading..."
-        mock_ctrl = MagicMock()
-        mock_ctrl.available = True
-        with patch("gigamate.tray.AcpiController", return_value=mock_ctrl), \
-             patch.object(tray, "_rebuild_menu") as mock_rebuild:
-            tray._ensure_acpi_controller()
-        assert tray._acpi_controller is mock_ctrl
-        assert tray._acpi_caps is mock_ctrl.capabilities
-        assert tray._last_status_text is None
-        assert mock_rebuild.called
+    d = GigaMateDaemon()
+    d._acpi_controller = None
+    d._acpi_caps = None
+    d._acpi_retry_at = 0.0
+    d._last_status_text = "Status: reading..."
+    mock_ctrl = MagicMock()
+    mock_ctrl.available = True
+    with patch("gigamate.daemon.AcpiController", return_value=mock_ctrl):
+        healed = d._ensure_acpi_controller()
+    assert healed is True
+    assert d._acpi_controller is mock_ctrl
+    assert d._acpi_caps is mock_ctrl.capabilities
+    assert d._last_status_text == ""
 
 
 def test_tray_self_heal_is_throttled():
     """Re-probing the ACPI backend must not spam AcpiController() every tick."""
-    GigaMateTrayApp = _import_tray_app()
+    from gigamate.daemon import GigaMateDaemon
 
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._acpi_controller = None
-        tray._acpi_retry_at = 0.0
-        with patch("gigamate.tray.AcpiController", return_value=MagicMock(available=False)) as mock_cls:
-            tray._ensure_acpi_controller()  # first attempt
-            tray._acpi_retry_at = 999999.0  # now inside the throttle window
-            tray._ensure_acpi_controller()  # second attempt must be skipped
-            assert mock_cls.call_count == 1
+    d = GigaMateDaemon()
+    d._acpi_controller = None
+    d._acpi_retry_at = 0.0
+    with patch("gigamate.daemon.AcpiController", return_value=MagicMock(available=False)) as mock_cls:
+        d._ensure_acpi_controller()  # first attempt
+        d._acpi_retry_at = 9999999999.0  # now inside the throttle window
+        d._ensure_acpi_controller()  # second attempt must be skipped
+        assert mock_cls.call_count == 1
 
 
 def test_settings_page_has_repair_driver_button(qapp):
@@ -1147,6 +1101,7 @@ def test_battery_page_when_battery_missing(qapp):
         page = BatteryPage()
         page.show()
         qapp.processEvents()
+        assert page.battery_tank.isVisible() is False
         assert page.progress_bar.isVisible() is False
         assert page.slider_container.isVisible() is False
         assert page.unsupported_notice.isVisible() is True
@@ -1169,6 +1124,7 @@ def test_battery_page_when_charge_limit_unsupported(qapp):
         page = BatteryPage()
         page.show()
         qapp.processEvents()
+        assert page.battery_tank.isVisible() is True
         assert page.progress_bar.isVisible() is True
         assert page.slider_container.isVisible() is False
         assert page.unsupported_notice.isVisible() is True
@@ -1188,8 +1144,6 @@ def test_dashboard_page_when_acpi_driver_missing(qapp):
         acpi_driver_loaded=False,
         acpi_driver_missing=True,
         has_power_profiles=False,
-        profile_verified=False,
-        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -1197,8 +1151,7 @@ def test_dashboard_page_when_acpi_driver_missing(qapp):
         charge_limit_supported=True,
         battery_name="BAT0",
         keyboard_detected=True,
-        keyboard_profile_loaded=True,
-        keyboard_profile_name="Aero 16",
+        keyboard_lamparray_supported=True,
         keyboard_vid_pid=(0x0414, 0x8105),
         has_dgpu=True,
         gpu_name="NVIDIA GPU",
@@ -1233,8 +1186,6 @@ def test_dashboard_page_when_non_gigabyte(qapp):
         acpi_driver_loaded=False,
         acpi_driver_missing=False,
         has_power_profiles=False,
-        profile_verified=False,
-        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -1242,8 +1193,6 @@ def test_dashboard_page_when_non_gigabyte(qapp):
         charge_limit_supported=False,
         battery_name="BAT0",
         keyboard_detected=False,
-        keyboard_profile_loaded=False,
-        keyboard_profile_name=None,
         keyboard_vid_pid=None,
         has_dgpu=True,
         gpu_name="NVIDIA GPU",
@@ -1300,31 +1249,14 @@ def test_dashboard_page_single_fan(qapp):
         assert title.text() == "System Fan Speed"
 
 
-def _experimental_match():
-    from gigamate.profiles import AcpiConfig, DeviceProfile, DmiConfig, ModelMatch
-
-    prof = DeviceProfile(
-        name="Gigabyte GAMING A16 / A18 (family)",
-        dmi=DmiConfig(product_families=["GIGABYTE GAMING"]),
-        acpi=AcpiConfig(
-            has_fan_control=True, has_temperature=True, has_power_profiles=True,
-            confidence="experimental", fan_count=2,
-            profiles={"0": {"name": "Eco"}, "1": {"name": "Balanced"},
-                      "2": {"name": "Boost"}},
-        ),
-    )
-    return ModelMatch(prof, "builtin-dmi", True)
-
-
-def _dashboard_with_match(caps, match, cfg, qapp):
+def _dashboard_with_profiles(caps, profiles, qapp):
     from unittest.mock import MagicMock, patch
     from gigamate.ui.pages.dashboard_page import DashboardPage
     from gigamate.acpi import FanState
     from gigamate.gpu import GpuState
 
     with patch("gigamate.ui.pages.dashboard_page.AcpiController") as c_cls, \
-         patch("gigamate.ui.pages.dashboard_page.resolve_model", return_value=match), \
-         patch("gigamate.ui.pages.dashboard_page.load_config", return_value=cfg), \
+         patch("gigamate.ui.pages.dashboard_page.discover_acpi_profiles", return_value=profiles), \
          patch("gigamate.ui.pages.dashboard_page.get_gpu_state",
                return_value=GpuState(present=False)):
         c = MagicMock()
@@ -1336,31 +1268,33 @@ def _dashboard_with_match(caps, match, cfg, qapp):
         page = DashboardPage()
         page.show()
         qapp.processEvents()
-    return page
+    return page, c
 
 
-def test_dashboard_experimental_hidden_until_consent(qapp):
+def test_dashboard_discovered_acpi_profiles(qapp):
     from gigamate.acpi import AcpiCapabilities
 
     caps = AcpiCapabilities(has_temperature=True, has_fan_rpm=True,
                             has_fan_duty=True, fan_count=2)
-    page = _dashboard_with_match(caps, _experimental_match(),
-                                 {"experimental_profiles_enabled": False}, qapp)
-    # Buttons are generated from the model's 3-entry set and disabled.
+    profiles = {0: {"name": "Eco"}, 1: {"name": "Balanced"}, 2: {"name": "Boost"}}
+    page, ctrl = _dashboard_with_profiles(caps, profiles, qapp)
     assert sorted(page._profile_buttons.keys()) == [0, 1, 2]
-    assert all(not b.isEnabled() for b in page._profile_buttons.values())
-    assert page.btn_enable_experimental.isVisible() is True
+    assert all(b.isEnabled() for b in page._profile_buttons.values())
+    assert page.acpi_warning_box.isVisible() is False
+    page._profile_buttons[1].click()
+    ctrl.set_profile.assert_called_once_with(1)
 
 
-def test_dashboard_experimental_enabled_after_consent(qapp):
+def test_dashboard_acpi_available_without_profiles_shows_notice(qapp):
     from gigamate.acpi import AcpiCapabilities
 
     caps = AcpiCapabilities(has_temperature=True, has_fan_rpm=True,
-                            has_fan_duty=True, fan_count=2)
-    page = _dashboard_with_match(caps, _experimental_match(),
-                                 {"experimental_profiles_enabled": True}, qapp)
-    assert all(b.isEnabled() for b in page._profile_buttons.values())
-    assert page.btn_enable_experimental.isVisible() is False
+                            has_fan_duty=True, fan_count=2, discovered_profiles={})
+    page, _ctrl = _dashboard_with_profiles(caps, {}, qapp)
+    assert page._profile_buttons == {}
+    assert page.acpi_warning_box.isVisible() is True
+    assert "No Power Profiles Exposed" in page.wb_title.text()
+    assert "WMBD(0xED)" in page.wb_desc.text()
 
 
 def test_rgb_page_when_keyboard_not_detected(qapp):
@@ -1376,8 +1310,6 @@ def test_rgb_page_when_keyboard_not_detected(qapp):
         acpi_driver_loaded=False,
         acpi_driver_missing=False,
         has_power_profiles=False,
-        profile_verified=False,
-        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=0,
@@ -1385,8 +1317,6 @@ def test_rgb_page_when_keyboard_not_detected(qapp):
         charge_limit_supported=False,
         battery_name="None",
         keyboard_detected=False,
-        keyboard_profile_loaded=False,
-        keyboard_profile_name=None,
         keyboard_vid_pid=None,
         has_dgpu=False,
         gpu_name="Integrated Only",
@@ -1398,48 +1328,7 @@ def test_rgb_page_when_keyboard_not_detected(qapp):
         qapp.processEvents()
         assert page.palette_container.isVisible() is False
         assert page.kbd_unsupported_notice.isVisible() is True
-        assert page.kbd_uncalibrated_notice.isVisible() is False
         assert page.opts_card.isVisible() is False
-
-
-def test_rgb_page_when_keyboard_uncalibrated(qapp):
-    """Verify RgbPage shows calibration warning when Gigabyte keyboard has no profile."""
-    from gigamate.ui.pages.rgb_page import RgbPage
-    from gigamate.capabilities import HardwareCapabilities
-
-    mock_caps = HardwareCapabilities(
-        product_name="Gigabyte Aorus 15",
-        is_gigabyte_laptop=True,
-        acpi_available=True,
-        acpi_backend="module",
-        acpi_driver_loaded=True,
-        acpi_driver_missing=False,
-        has_power_profiles=True,
-        profile_verified=False,
-        profile_experimental=False,
-        has_temperature=True,
-        has_fan_rpm=True,
-        fan_count=2,
-        battery_present=True,
-        charge_limit_supported=True,
-        battery_name="BAT0",
-        keyboard_detected=True,
-        keyboard_profile_loaded=False,
-        keyboard_profile_name=None,
-        keyboard_vid_pid=(0x0414, 0x8200),
-        has_dgpu=True,
-        gpu_name="NVIDIA GPU",
-    )
-
-    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps):
-        page = RgbPage()
-        page.show()
-        qapp.processEvents()
-        assert page.palette_container.isVisible() is False
-        assert page.kbd_unsupported_notice.isVisible() is False
-        assert page.kbd_uncalibrated_notice.isVisible() is True
-        assert "0x0414" in page.uncalibrated_title.text()
-        assert "0x8200" in page.uncalibrated_title.text()
 
 
 def test_main_window_construction_does_not_write_hardware(qapp):
@@ -1497,8 +1386,6 @@ def _onboarding_caps():
         acpi_driver_loaded=False,
         acpi_driver_missing=True,
         has_power_profiles=False,
-        profile_verified=False,
-        profile_experimental=False,
         has_temperature=False,
         has_fan_rpm=False,
         fan_count=2,
@@ -1506,8 +1393,7 @@ def _onboarding_caps():
         charge_limit_supported=True,
         battery_name="BAT0",
         keyboard_detected=True,
-        keyboard_profile_loaded=True,
-        keyboard_profile_name="X",
+        keyboard_lamparray_supported=True,
         keyboard_vid_pid=(0x0414, 0x8105),
         has_dgpu=True,
         gpu_name="NVIDIA GPU",
@@ -1581,75 +1467,36 @@ def test_run_gui_refuses_root(qapp):
 
 
 def test_tray_save_config_does_not_clobber_when_clean():
-    """A tray save with no tray-originated battery change must not write it."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._current_colour = "blue"
-        tray._current_brightness = 2
-        tray._startup_apply = False
-        tray._sync_system_power = False
-        tray._idle_enabled = False
-        tray._idle_timeout = 60
-        tray._current_acpi_profile = None
-        tray._config = {"colour": "blue", "charge_limit": 65, "charge_limit_enabled": True}
-        tray._battery_dirty = False
-        tray._get_config_mtime = MagicMock(return_value=100.0)
+    """Daemon backlight off must not clobber charge_limit or charge_limit_enabled."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.daemon import GigaMateDaemon
 
-        captured = {}
+    update_config(lambda c: {**c, "charge_limit": 80, "charge_limit_enabled": False})
+    d = GigaMateDaemon()
+    d.set_backlight_pct(0)
 
-        def fake_update(mutate):
-            cfg = mutate({"charge_limit": 80, "charge_limit_enabled": False})
-            captured.update(cfg)
-            return cfg
-
-        with patch("gigamate.tray.update_config", side_effect=fake_update):
-            tray._save_config()
-
-        assert captured["charge_limit"] == 80
-        assert captured["charge_limit_enabled"] is False
+    cfg = load_config()
+    assert cfg["charge_limit"] == 80
+    assert cfg["charge_limit_enabled"] is False
+    assert cfg["rgb_enabled"] is False
 
 
 def test_tray_battery_topup_menu_and_actions():
-    """Tray battery section renders top-up button and toggles state."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._menu = MagicMock()
-        tray._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": False}
-        tray._rebuild_menu = MagicMock()
+    """Daemon status_text reflects active 100% Top-Up state."""
+    from gigamate.battery import BatteryInfo
+    from gigamate.daemon import GigaMateDaemon
 
-        mgr = MagicMock()
-        mgr.is_available = True
-        mgr.is_charge_limit_supported.return_value = True
-        mgr.set_charge_limit.return_value = True
-        from gigamate.battery import BatteryInfo
-        mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=80, ac_online=True)
+    d = GigaMateDaemon()
+    d._config = {"charge_limit": 80, "charge_limit_enabled": True, "charge_topup_active": True}
 
-        with patch("gigamate.tray.get_battery_manager", return_value=mgr):
-            with patch("gigamate.tray.start_topup", return_value=True) as mock_start:
-                with patch("gigamate.tray.cancel_topup", return_value=True) as mock_cancel:
-                    # 1. Append battery section with topup inactive: one flyout row
-                    parent = tray._append_battery_section()
-                    assert parent is tray._battery_parent_item
-                    tray._menu.append.assert_called_once_with(parent)
-                    labels = [c.get_label()
-                              for c in parent.get_submenu().get_children()]
-                    assert "Battery Care (Cap at 80%)" in labels
-                    assert "Charge to 100% Once" in labels
+    mgr = MagicMock()
+    mgr.is_available = True
+    mgr.get_battery_info.return_value = BatteryInfo(present=True, capacity=85, ac_online=True)
 
-                    # 2. Trigger start topup
-                    tray._on_start_topup(MagicMock())
-                    mock_start.assert_called_once_with(mgr)
-                    assert tray._config["charge_topup_active"] is True
-                    tray._rebuild_menu.assert_called_once()
-
-                    # 3. Trigger cancel topup
-                    tray._rebuild_menu.reset_mock()
-                    tray._on_cancel_topup(MagicMock())
-                    mock_cancel.assert_called_once_with(mgr, restore_limit=True)
-                    assert tray._config["charge_topup_active"] is False
-                    tray._rebuild_menu.assert_called_once()
+    with patch("gigamate.daemon.get_battery_manager", return_value=mgr), \
+         patch("gigamate.daemon.evaluate_calibration_state", return_value={}):
+        snap = d.poll_tick(run_automation=False)
+        assert "Batt: 85% (AC - 100% Top-Up)" in snap.status_text
 
 
 def test_onboarding_unsupported_opts_out_everything(qapp):
@@ -1660,9 +1507,9 @@ def test_onboarding_unsupported_opts_out_everything(qapp):
     caps = HardwareCapabilities(
         product_name="Generic PC", is_gigabyte_laptop=False, acpi_available=False,
         acpi_backend="none", acpi_driver_loaded=False, acpi_driver_missing=False,
-        has_power_profiles=False, profile_verified=False, profile_experimental=False, has_temperature=False, has_fan_rpm=False, fan_count=0,
+        has_power_profiles=False, has_temperature=False, has_fan_rpm=False, fan_count=0,
         battery_present=False, charge_limit_supported=False, battery_name="None",
-        keyboard_detected=False, keyboard_profile_loaded=False, keyboard_profile_name=None,
+        keyboard_detected=False,
         keyboard_vid_pid=None, has_dgpu=False, gpu_name="Integrated Only",
     )
     with patch("gigamate.ui.onboarding.detect_system_capabilities", return_value=caps), \
@@ -1735,59 +1582,39 @@ def test_onboarding_cli_created_config_stays_new(qapp):
 
 def test_tray_hotkey_action_dispatch():
     """Hotkey actions route to profile cycling or Center activation."""
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch.object(tray, "_on_hotkey_cycle_profile") as cyc, \
-             patch.object(tray, "_activate_center") as act:
-            tray._on_hotkey_action("mode_switch")
-            cyc.assert_called_once()
-            act.assert_not_called()
-            tray._on_hotkey_action("open_center")
-            act.assert_called_once()
-            cyc.assert_called_once()
-            # Unknown actions are logged, not raised.
-            tray._on_hotkey_action("bogus")
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch.object(d, "cycle_profile_hotkey") as cyc, \
+         patch.object(d, "open_center") as act:
+        d._on_hotkey_action("mode_switch")
+        cyc.assert_called_once()
+        act.assert_not_called()
+        d._on_hotkey_action("open_center")
+        act.assert_called_once()
+        cyc.assert_called_once()
+        # Unknown actions are logged, not raised.
+        d._on_hotkey_action("bogus")
 
 
 def test_tray_resolve_hotkey_specs_precedence():
-    """Overrides > active profile > built-in profile; unknown models get none."""
-    GigaMateTrayApp = _import_tray_app()
-    from gigamate.profiles import DeviceProfile
+    """Overrides > built-in defaults."""
+    from gigamate.daemon import GigaMateDaemon
 
-    def _profile(name, hotkeys):
-        return DeviceProfile(vid=0x0414, pid=0x8105, name=name,
-                             interfaces=[1, 3], control_interface=3,
-                             colour_map={}, hotkeys=hotkeys)
+    d = GigaMateDaemon()
+    d._detected_vid, d._detected_pid = 0x0414, 0x8105
+    d._config = {"hotkey_overrides": {
+        "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
+    }}
+    by_action = {s.action: s for s in d._resolve_hotkey_specs()}
+    assert by_action["open_center"].payload == bytes.fromhex("000091")
+    assert by_action["mode_switch"].payload == bytes.fromhex("000084")
+    assert by_action["backlight_cycle"].payload == bytes.fromhex("01")
 
-    builtin = _profile("builtin", {
-        "mode_switch": {"interface": 2, "report_id": 4, "payload": "000084"},
-    })
-    user = _profile("user", {
-        "mode_switch": {"interface": 2, "report_id": 4, "payload": "0000ff"},
-    })
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        tray._detected_vid, tray._detected_pid = 0x0414, 0x8105
-        tray._profile = user
-        tray._config = {"hotkey_overrides": {
-            "open_center": {"interface": 2, "report_id": 4, "payload": "000091"},
-        }}
-        with patch("gigamate.tray.load_builtin_profiles",
-                   return_value={(0x0414, 0x8105): builtin}):
-            by_action = {s.action: s for s in tray._resolve_hotkey_specs()}
-        assert by_action["open_center"].payload == bytes.fromhex("000091")
-        assert by_action["mode_switch"].payload == bytes.fromhex("0000ff")
-
-        # Unknown model, no profile, no overrides: no specs, no listener.
-        tray._profile = None
-        tray._detected_vid, tray._detected_pid = 0x9999, 0x1234
-        tray._config = {}
-        tray._hotkey_listener = None
-        with patch("gigamate.tray.load_builtin_profiles", return_value={}):
-            assert tray._resolve_hotkey_specs() == []
-            tray._init_hotkeys()
-            assert tray._hotkey_listener is None
+    # No overrides: falls back to built-in default hotkeys.
+    d._detected_vid, d._detected_pid = 0x9999, 0x1234
+    d._config = {}
+    assert len(d._resolve_hotkey_specs()) == 3
 
 
 class _FakeCenterSocket:
@@ -1815,25 +1642,25 @@ class _FakeCenterSocket:
 
 
 def test_tray_activate_center_uses_socket():
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch("socket.socket", side_effect=_FakeCenterSocket), \
-             patch("gigamate.tray.subprocess.Popen") as popen:
-            tray._activate_center()
-        popen.assert_not_called()
-        assert _FakeCenterSocket.instance is not None
-        assert _FakeCenterSocket.instance.sent == b"ACTIVATE\n"
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch("gigamate.daemon.socket.socket", side_effect=_FakeCenterSocket), \
+         patch("gigamate.daemon.subprocess.Popen") as popen:
+        d.open_center()
+    popen.assert_not_called()
+    assert _FakeCenterSocket.instance is not None
+    assert _FakeCenterSocket.instance.sent == b"ACTIVATE\n"
 
 
 def test_tray_activate_center_falls_back_to_spawn():
-    GigaMateTrayApp = _import_tray_app()
-    with patch.object(GigaMateTrayApp, "__init__", return_value=None):
-        tray = GigaMateTrayApp()
-        with patch("socket.socket", side_effect=OSError("no server")), \
-             patch("gigamate.tray.subprocess.Popen") as popen:
-            tray._activate_center()
-        popen.assert_called_once()
+    from gigamate.daemon import GigaMateDaemon
+
+    d = GigaMateDaemon()
+    with patch("gigamate.daemon.socket.socket", side_effect=OSError("no server")), \
+         patch("gigamate.daemon.subprocess.Popen") as popen:
+        d.open_center()
+    popen.assert_called_once()
 
 
 def test_main_window_init_does_not_wake_suspended_dgpu(qapp):
@@ -1855,3 +1682,869 @@ def test_main_window_init_does_not_wake_suspended_dgpu(qapp):
         # Switch to GPU page
         win.btn_gpu.click()
         rh.assert_not_called()
+
+
+def test_gate_dialog_auto_dismiss_preserves_auto_mode(qapp):
+    """Dismissing or clicking 'Keep dGPU On for Now' in auto_ac_unplug preserves Auto mode."""
+    from PyQt6.QtGui import QCloseEvent
+    from gigamate import dgpu_gate
+    from gigamate.ui.dgpu_gate_dialog import DgpuGateConfirmDialog
+
+    fake_topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", audio_bdf=None)
+    with patch("gigamate.dgpu_gate.find_dgpu_topology", return_value=fake_topo), \
+         patch("gigamate.dgpu_gate.connected_dgpu_displays", return_value=[]), \
+         patch("gigamate.dgpu_gate.closable_gpu_holders", return_value=[]), \
+         patch("gigamate.dgpu_gate.audio_card_holders", return_value=[]), \
+         patch("gigamate.dgpu_gate.set_mode") as mock_set_mode, \
+         patch("gigamate.dgpu_gate._publish_policy") as mock_publish:
+        dlg = DgpuGateConfirmDialog(
+            trigger="auto_ac_unplug",
+            target_mode=dgpu_gate.MODE_AUTO,
+            start_timers=False,
+        )
+        assert dlg.revert_btn.text() == "Keep dGPU On for Now"
+        dlg.reject()
+        mock_set_mode.assert_not_called()
+        mock_publish.assert_called_once()
+
+        mock_publish.reset_mock()
+        dlg2 = DgpuGateConfirmDialog(
+            trigger="auto_ac_unplug",
+            target_mode=dgpu_gate.MODE_AUTO,
+            start_timers=False,
+        )
+        dlg2.closeEvent(QCloseEvent())
+        mock_set_mode.assert_not_called()
+        mock_publish.assert_called_once()
+
+
+def test_gate_dialog_auto_powers_off_when_holders_clear(qapp):
+    """_collect_holders_refresh() triggers _on_confirm_clicked(auto_triggered=True) when ([], []) arrives."""
+    from gigamate import dgpu_gate
+    from gigamate.ui.dgpu_gate_dialog import DgpuGateConfirmDialog
+
+    fake_topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", audio_bdf=None)
+    fake_holder = dgpu_gate.HolderProcess(
+        pid=1234, name="python3", uid=1000, cmdline="python3 app.py"
+    )
+    with patch("gigamate.dgpu_gate.find_dgpu_topology", return_value=fake_topo), \
+         patch("gigamate.dgpu_gate.connected_dgpu_displays", return_value=[]), \
+         patch("gigamate.dgpu_gate.closable_gpu_holders", return_value=[fake_holder]), \
+         patch("gigamate.dgpu_gate.audio_card_holders", return_value=[]):
+        dlg = DgpuGateConfirmDialog(
+            trigger="auto_ac_unplug",
+            target_mode=dgpu_gate.MODE_AUTO,
+            start_timers=False,
+        )
+        with patch.object(dlg, "_on_confirm_clicked") as mock_confirm:
+            dlg._refresh_queue.put(([], []))
+            dlg._collect_holders_refresh()
+            mock_confirm.assert_called_once_with(auto_triggered=True)
+
+
+def test_rgb_page_full_rgb_mode_shows_picker_and_slider(qapp):
+    """When supports_full_rgb is True, RgbPage shows 2D pad, 1-100% slider & power button."""
+    from types import SimpleNamespace
+    from gigamate.ui.pages.rgb_page import RgbPage
+
+    mock_caps = SimpleNamespace(keyboard_detected=True, keyboard_lamparray_supported=True, keyboard_vid_pid=(0x0414, 0x7A42))
+    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps), \
+         patch("gigamate.ui.pages.rgb_page.get_keyboard", return_value=object()), \
+         patch("gigamate.ui.pages.rgb_page.set_rgb") as mock_set_rgb, \
+         patch("gigamate.ui.pages.rgb_page.set_off") as mock_set_off:
+        page = RgbPage()
+        page.show()
+        qapp.processEvents()
+
+        assert page.full_rgb_container.isVisible() is True
+        assert page.color_pad.isVisible() is True
+        assert page.brightness_slider.minimum() == 5
+        assert page.brightness_slider.maximum() == 100
+        assert not hasattr(page, "full_brightness_seg")
+        assert page.power_toggle_btn.isVisible() is True
+
+        # Picking a custom colour and then setting slider to 5% preserves rgb_hex
+        page.hex_input.setText("#00b4a0")
+        page.hex_input.editingFinished.emit()
+        page.brightness_slider.setValue(5)
+        page.brightness_slider.sliderReleased.emit()
+        qapp.processEvents()
+        assert page.cfg["rgb_hex"] == "#00b4a0"
+        assert page.cfg["brightness_pct"] == 5
+        assert page.cfg["rgb_enabled"] is True
+        assert page.brightness_slider.value() == 5
+        assert page.brightness_readout.text() == "5%"
+        mock_set_rgb.assert_called()
+
+        # Clicking power_toggle_btn turns off backlight while preserving rgb_hex & brightness_pct
+        page.power_toggle_btn.click()
+        qapp.processEvents()
+        assert page.cfg["rgb_enabled"] is False
+        assert page.cfg["rgb_hex"] == "#00b4a0"
+        assert page.cfg["brightness_pct"] == 5
+        assert "Off" in page.active_color_badge.text()
+        assert page.power_toggle_btn.text() == "Turn On"
+        mock_set_off.assert_called()
+
+
+def test_rgb_page_permission_denied_banner(qapp):
+    """When diagnose_lamparray returns permission_denied, RgbPage shows the warning banner."""
+    from types import SimpleNamespace
+    from gigamate.ui.pages.rgb_page import RgbPage
+
+    mock_caps = SimpleNamespace(keyboard_detected=True, keyboard_lamparray_supported=False, keyboard_vid_pid=(0x0414, 0x7A42))
+    diag = {
+        "status": "permission_denied",
+        "reason": "HID LampArray detected on /dev/hidraw9, but permission was denied.",
+        "node": "/dev/hidraw9",
+    }
+    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps), \
+         patch("gigamate.ui.pages.rgb_page.diagnose_lamparray", return_value=diag):
+        page = RgbPage()
+        page.show()
+        qapp.processEvents()
+
+        assert page.lamparray_permission_banner.isVisible() is True
+        assert "permission was denied" in page.lamparray_permission_banner.body_lbl.text()
+
+
+def test_rgb_page_unsupported_firmware_shows_legacy_v4_banner(qapp):
+    """When diagnose_lamparray returns unsupported_firmware, show legacy_v4_banner and disable controls."""
+    from types import SimpleNamespace
+    from gigamate.ui.pages.rgb_page import RgbPage
+
+    mock_caps = SimpleNamespace(keyboard_detected=True, keyboard_lamparray_supported=False, keyboard_vid_pid=(0x0414, 0x7A42))
+    diag = {
+        "status": "unsupported_firmware",
+        "reason": "Device does not expose HID LampArray usage page 0x59.",
+        "node": None,
+    }
+    with patch("gigamate.ui.pages.rgb_page.detect_system_capabilities", return_value=mock_caps), \
+         patch("gigamate.ui.pages.rgb_page.diagnose_lamparray", return_value=diag):
+        page = RgbPage()
+        page.show()
+        qapp.processEvents()
+
+        assert page.lamparray_permission_banner.isVisible() is False
+        assert page.legacy_v4_banner.isVisible() is True
+        assert "v4.5.x" in page.legacy_v4_banner.body_lbl.text()
+
+
+def test_automation_page_profile_rgb_toggle_and_reset(qapp):
+    """Verify AutomationPage toggles profile_rgb_enabled and resets profile_rgb_map."""
+    from gigamate.config import DEFAULT_CONFIG, load as load_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    page = AutomationPage()
+    page.profile_rgb_switch.switch.setChecked(True)
+    assert load_config()["profile_rgb_enabled"] is True
+
+    with patch("gigamate.ui.pages.automation_page.QColorDialog.getColor") as mock_dlg:
+        from PyQt6.QtGui import QColor
+
+        mock_dlg.return_value = QColor("#123456")
+        page._pick_profile_color(1)
+        assert load_config()["profile_rgb_map"]["1"] == "#123456"
+        assert page._swatch_buttons[1].text() == "#123456"
+
+    page._reset_profile_rgb_defaults()
+    assert load_config()["profile_rgb_map"] == DEFAULT_CONFIG["profile_rgb_map"]
+
+
+def test_automation_page_ac_mode_and_tlp_warning(qapp):
+    """Verify AC mode selector toggles selectors and shows TLP warning when external AC switching is active."""
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    with patch(
+        "gigamate.ui.pages.automation_page.detect_power_managers",
+        return_value={
+            "managers": ["tlp.service"],
+            "has_external_ac_switching": True,
+            "recommended_mode": "follow_system",
+        },
+    ), patch("gigamate.ui.pages.automation_page.sync_system_power", return_value=True):
+        page = AutomationPage()
+        page.show()
+        qapp.processEvents()
+
+        assert set(page._ac_mode_cards.keys()) == {"off", "follow_system", "switch"}
+        for key, card in page._ac_mode_cards.items():
+            assert card.info_badge.toolTip().strip() != ""
+            assert card.recommended_lbl.isVisible() is (key == "follow_system")
+
+        assert "tlp.service" in page.power_managers_lbl.text()
+        assert page.tlp_warning_banner.isVisible() is False
+        assert page.ac_selectors_widget.isVisible() is False
+        assert "Manual only" in page.ac_mode_desc_lbl.text()
+
+        page._ac_mode_cards["switch"].clicked.emit()
+        qapp.processEvents()
+
+        assert page._ac_mode_cards["switch"].is_selected() is True
+        assert page._ac_mode_cards["off"].is_selected() is False
+        assert "GigaMate switches both Gigabyte EC" in page.ac_mode_desc_lbl.text()
+        assert load_config()["ac_profile_mode"] == "switch"
+        assert page.chk_sync_power.switch.isChecked() is True
+        assert page.chk_sync_power.isEnabled() is False
+        assert load_config()["sync_system_power"] is True
+        assert page.tlp_warning_banner.isVisible() is True
+        assert page.ac_selectors_widget.isVisible() is True
+
+        # Switching away from GigaMate-Driven unlocks the toggle again
+        page._ac_mode_cards["off"].clicked.emit()
+        qapp.processEvents()
+        assert page.chk_sync_power.isEnabled() is True
+
+
+def test_automation_page_sole_controller_banner_when_no_conflicts(qapp):
+    """Verify gigamate_sole_banner is shown and conflict widgets are hidden when conflicts is empty in switch mode."""
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    with (
+        patch(
+            "gigamate.ui.pages.automation_page.detect_power_managers",
+            return_value={
+                "managers": ["tlp.service"],
+                "conflicts": [],
+                "has_external_ac_switching": False,
+                "tlp_summary": "TLP: tuning backend active (auto-switch paused by GigaMate)",
+            },
+        ),
+        patch("gigamate.ui.pages.automation_page.has_handoff_to_restore", return_value=False),
+    ):
+        page = AutomationPage()
+        page.show()
+        page._set_ac_mode("switch")
+        qapp.processEvents()
+
+        assert page._ac_mode_cards["switch"].is_selected() is True
+        assert page.gigamate_sole_banner.isVisible() is True
+        assert page.tlp_warning_banner.isVisible() is False
+        assert page.conflict_actions_widget.isVisible() is False
+        assert page.ac_selectors_widget.isVisible() is True
+
+
+def test_automation_page_tlp_conflict_details_and_fallback_follow(qapp):
+    """Verify conflict details are shown in switch mode and fallback button switches to follow_system."""
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    with (
+        patch(
+            "gigamate.ui.pages.automation_page.detect_power_managers",
+            return_value={
+                "managers": ["tlp.service"],
+                "conflicts": [
+                    {
+                        "id": "tlp",
+                        "name": "TLP",
+                        "scope": "system",
+                        "detail": "TLP_AUTO_SWITCH=2 (AC→performance, Battery→balanced)",
+                    }
+                ],
+                "has_external_ac_switching": True,
+                "tlp_summary": "TLP: AC → Performance, Battery → Balanced",
+            },
+        ),
+        patch("gigamate.ui.pages.automation_page.has_handoff_to_restore", return_value=False),
+    ):
+        page = AutomationPage()
+        page.show()
+        page._set_ac_mode("switch")
+        qapp.processEvents()
+
+        assert page.tlp_warning_banner.isVisible() is True
+        assert "TLP_AUTO_SWITCH=2" in page.tlp_warning_banner.body_lbl.text()
+        assert page.conflict_actions_widget.isVisible() is True
+
+        page.btn_fallback_follow.click()
+        qapp.processEvents()
+
+        assert page._ac_profile_mode == "follow_system"
+        assert page._ac_mode_cards["follow_system"].is_selected() is True
+        assert "Mirroring system profile changes" in page.ac_mode_desc_lbl.text()
+        assert load_config()["ac_profile_mode"] == "follow_system"
+        assert page.tlp_warning_banner.isVisible() is False
+        assert page.conflict_actions_widget.isVisible() is False
+
+
+def test_automation_page_restore_handoff_visible_in_follow_system(qapp):
+    """Verify btn_restore_handoff is visible in follow_system mode when a handoff exists to restore."""
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    with (
+        patch(
+            "gigamate.ui.pages.automation_page.detect_power_managers",
+            return_value={"managers": ["tlp.service"], "conflicts": [], "has_external_ac_switching": False},
+        ),
+        patch("gigamate.ui.pages.automation_page.has_handoff_to_restore", return_value=True),
+    ):
+        page = AutomationPage()
+        page.show()
+        page._set_ac_mode("follow_system")
+        qapp.processEvents()
+
+        assert page.btn_restore_handoff.isVisible() is True
+        assert "restored anytime" in page.ac_action_status_lbl.text()
+
+
+def test_automation_page_shortcuts_copy_and_reset(qapp):
+    """Verify SettingsPage copies desktop shortcut commands and resets custom hotkeys."""
+    from gigamate.config import load as load_config, save as save_config
+    from gigamate.ui.pages.settings_page import SettingsPage
+
+    cfg = load_config()
+    cfg["custom_hotkeys"] = {"open_center": {"key_name": "HID iface 3 (0x01)"}}
+    save_config(cfg)
+    page = SettingsPage()
+
+    assert "HID iface 3 (0x01)" in page._hotkey_labels["open_center"].text()
+    page._reset_hotkey("open_center", "GigaMate")
+    assert "open_center" not in load_config().get("custom_hotkeys", {})
+    assert "Default: GigaMate" in page._hotkey_labels["open_center"].text()
+
+    page._copy_command("gigamate center")
+    assert qapp.clipboard().text() == "gigamate center"
+    assert "Copied: gigamate center" in page.shortcut_status_lbl.text()
+
+
+def test_gpu_page_gate_disclaimer_cancel_and_accept(qapp):
+    """dGPU Power Gate shows a one-time risk disclaimer; Cancel reverts, Yes persists."""
+    from PyQt6.QtWidgets import QMessageBox
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.gpu_page import GpuPage
+
+    with patch("gigamate.ui.pages.gpu_page.dgpu_gate.eco_allowed_on_power", return_value=True), \
+         patch("gigamate.ui.pages.gpu_page.dgpu_gate.is_gated_off", return_value=False), \
+         patch("gigamate.ui.pages.gpu_page.dgpu_gate.read_policy_state", return_value={}):
+        page = GpuPage()
+        assert load_config().get("dgpu_gate_disclaimer_accepted", False) is False
+
+        # Cancel reverts button selection and does not persist disclaimer acceptance
+        with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Cancel):
+            page._on_gate_mode_clicked("eco")
+        assert load_config().get("dgpu_gate_disclaimer_accepted", False) is False
+        assert page._gate_buttons["optimus"].isChecked() is True
+
+        # Yes persists dgpu_gate_disclaimer_accepted=True
+        mock_bm = MagicMock()
+        mock_bm.is_ac_online.return_value = False
+        with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Yes), \
+             patch("gigamate.ui.pages.gpu_page.get_battery_manager", return_value=mock_bm), \
+             patch("gigamate.ui.dgpu_gate_dialog.DgpuGateConfirmDialog.exec", return_value=0), \
+             patch.object(page, "_refresh"):
+            page._on_gate_mode_clicked("auto")
+        assert load_config().get("dgpu_gate_disclaimer_accepted") is True
+
+
+def test_rgb_brightness_debounce_persists_and_apply_profile_preserves(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate import hardware
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.rgb_page import RgbPage
+
+    page = RgbPage()
+    page.brightness_slider.setValue(42)
+    page._on_brightness_debounce()
+
+    cfg = load_config()
+    assert cfg["brightness_pct"] == 42
+
+    mock_acpi = MagicMock()
+    mock_acpi.available = True
+    hardware.apply_profile(1, cfg={**cfg, "profile_rgb_enabled": True}, sync_system=False, acpi=mock_acpi)
+    assert load_config()["brightness_pct"] == 42
+
+
+def test_tray_backlight_full_rgb_persists_brightness_atomically(qapp):
+    from gigamate.config import load as load_config
+    from gigamate.daemon import GigaMateDaemon
+    GigaMateTrayApp = _import_tray_app()
+
+    d = GigaMateDaemon()
+    d._has_lamparray = True
+    d._idle_dimmed = True
+    fake_dev = MagicMock()
+    with patch.object(d, "_get_keyboard", return_value=fake_dev), \
+         patch("gigamate.daemon.set_rgb") as mock_rgb:
+        assert d.set_backlight_pct(35) is True
+        assert load_config()["brightness_pct"] == 35
+        assert load_config()["brightness"] == 1
+        assert d._idle_dimmed is False
+        mock_rgb.assert_called_once()
+
+        # Re-clicking an already-checked 100% menu action must still re-apply 100%
+        tray = GigaMateTrayApp(daemon=d, start_daemon=False)
+        d.set_backlight_pct(100)
+        tray._populate_menu()
+        assert tray._backlight_actions[100].isChecked() is True
+        mock_rgb.reset_mock()
+        tray._backlight_actions[100].trigger()
+        mock_rgb.assert_called_once()
+        assert load_config()["brightness_pct"] == 100
+
+
+def test_tray_menu_about_to_show_refreshes_dgpu_profile_sensitivity(qapp):
+    """Opening the tray menu after dGPU wakes must immediately re-enable Performance/Gaming."""
+    from gigamate.daemon import GigaMateDaemon
+    GigaMateTrayApp = _import_tray_app()
+
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    d = GigaMateDaemon()
+    d._acpi_controller = MagicMock(available=True)
+    d.get_discovered_profiles = MagicMock(return_value=discovered)
+
+    allowed = {"val": False}
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", side_effect=lambda: allowed["val"]):
+        tray = GigaMateTrayApp(daemon=d, start_daemon=False)
+        assert tray._profile_actions[2].isEnabled() is False
+        assert "(dGPU off)" in tray._profile_actions[2].text()
+        assert tray._profile_actions[3].isEnabled() is False
+
+        # AC plugged in -> dGPU wakes up; next menu open must refresh live!
+        allowed["val"] = True
+        tray.menu.aboutToShow.emit()
+        assert tray._profile_actions[2].isEnabled() is True
+        assert tray._profile_actions[2].text() == "Performance"
+        assert tray._profile_actions[3].isEnabled() is True
+        assert tray._profile_actions[3].text() == "Gaming"
+
+
+def test_dashboard_disable_profiles_and_automation_refresh(qapp):
+    from unittest.mock import MagicMock, patch
+    from gigamate.acpi import AcpiCapabilities
+    from gigamate.config import load as load_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+    from gigamate.ui.pages.settings_page import SettingsPage
+
+    caps = AcpiCapabilities(
+        has_temperature=True,
+        has_fan_rpm=True,
+        has_fan_duty=True,
+        fan_count=2,
+    )
+    profiles = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    page, ctrl = _dashboard_with_profiles(caps, profiles, qapp)
+    assert sorted(page._profile_buttons.keys()) == [0, 1, 2, 3]
+
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.settings_page.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.dashboard_page.discover_acpi_profiles", return_value=profiles):
+        settings_page = SettingsPage()
+        # Toggle off Gaming (3)
+        settings_page._profile_enable_checks[3].setChecked(False)
+        qapp.processEvents()
+        page.reload_from_config()
+        assert load_config()["disabled_profiles"] == [3]
+        assert 3 not in page._profile_buttons
+
+        # Disable 0 and 2 -> only 1 remains enabled, and its checkbox is disabled
+        settings_page._profile_enable_checks[0].setChecked(False)
+        settings_page._profile_enable_checks[2].setChecked(False)
+        qapp.processEvents()
+        page.reload_from_config()
+        assert sorted(page._profile_buttons.keys()) == [1]
+        assert settings_page._profile_enable_checks[1].isEnabled() is False
+
+        # Re-enable 0, 2 so only 3 is disabled, then verify AutomationPage.refresh_profiles()
+        settings_page._profile_enable_checks[0].setChecked(True)
+        settings_page._profile_enable_checks[2].setChecked(True)
+        qapp.processEvents()
+
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles):
+        auto_page = AutomationPage()
+        auto_page.refresh_profiles()
+        lbl_3, swatch_3, _base = auto_page._profile_color_rows[3]
+        assert "(Disabled in Settings)" in lbl_3.text()
+        assert swatch_3.isEnabled() is False
+        assert swatch_3.text() == "—"
+        assert "#ff0000" not in swatch_3.styleSheet().lower()
+        ac_ids = [auto_page.ac_profile_combo.itemData(i) for i in range(auto_page.ac_profile_combo.count())]
+        bat_ids = [auto_page.battery_profile_combo.itemData(i) for i in range(auto_page.battery_profile_combo.count())]
+        assert 3 not in ac_ids
+        assert 3 not in bat_ids
+
+
+def test_tray_hotkey_cycle_profile_skips_disabled(qapp):
+    from gigamate.config import update_config
+    from gigamate.daemon import GigaMateDaemon
+
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.daemon.hardware.apply_profile", return_value=True) as mock_apply:
+        d = GigaMateDaemon()
+        d._acpi_controller = MagicMock(available=True)
+        d._current_acpi_profile = 1
+        d.get_discovered_profiles = MagicMock(return_value=discovered)
+
+        d.cycle_profile_hotkey()
+        mock_apply.assert_called_once()
+        assert mock_apply.call_args[0][0] == 0
+
+
+def test_tray_hotkey_cycle_profile_passes_name_and_description_to_osd(qapp):
+    from gigamate.config import update_config
+    from gigamate.daemon import GigaMateDaemon
+
+    discovered = {
+        0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+        1: {"name": "Balanced", "description": "Balanced performance and noise"},
+        2: {"name": "Performance", "description": "High performance, more fan noise"},
+        3: {"name": "Gaming", "description": "Maximum GPU power and cooling"},
+    }
+    update_config(lambda c: {**c, "disabled_profiles": [2, 3]})
+    with patch("gigamate.daemon.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.daemon.hardware.apply_profile", return_value=True) as mock_apply, \
+         patch("gigamate.daemon.show_profile_osd") as mock_osd:
+        d = GigaMateDaemon()
+        d._acpi_controller = MagicMock(available=True)
+        d._current_acpi_profile = 1
+        d.get_discovered_profiles = MagicMock(return_value=discovered)
+
+        d.cycle_profile_hotkey()
+        mock_apply.assert_called_once()
+        assert mock_apply.call_args[0][0] == 0
+        mock_osd.assert_called_once_with("Quiet", "Low fan noise, capped GPU power")
+
+
+def test_automation_auto_gate_locks_battery_high_power_only(qapp):
+    """Auto dGPU Power Gate locks Performance/Gaming only in Battery combo, keeping AC unlocked."""
+    from gigamate.config import load as load_config, update_config
+    from gigamate.ui.pages.automation_page import AutomationPage
+
+    profiles = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+        3: {"name": "Gaming"},
+    }
+    update_config(
+        lambda c: {
+            **c,
+            "dgpu_gate_disclaimer_accepted": True,
+            "dgpu_power_mode": "optimus",
+            "ac_action_mode": "switch",
+            "ac_profile_id": 2,
+            "battery_profile_id": 2,
+            "disabled_profiles": [],
+        }
+    )
+
+    mock_mgr = MagicMock()
+    mock_mgr.is_ac_online.return_value = True
+
+    def _fake_set_mode(mode, **_kw):
+        update_config(lambda c: {**c, "dgpu_power_mode": mode})
+
+    with patch("gigamate.power_limits.discover_acpi_profiles", return_value=profiles), \
+         patch("gigamate.ui.pages.automation_page.dgpu_gate.set_mode", side_effect=_fake_set_mode) as mock_set_mode, \
+         patch("gigamate.battery.get_battery_manager", return_value=mock_mgr):
+        page = AutomationPage()
+        page.show()
+        page._set_ac_mode("switch")
+        qapp.processEvents()
+
+        # Enable auto_gate_switch
+        page.auto_gate_switch.switch.setChecked(True)
+        qapp.processEvents()
+
+        mock_set_mode.assert_called_with("auto", apply_now=True)
+        bat_ids = [page.battery_profile_combo.itemData(i) for i in range(page.battery_profile_combo.count())]
+        ac_ids = [page.ac_profile_combo.itemData(i) for i in range(page.ac_profile_combo.count())]
+        assert 2 not in bat_ids
+        assert 3 not in bat_ids
+        assert 2 in ac_ids
+        assert 3 in ac_ids
+        assert load_config().get("battery_profile_id") == 0
+        assert page.dgpu_battery_guard_banner.isVisible() is True
+
+        # Turn auto_gate_switch OFF -> 2 and 3 unlocked in battery_profile_combo
+        page.auto_gate_switch.switch.setChecked(False)
+        qapp.processEvents()
+        mock_set_mode.assert_called_with("optimus", apply_now=True)
+        bat_ids_after = [page.battery_profile_combo.itemData(i) for i in range(page.battery_profile_combo.count())]
+        assert 2 in bat_ids_after
+        assert 3 in bat_ids_after
+
+
+def test_aero_instrument_visual_widgets_and_dynamic_accent(qapp):
+    """MainWindow navigates all 6 pages, syncs automation, switches dynamic accent, and grabs offscreen."""
+    from gigamate.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.show()
+    qapp.processEvents()
+
+    for key in ("automation", "settings", "gpu", "battery", "keyboard", "overview"):
+        win.navigate_to(key)
+        qapp.processEvents()
+
+    with patch.object(win.page_automation, "reload_from_config") as mock_reload:
+        win.sync_all_from_config()
+        mock_reload.assert_called_once()
+
+    win._on_profile_accent_changed(0)
+    win._on_profile_accent_changed(2)
+    qapp.processEvents()
+
+    try:
+        for idx in range(6):
+            win.stack.setCurrentIndex(idx)
+            qapp.processEvents()
+            pix = win.stack.currentWidget().grab()
+            assert not pix.isNull()
+
+        win.resize(2560, 1360)
+        qapp.processEvents()
+        for page in (
+            win.page_dashboard,
+            win.page_battery,
+            win.page_rgb,
+            win.page_gpu,
+            win.page_automation,
+            win.page_settings,
+        ):
+            idx = {
+                win.page_dashboard: 0,
+                win.page_battery: 1,
+                win.page_rgb: 2,
+                win.page_gpu: 3,
+                win.page_automation: 4,
+                win.page_settings: 5,
+            }[page]
+            win.stack.setCurrentIndex(idx)
+            qapp.processEvents()
+            assert page.width() <= 1140
+            assert page.x() > 0
+
+        # Deep-link navigation scrolls to and highlights the exact target setting
+        win.resize(1020, 700)
+        qapp.processEvents()
+        assert any(tx.text() == "Automation" for _b, _ic, tx, _nm in win._nav_items)
+        assert win.page_rgb.profile_link_pill._target_page == "automation:profile_rgb"
+        assert win.page_rgb.idle_link_pill._target_page == "automation:idle_sleep"
+        assert win.page_gpu.auto_gate_link_pill._target_page == "automation:dgpu_gate"
+        assert win.page_gpu.boot_apply_link_pill._target_page == "automation:boot_apply"
+        assert win.page_battery.cal_link_pill._target_page == "automation:calibration"
+
+        assert win.page_dashboard.kb_brightness_slider._ignore_wheel is True
+        win.navigate_to("automation:idle_sleep")
+        qapp.processEvents()
+        assert win.stack.currentIndex() == 4
+        assert win._last_highlighted_widget is win.page_automation.idle_card
+        assert win._scroll_by_idx[4].verticalScrollBar().value() > 0
+    finally:
+        win.close()
+        win.deleteLater()
+
+
+def test_theme_dark_light_tokens_and_system_detection(qapp):
+    """THEME proxy, tone_colors, accent_tokens, and stylesheet switch dynamically."""
+    from PyQt6.QtCore import Qt
+    from gigamate.ui import styles, theme
+
+    try:
+        theme.set_active_scheme("dark")
+        assert theme.get_active_scheme() == "dark"
+        assert theme.is_light_theme() is False
+        assert theme.THEME.surface == theme.DARK_TOKENS.surface
+        dark_qss = styles.build_stylesheet()
+        assert theme.DARK_TOKENS.surface in dark_qss
+        assert theme.tone_colors("success")[0] == theme.DARK_TOKENS.success
+
+        theme.set_active_scheme("light")
+        assert theme.get_active_scheme() == "light"
+        assert theme.is_light_theme() is True
+        assert theme.THEME.surface == theme.LIGHT_TOKENS.surface
+        light_qss = styles.build_stylesheet()
+        assert theme.LIGHT_TOKENS.surface in light_qss
+        assert theme.tone_colors("success")[0] == theme.LIGHT_TOKENS.success
+        assert theme.accent_tokens("#14B8A6")["on_accent"] == "#FFFFFF"
+
+        # resolve_color_scheme respects explicit overrides and system detection
+        assert theme.resolve_color_scheme("dark") == "dark"
+        assert theme.resolve_color_scheme("light") == "light"
+        fake_hints = MagicMock()
+        fake_hints.colorScheme.return_value = Qt.ColorScheme.Light
+        fake_app = MagicMock()
+        fake_app.styleHints.return_value = fake_hints
+        assert theme.resolve_color_scheme("system", app=fake_app) == "light"
+        fake_hints.colorScheme.return_value = Qt.ColorScheme.Dark
+        assert theme.resolve_color_scheme("system", app=fake_app) == "dark"
+    finally:
+        theme.set_active_scheme("dark")
+
+
+def test_settings_appearance_and_live_theme_switch(qapp):
+    """Settings Appearance selector persists ui_theme and MainWindow live-switches keeping tab."""
+    from gigamate.config import load as load_config
+    from gigamate.ui import theme
+    from gigamate.ui.main_window import MainWindow
+
+    theme.set_active_scheme("dark")
+    win = MainWindow()
+    try:
+        win.navigate_to("settings")
+        assert win.stack.currentIndex() == 5
+
+        # Click Light in Settings -> persists ui_theme='light', switches active scheme, keeps Settings tab
+        win.page_settings._theme_buttons["light"].click()
+        qapp.processEvents()
+        assert load_config()["ui_theme"] == "light"
+        assert theme.get_active_scheme() == "light"
+        assert win.stack.currentIndex() == 5
+        assert win.page_settings._theme_buttons["light"].isChecked() is True
+
+        # Switch back to Dark -> persists ui_theme='dark', keeps Settings tab
+        win.page_settings._theme_buttons["dark"].click()
+        qapp.processEvents()
+        assert load_config()["ui_theme"] == "dark"
+        assert theme.get_active_scheme() == "dark"
+        assert win.stack.currentIndex() == 5
+    finally:
+        theme.set_active_scheme("dark")
+        win.close()
+        win.deleteLater()
+
+
+def test_dgpu_gate_dialog_supports_boot_battery_trigger(qapp):
+    """DgpuGateConfirmDialog accepts trigger='boot_battery' cleanly without ValueError."""
+    from gigamate import dgpu_gate
+    from gigamate.ui.dgpu_gate_dialog import DgpuGateConfirmDialog
+
+    with patch("gigamate.ui.dgpu_gate_dialog.dgpu_gate.find_dgpu_topology", return_value=dgpu_gate.DgpuTopology()), \
+         patch("gigamate.ui.dgpu_gate_dialog.dgpu_gate.closable_gpu_holders", return_value=[]):
+        dlg = DgpuGateConfirmDialog(
+            trigger="boot_battery",
+            target_mode=dgpu_gate.MODE_AUTO,
+            prev_mode=dgpu_gate.MODE_AUTO,
+            start_timers=False,
+        )
+        assert "Battery" in dlg.title_lbl.text()
+        assert dlg._is_auto_session() is True
+        dlg.deleteLater()
+
+
+def test_gpu_page_usbc_budget_card_visibility_disclaimer_and_sleep_safety(qapp, tmp_path):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtWidgets import QMessageBox
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    from gigamate.power_limits import GpuPowerCaps
+    from gigamate.usbc_power import PowerSourceSnapshot
+    import gigamate.ui.pages.gpu_page as gp
+
+    asleep_nv = GpuState(present=True, vendor="nvidia", status="suspended", power_state="D3cold")
+    awake_nv = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    no_gpu = GpuState(present=False)
+    fake_src = PowerSourceSnapshot(
+        kind="usbc_pd", ac_online=True, usbc_online=True, is_pd=True,
+        detected_wattage_w=100, wattage_source="pd_current_inferred",
+        negotiated_current_a=5.0, negotiated_voltage_v=None, firmware_usbc_flag=True,
+        bat_present=True, bat_status="Charging", bat_capacity=80, bat_power_w=3.0,
+    )
+    caps = GpuPowerCaps(default_tgp_w=50, max_constraint_w=85)
+
+    acpi_sys = tmp_path / "gigamate_acpi"
+    acpi_sys.mkdir()
+    for name in ("cpu_stapm_w", "cpu_slow_ppt_w", "cpu_fast_ppt_w", "gpu_ctgp_offset_w", "gpu_dynamic_boost"):
+        (acpi_sys / name).write_text("1\n")
+
+    real_open = os.open
+    nv_opens = []
+
+    def tracking_open(path, *args, **kwargs):
+        if "/dev/nvidia" in str(path):
+            nv_opens.append(str(path))
+            raise AssertionError(f"Unexpected NVIDIA device open: {path}")
+        return real_open(path, *args, **kwargs)
+
+    page = gp.GpuPage()
+    try:
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=no_gpu)), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={}):
+            page.reload_from_config()
+            assert page.usbc_budget_card.isVisibleTo(page) is False
+
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=asleep_nv)), \
+             patch.object(gp, "GIGAMATE_ACPI_SYSFS", acpi_sys), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={}), \
+             patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml, \
+             patch("gigamate.usbc_power.os.open", side_effect=tracking_open):
+            page.reload_from_config()
+            assert page.usbc_budget_card.isVisibleTo(page) is True
+            assert "100 W USB-C PD" in page.usbc_charger_pill.text()
+            assert page.usbc_split_slider.minimum() == 50
+            assert page.usbc_split_slider.maximum() == 60
+            mock_nvml.assert_not_called()
+            assert nv_opens == []
+
+            # Disclaimer Cancel reverts switch and keeps opt-in False
+            with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Cancel):
+                page.usbc_switch.setChecked(True)
+            assert page.usbc_switch.isChecked() is False
+            assert config_mod.load()["usbc_power_budget_enabled"] is False
+
+            # Disclaimer Yes enables feature + saves disclaimer acceptance
+            with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Yes):
+                page.usbc_switch.setChecked(True)
+            cfg = config_mod.load()
+            assert cfg["usbc_power_budget_enabled"] is True
+            assert cfg["usbc_power_budget_disclaimer_accepted"] is True
+
+            # Slider persists committed GPU split + buffer %; wheel is ignored
+            page.usbc_split_slider.setValue(58)
+            page.usbc_buffer_slider.setValue(20)
+            assert "58 W GPU / 22 W CPU" in page.usbc_split_val.text()
+            assert "20% (20 W)" in page.usbc_buffer_val.text()
+            page._commit_usbc_split()
+            saved = config_mod.load()
+            assert saved["usbc_gpu_budget_w"] == 58
+            assert saved["usbc_buffer_pct"] == 20
+
+            ev = QWheelEvent(
+                QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.ScrollUpdate, False,
+            )
+            page.usbc_split_slider.wheelEvent(ev)
+            assert page.usbc_split_slider.value() == 58
+            assert not ev.isAccepted()
+
+        # Even while awake, _sync_usbc_budget_card never touches NVML or /dev/nvidiactl
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=awake_nv)), \
+             patch.object(gp, "GIGAMATE_ACPI_SYSFS", acpi_sys), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={"active": True, "mode": "active", "applied_gpu_w": 58, "applied_cpu_w": 17, "aux_state": 0}), \
+             patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml_awake, \
+             patch("gigamate.usbc_power.os.open", side_effect=tracking_open):
+            page._sync_usbc_budget_card(gpu=awake_nv)
+            assert "Active" in page.usbc_state_pill.text()
+            mock_nvml_awake.assert_not_called()
+            assert nv_opens == []
+    finally:
+        page.close()
+        page.deleteLater()

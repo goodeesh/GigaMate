@@ -9,20 +9,41 @@ Provides unified probing for all modular hardware subsystems:
 """
 
 import time
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
+from . import lamparray
 from .acpi import AcpiController
 from .battery import get_battery_manager
 from .gpu import get_gpu_state
-from .profiles import (
-    detect_device,
-    get_dmi_chassis_type,
-    get_dmi_product_name,
-    get_dmi_vendor,
-    resolve_model,
-    resolve_profile,
-)
+from .power_limits import discover_acpi_profiles
+
+
+def _read_dmi(filename: str) -> Optional[str]:
+    try:
+        val = (Path("/sys/class/dmi/id") / filename).read_text().strip()
+        return val or None
+    except OSError:
+        return None
+
+
+def get_dmi_product_name() -> Optional[str]:
+    return _read_dmi("product_name")
+
+
+def get_dmi_vendor() -> Optional[str]:
+    return _read_dmi("sys_vendor")
+
+
+def get_dmi_chassis_type() -> Optional[int]:
+    raw = _read_dmi("chassis_type")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 # Gigabyte-brand identifiers that may appear in the DMI product name. Vendor
 # strings are matched separately via get_dmi_vendor() to avoid false positives
@@ -58,26 +79,26 @@ class HardwareCapabilities:
     acpi_driver_loaded: bool  # True if gigamate_acpi sysfs is active
     acpi_driver_missing: bool  # True if it is a Gigabyte laptop, but ACPI driver is not loaded
     has_power_profiles: bool
-    profile_verified: bool  # True when a model profile declares a profile set
-    profile_experimental: bool  # True when that model profile is experimental
     has_temperature: bool
     has_fan_rpm: bool
     fan_count: int
+    discovered_profiles: Dict[int, Dict[str, str]] = field(default_factory=dict)
 
     # Battery
-    battery_present: bool
-    charge_limit_supported: bool
-    battery_name: str
+    battery_present: bool = False
+    charge_limit_supported: bool = False
+    battery_name: str = "None"
 
     # Keyboard RGB
-    keyboard_detected: bool
-    keyboard_profile_loaded: bool
-    keyboard_profile_name: Optional[str]
-    keyboard_vid_pid: Optional[Tuple[int, int]]
+    keyboard_detected: bool = False
+    keyboard_lamparray_supported: bool = False
+    keyboard_name: Optional[str] = None
+    keyboard_vid_pid: Optional[Tuple[int, int]] = None
 
     # GPU
-    has_dgpu: bool
-    gpu_name: str
+    has_dgpu: bool = False
+    gpu_name: str = "Integrated Only"
+    dgpu_gate_supported: bool = False
 
 
 def detect_system_capabilities(refresh: bool = False) -> HardwareCapabilities:
@@ -142,33 +163,37 @@ def _probe_system_capabilities() -> HardwareCapabilities:
 
     # A Gigabyte keyboard VID alone does not make the *laptop* Gigabyte (an
     # external keyboard on a desktop must not trigger thermal-control advice).
-    detected_kbd = detect_device()
+    kbd_info = lamparray.detect_gigabyte_hidraw_keyboard()
+    detected_kbd = (kbd_info[0], kbd_info[1]) if kbd_info else None
 
     acpi_missing = is_gigabyte and not acpi_avail
+    discovered_profiles = discover_acpi_profiles() if acpi_avail else {}
+    has_power_profiles = bool(acpi_avail and len(discovered_profiles) >= 2)
 
     # 4. Keyboard RGB Subsystem
-    keyboard_detected = detected_kbd is not None
-    keyboard_profile_loaded = False
-    keyboard_profile_name = None
-    if detected_kbd:
-        prof = resolve_profile(detected_kbd[0], detected_kbd[1])
-        if prof is not None:
-            keyboard_profile_loaded = True
-            keyboard_profile_name = prof.name
-
-    # Profile switching is a per-model contract, never derived from the probe.
-    # USB-keyed profiles first, then DMI-keyed (ACPI-only laptops): the first
-    # match that declares a profile set enables controls (with a warning when
-    # the model is experimental and unconfirmed).
-    model_match = resolve_model(detected_kbd[0], detected_kbd[1]) if detected_kbd else resolve_model()
-    profile_verified = model_match is not None
-    profile_experimental = bool(model_match and model_match.experimental)
+    keyboard_detected = kbd_info is not None
+    keyboard_name = kbd_info[2] if kbd_info else None
+    keyboard_lamparray_supported = False
+    lamp_info = lamparray.detect_lamparray_keyboard()
+    if lamp_info is not None:
+        _lvid, _lpid, node, _iface = lamp_info
+        try:
+            if lamparray.LampArrayDevice(node).lamp_count() >= 1:
+                keyboard_lamparray_supported = True
+        except (OSError, ValueError):
+            pass
 
     # 5. GPU Subsystem
     gpu_state = get_gpu_state()
     has_dgpu = gpu_state.present
     gpu_vendor = (gpu_state.vendor or "Discrete").upper()
     gpu_name = f"{gpu_vendor} GPU" if has_dgpu else "Integrated Only"
+    try:
+        from . import dgpu_gate
+
+        dgpu_gate_supported = bool(dgpu_gate.is_supported())
+    except Exception:  # noqa: BLE001
+        dgpu_gate_supported = False
 
     return HardwareCapabilities(
         product_name=product_name,
@@ -177,9 +202,8 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         acpi_backend=acpi_backend,
         acpi_driver_loaded=driver_loaded,
         acpi_driver_missing=acpi_missing,
-        has_power_profiles=acpi_caps.has_power_profiles,
-        profile_verified=profile_verified,
-        profile_experimental=profile_experimental,
+        has_power_profiles=has_power_profiles,
+        discovered_profiles=discovered_profiles,
         has_temperature=acpi_caps.has_temperature,
         has_fan_rpm=acpi_caps.has_fan_rpm,
         fan_count=acpi_caps.fan_count,
@@ -187,9 +211,10 @@ def _probe_system_capabilities() -> HardwareCapabilities:
         charge_limit_supported=charge_limit_supported,
         battery_name=battery_name,
         keyboard_detected=keyboard_detected,
-        keyboard_profile_loaded=keyboard_profile_loaded,
-        keyboard_profile_name=keyboard_profile_name,
+        keyboard_lamparray_supported=keyboard_lamparray_supported,
+        keyboard_name=keyboard_name,
         keyboard_vid_pid=detected_kbd,
         has_dgpu=has_dgpu,
         gpu_name=gpu_name,
+        dgpu_gate_supported=dgpu_gate_supported,
     )

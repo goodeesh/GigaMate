@@ -1,42 +1,35 @@
 # RGB Keyboard Protocol
 
-## USB Interface
+## HID LampArray (`Usage Page 0x59`) — GigaMate 5.0+
 
-Gigabyte Aero/AORUS keyboards use USB HID with multiple interfaces.
-The RGB control channel is on a vendor-specific interface (typically interface 3).
+In GigaMate 5.0.0 and later, **HID LampArray (`Usage Page 0x59`)** is the sole keyboard RGB protocol. GigaMate scans `/sys/class/hidraw/hidraw*` at runtime with **zero `pyusb`**, **zero kernel driver detaching**, and **zero manual calibration**.
 
-| Interface | Function | Notes |
-|-----------|----------|-------|
-| 0 | Keyboard input | Leave untouched |
-| 1 | Vendor-specific (0xFF00) | Detach kernel driver |
-| 2 | Mouse + Feature Report 0x5A | Leave untouched |
-| **3** | **Vendor-specific (0xFF01)** | **RGB control channel** |
-| 4 | Digitizer/touchpad | Leave untouched |
+> [!NOTE]
+> Owners of pre-2025 Gigabyte/AORUS keyboards that do not expose HID LampArray (`Usage Page 0x59`) should use the final **GigaMate `v4.5.x`** release.
 
-The table describes the supported Aero X16 profile. Other models may use a
-different interface. Calibration discovers the device's actual USB interfaces;
-use `gigamate calibrate rgb --interface 4` to test a specific interface. A
-successful USB transfer alone does not prove that the LEDs changed.
+### Runtime Auto-Discovery
 
-Vendor-protocol calibration uses PyUSB and needs access to the USB device under
-`/dev/bus/usb/`. Access to a `/dev/hidraw*` node alone is insufficient.
+At startup, GigaMate scans `/sys/class/hidraw/hidraw*` for any HID device advertising:
+- **Usage Page `0x05 0x59`** (HID LampArray)
+- **Reports `1`, `5`, and `6`**
+- **`lamp_count >= 1`**
 
-## HID LampArray keyboards
+### 5% Minimum Brightness Floor
 
-Some models, including the GAMING A16 with USB ID `0414:8104`, expose HID
-LampArray on interface 4 (usage page `0x59`). These need a different protocol.
-GigaMate detects that descriptor and uses hidraw feature ioctls, as the
-`gigabyte-kbd` utility does. `gigamate calibrate rgb` saves a LampArray profile
-automatically; colour mapping and root USB access are unnecessary when the
-hidraw node is accessible.
+Below 5%, 8-bit integer channel scaling (`round(c * pct / 100)`) quantizes R:G:B ratios too coarsely and shifts colour hue. GigaMate therefore clamps active LampArray brightness to `5%–100%` and exposes a separate Backlight Off/On toggle.
+
+### Diagnostics (`gigamate doctor`)
+
+`gigamate doctor` reports `diagnose_lamparray` status and diagnostics:
+- `ready` / `supported` — LampArray descriptor and reports detected and accessible
+- `no_hidraw_devices` — No `/dev/hidraw*` LampArray device found
+- `permission_denied` — `/dev/hidraw*` lacks read-write ACLs
+- `unsupported_reports` — Device does not expose Reports `1, 5, 6`
+- `zero_lamps` — LampArray descriptor reports `lamp_count == 0`
 
 ### Permissions
 
-The LampArray protocol opens a `/dev/hidraw*` node read-write. udev creates that
-node on every boot, so a manual `chmod` is lost at the next boot and the number
-can change. `data/70-gigamate.rules` tags the device with `uaccess`, and the
-standard logind flow applies the ACL to the active local user. The file must
-keep the 70 prefix so it loads before `73-seat-late.rules`.
+The LampArray protocol opens a `/dev/hidraw*` node read-write. udev creates that node on every boot, so a manual `chmod` is lost at the next boot and the number can change. `data/70-gigamate.rules` tags the device with `uaccess`, and the standard logind flow applies the ACL to the active local user. The file must keep the `70` prefix so it loads before `73-seat-late.rules`.
 
 Find the keyboard node by its HID identity:
 
@@ -46,20 +39,24 @@ for h in /sys/class/hidraw/hidraw*; do
 done
 ```
 
-A working node looks like `crw-rw----+ root root` and has a `user:<you>:rw-`
-entry in `getfacl`. Remote sessions (SSH) and systems without systemd-logind do
-not receive the ACL. See the troubleshooting section in the README.
+A working node looks like `crw-rw----+ root root` and has a `user:<you>:rw-` entry in `getfacl`. Remote sessions (SSH) and systems without `systemd-logind` do not receive the ACL.
 
-The supported report layout is:
+### Report Layout
 
-- Report 1 (23 bytes, read): lamp count at bytes 1–2 (little endian).
-- Report 6 (2 bytes, write): `[6, 0]` disables autonomous mode.
-- Report 5 (10 bytes, write): `[5, 1, start_lo, start_hi, end_lo, end_hi, R, G, B, 255]`.
+- **Report 1** (23 bytes, read): lamp count at bytes 1–2 (little endian).
+- **Report 6** (2 bytes, write): `[6, 0]` disables autonomous mode.
+- **Report 5** (10 bytes, write): `[5, 1, start_lo, start_hi, end_lo, end_hi, R, G, B, 255]`.
 
 Brightness scales RGB because this keyboard's intensity channel is on/off.
-The legacy vendor report below remains available for older keyboards.
 
-## Command Format
+---
+
+## Historical Reference (GigaMate v4.x): Legacy Vendor `0x08` Protocol
+
+> [!IMPORTANT]
+> The legacy vendor `0x08` protocol below is **no longer supported in GigaMate 5.0.0+**. It is preserved here as historical documentation for pre-2025 hardware and **GigaMate `v4.5.x`**.
+
+### Command Format
 
 8-byte USB HID Feature Report sent via control transfer:
 
@@ -78,31 +75,25 @@ The legacy vendor report below remains available for older keyboards.
 | 6 | Padding | `0x01` |
 | 7 | Checksum | `(255 - sum(bytes 0-6)) & 0xFF` |
 
-Checksum = `(255 - sum(first 7 bytes)) & 0xFF`
+### Legacy `0x08` Colour Model (`0414:8105`)
 
-## Colour Model
+The colour response is **non-linear** — visible hue depends on both the colour byte (byte 5) and the brightness byte (byte 4). A single colour byte can produce different hues at different brightness levels (e.g., byte `0x06` at bright levels gives purple, at mid levels gives pink).
 
-The colour response is **non-linear** — visible hue depends on both the colour byte
-(byte 5) and the brightness byte (byte 4). A single colour byte can produce
-different hues at different brightness levels (e.g., byte `0x06` at bright levels
-gives purple, at mid levels gives pink).
+Reverse-engineering on `0414:8105` verified:
+- The real linear brightness ceiling of `byte4` is **`0..50` (`0x00..0x32`)** (standard ITE `0x08` scale).
+- Values `> 50` (`55, 75, 90, 100`) cause 8-bit channel wraparound (`mod 256`) on mixed/white-balanced slots (`5, 6, 7`), which is *why* `byte4 > 50` shifts hues into `blush_pink`, `light_blue`, `light_purple`, and `dark_yellow`.
+- The ITE `0x14` custom palette write command is ignored by `0414:8105` firmware.
 
-Each colour in a device profile maps to fixed `(byte5, byte4)` pairs per
-brightness level (off/dim/full). These pairs are determined empirically via
-the calibration tool.
+### What Didn't Work
 
-## What Didn't Work
+- **ACPI/WMI (WMBD 0x63)**: Writes to EC registers `0xD2–0xD6` — confirmed dead end. The ACPI path does not reach the USB RGB controller.
+- **EC direct write**: Keyboard backlight level (`KBLL` at EC offset `0x31`) controls brightness only, not colour.
+- **Animated effects**: Programs `0x02–0x0D` can hang the keyboard firmware, requiring a USB reset to recover. Only static (`0x01`) is safe.
 
-- **ACPI/WMI (WMBD 0x63)**: Writes to EC registers 0xD2–0xD6 — confirmed dead end.
-  The ACPI path does not reach the USB RGB controller.
-- **EC direct write**: Keyboard backlight level (`KBLL` at EC offset 0x31)
-  controls brightness only, not colour.
-- **Animated effects**: Programs 0x02–0x0D can hang the keyboard firmware,
-  requiring a USB reset to recover. Only static (0x01) is safe.
+---
 
-## References
+## References & Credits
 
-- Paul Ridgway's original reverse engineering:
-  https://blockdev.io/gigabyte-aero-w15-keyboard-and-linux-ubuntu/
-- Protocol implementation: `src/gigamate/protocol.py`
-- Device profiles: `src/gigamate/profile_data/`
+- **Teng Lin (PR #32)** — Introduced HID LampArray (`lamparray.py`) support and hidraw descriptor discovery (inspired by `gigabyte-kbd`).
+- **Paul Ridgway** — Original legacy `0x08` Aero 15 reverse engineering: https://blockdev.io/gigabyte-aero-w15-keyboard-and-linux-ubuntu/
+- Protocol implementation: `src/gigamate/lamparray.py`

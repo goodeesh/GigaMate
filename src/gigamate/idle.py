@@ -166,17 +166,178 @@ def _is_input_device(sysfs_dir: str) -> bool:
     return True
 
 
-def list_input_event_nodes() -> List[str]:
+# Linux input bus types (linux/input.h)
+_BUS_USB = 0x0003
+_BUS_I8042 = 0x0011
+_BUS_I2C = 0x0018
+
+_VIRTUAL_DEVICE_HINTS = (
+    "uinput",
+    "virtual",
+    "xwaykeyz",
+    "ydotool",
+    "xdotool",
+)
+
+
+def _read_sysfs_text(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _device_phys(sysfs_dir: str) -> str:
+    for rel in ("device/phys", "device/device/phys"):
+        val = _read_sysfs_text(os.path.join(sysfs_dir, rel))
+        if val:
+            return val
+    return ""
+
+
+def _device_bustype(sysfs_dir: str) -> Optional[int]:
+    for rel in ("device/id/bustype", "device/device/id/bustype"):
+        raw = _read_sysfs_text(os.path.join(sysfs_dir, rel))
+        if raw:
+            try:
+                return int(raw, 16)
+            except ValueError:
+                return None
+    return None
+
+
+def _device_vid_pid(sysfs_dir: str) -> Tuple[Optional[int], Optional[int]]:
+    for base in ("device/id", "device/device/id"):
+        v_raw = _read_sysfs_text(os.path.join(sysfs_dir, base, "vendor"))
+        p_raw = _read_sysfs_text(os.path.join(sysfs_dir, base, "product"))
+        if v_raw and p_raw:
+            try:
+                return int(v_raw, 16), int(p_raw, 16)
+            except ValueError:
+                return None, None
+    return None, None
+
+
+def _is_usb_device_fixed(sysfs_dir: str) -> bool:
+    """True if the USB ancestor in sysfs reports ``removable == 'fixed'``."""
+    cur = os.path.realpath(os.path.join(sysfs_dir, "device"))
+    for _ in range(10):
+        if not cur or cur == "/":
+            break
+        rem = _read_sysfs_text(os.path.join(cur, "removable"))
+        if rem:
+            return rem.lower() == "fixed"
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return False
+
+
+def _is_internal_input_device(
+    sysfs_dir: str,
+    internal_usb_ids: Optional[set] = None,
+) -> bool:
+    """True if an input event node belongs to the laptop's built-in keyboard/touchpad."""
+    name = _device_name(sysfs_dir).lower()
+    phys = _device_phys(sysfs_dir).lower()
+    if any(h in name or h in phys for h in _VIRTUAL_DEVICE_HINTS):
+        return False
+
+    bus = _device_bustype(sysfs_dir)
+    if bus in (_BUS_I8042, _BUS_I2C):
+        return True
+    if bus == _BUS_USB:
+        vid, pid = _device_vid_pid(sysfs_dir)
+        if internal_usb_ids and vid is not None and pid is not None:
+            if (vid, pid) in internal_usb_ids:
+                return True
+        return _is_usb_device_fixed(sysfs_dir)
+    return False
+
+
+def list_internal_hidraw_nodes(
+    internal_usb_ids: Optional[set] = None,
+    *,
+    sysfs_root: str = "/sys/class/hidraw",
+    dev_root: str = "/dev",
+) -> List[str]:
+    """Return readable ``/dev/hidraw*`` keyboard nodes for the built-in USB keyboard.
+
+    Used in ``internal_only`` mode so built-in keypresses still register even
+    when a key remapper (e.g. Toshy / XWayKeyz) holds ``EVIOCGRAB`` on the
+    built-in keyboard's ``/dev/input/event*`` node.
+    """
+    nodes: List[str] = []
+    for entry in sorted(glob.glob(os.path.join(sysfs_root, "hidraw*"))):
+        uev = _read_sysfs_text(os.path.join(entry, "device", "uevent"))
+        if not uev:
+            continue
+        hid_name = ""
+        hid_id = ""
+        hid_phys = ""
+        for line in uev.splitlines():
+            if line.startswith("HID_NAME="):
+                hid_name = line.split("=", 1)[1].strip()
+            elif line.startswith("HID_ID="):
+                hid_id = line.split("=", 1)[1].strip()
+            elif line.startswith("HID_PHYS="):
+                hid_phys = line.split("=", 1)[1].strip()
+
+        # Only watch the primary keyboard HID interface (input0) to avoid
+        # vendor-control/LampArray interfaces that carry RGB write traffic.
+        if not hid_phys.endswith("/input0"):
+            continue
+
+        vid = pid = bus = None
+        parts = hid_id.split(":")
+        if len(parts) == 3:
+            try:
+                bus = int(parts[0], 16)
+                vid = int(parts[1], 16)
+                pid = int(parts[2], 16)
+            except ValueError:
+                pass
+        if bus != _BUS_USB:
+            continue
+
+        matched = False
+        if internal_usb_ids and vid is not None and pid is not None:
+            matched = (vid, pid) in internal_usb_ids
+        if not matched and "keyboard" in hid_name.lower():
+            matched = _is_usb_device_fixed(entry)
+        if not matched:
+            continue
+
+        dev_path = os.path.join(dev_root, os.path.basename(entry))
+        if os.access(dev_path, os.R_OK):
+            nodes.append(dev_path)
+    return nodes
+
+
+def list_input_event_nodes(
+    *,
+    internal_only: bool = False,
+    internal_usb_ids: Optional[set] = None,
+) -> List[str]:
     """List /dev/input/event* nodes that can produce user activity."""
     nodes: List[str] = []
     for node in sorted(glob.glob("/dev/input/event*")):
         base = os.path.basename(node)
         sysfs = f"/sys/class/input/{base}"
         try:
-            if _is_input_device(sysfs):
-                nodes.append(node)
+            if not _is_input_device(sysfs):
+                continue
+            if internal_only and not _is_internal_input_device(
+                sysfs, internal_usb_ids=internal_usb_ids
+            ):
+                continue
+            nodes.append(node)
         except Exception:
             continue
+    if internal_only:
+        nodes.extend(list_internal_hidraw_nodes(internal_usb_ids=internal_usb_ids))
     return nodes
 
 
@@ -204,12 +365,16 @@ class IdleMonitor:
         timeout_sec: int = DEFAULT_TIMEOUT_SEC,
         enabled: bool = True,
         debounce_sec: float = 0.25,
+        internal_only: bool = False,
+        internal_usb_ids: Optional[set] = None,
     ) -> None:
         self._on_idle = on_idle
         self._on_active = on_active
         self._timeout_sec = clamp_timeout(timeout_sec)
         self._enabled = bool(enabled)
         self._debounce_sec = max(0.0, float(debounce_sec))
+        self._internal_only = bool(internal_only)
+        self._internal_usb_ids = set(internal_usb_ids) if internal_usb_ids else None
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -253,7 +418,10 @@ class IdleMonitor:
         # to start a second worker in that case.
         if self._thread is not None and self._thread.is_alive():
             return False
-        nodes = list_input_event_nodes()
+        nodes = list_input_event_nodes(
+            internal_only=self._internal_only,
+            internal_usb_ids=self._internal_usb_ids,
+        )
         if not nodes:
             return False
         # At least one node must be openable (permissions).
@@ -363,12 +531,6 @@ class IdleMonitor:
         return False
 
     def _dispatch(self, cb: Callable[[], None]) -> None:
-        if _HAS_GLIB:
-            try:
-                GLib.idle_add(cb)
-                return
-            except Exception:
-                pass
         try:
             cb()
         except Exception:
@@ -377,7 +539,10 @@ class IdleMonitor:
     def _open_all(self) -> Dict[int, str]:
         """Open all current input nodes; returns {fd: path}."""
         opened: Dict[int, str] = {}
-        for node in list_input_event_nodes():
+        for node in list_input_event_nodes(
+            internal_only=self._internal_only,
+            internal_usb_ids=self._internal_usb_ids,
+        ):
             try:
                 fd = _open_node(node)
             except OSError:

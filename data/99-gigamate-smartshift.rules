@@ -1,5 +1,6 @@
-# GigaMate — AMD SmartShift bias access (Gigabyte laptops only).
+# GigaMate — AMD SmartShift bias access (Gigabyte/AORUS laptops only).
 #
-# Installed only on genuine Gigabyte laptops. Grants write access to the
-# dGPU's smartshift_bias sysfs attribute.
-SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", TEST=="smartshift_bias", RUN+="/bin/chmod 0666 $sys$devpath/smartshift_bias"
+# Guarded by DMI sys_vendor so it only triggers on genuine Gigabyte/AORUS
+# laptops even when shipped unconditionally in /usr/lib/udev/rules.d/.
+# Grants write access to the dGPU's smartshift_bias sysfs attribute.
+SUBSYSTEM=="pci", ATTRS{vendor}=="0x1002", ATTR{[dmi/id]sys_vendor}=="*[Gg][Ii][Gg][Aa][Bb][Yy][Tt][Ee]*|*[Aa][Oo][Rr][Uu][Ss]*|*[Gg][Ii][Gg][Aa]-[Bb][Yy][Tt][Ee]*", TEST=="smartshift_bias", RUN+="/bin/chmod 0666 $sys$devpath/smartshift_bias"

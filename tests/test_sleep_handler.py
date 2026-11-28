@@ -15,7 +15,6 @@ def test_sleep_handler_suspend():
 
     with patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
          patch("gigamate.sleep_handler.set_off") as mock_set_off, \
-         patch("gigamate.sleep_handler.resolve_active_profile"), \
          patch("gigamate.sleep_handler.load_config", return_value={"startup_apply": True}):
         mock_dev = MagicMock()
         mock_get_kb.return_value = mock_dev
@@ -32,7 +31,6 @@ def test_sleep_handler_suspend_respects_opt_out():
 
     with patch("gigamate.sleep_handler.get_keyboard") as mock_get_kb, \
          patch("gigamate.sleep_handler.set_off") as mock_set_off, \
-         patch("gigamate.sleep_handler.resolve_active_profile"), \
          patch("gigamate.sleep_handler.load_config", return_value={"startup_apply": False}):
         mock_get_kb.return_value = MagicMock()
 

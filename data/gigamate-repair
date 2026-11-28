@@ -67,7 +67,7 @@ def find_source(usr_src="/usr/src"):
             continue
         ver = name[len("gigamate_acpi-"):]
         m = _VERSION_RE.match(ver)
-        key = m.groups() if m else (0, 0, 0)
+        key = tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
         if best_key is None or key > best_key:
             best_key = key
             best_dir = cand

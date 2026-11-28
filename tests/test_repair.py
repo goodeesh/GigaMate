@@ -52,6 +52,16 @@ class TestFindSource:
         (tmp_path / "gigamate_acpi-foo").mkdir()
         assert mod.find_source(str(tmp_path)) == (None, None)
 
+    def test_picks_newest_numeric_semver(self, tmp_path):
+        mod = _load_helper()
+        _make_source(tmp_path, "4.5.3")
+        _make_source(tmp_path, "5.0.0")
+        newest = _make_source(tmp_path, "10.0.0")
+        _make_source(tmp_path, "custom")
+        src, ver = mod.find_source(str(tmp_path))
+        assert src == str(newest)
+        assert ver == "10.0.0"
+
 
 class TestDkmsRegistered:
     def test_registered(self):

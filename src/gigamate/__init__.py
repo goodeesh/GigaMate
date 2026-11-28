@@ -4,4 +4,4 @@ Bringing gimate (Windows) features to Linux: keyboard RGB,
 fan monitoring, power profiles, and community-driven model support.
 """
 
-__version__ = "4.5.3"
+__version__ = "5.0.0"

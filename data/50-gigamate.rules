@@ -1,0 +1,14 @@
+// GigaMate — consolidated vendor Polkit rule for privileged GigaMate helpers
+// and nvidia-powerd Dynamic Boost service management.
+// Installed by native packages into /usr/share/polkit-1/rules.d/50-gigamate.rules.
+polkit.addRule(function(action, subject) {
+    if (subject.isInGroup("wheel") || subject.isInGroup("sudo")) {
+        if (action.id == "org.gigamate.dgpu.control" ||
+            action.id == "org.gigamate.dgpu-gate.control" ||
+            action.id == "org.gigamate.repair.driver" ||
+            (action.id == "org.freedesktop.systemd1.manage-units" &&
+             action.lookup("unit") == "nvidia-powerd.service")) {
+            return polkit.Result.YES;
+        }
+    }
+});

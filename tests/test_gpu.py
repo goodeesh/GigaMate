@@ -487,3 +487,520 @@ class TestAmdSmartShift:
         mon = NvidiaGpuMonitor(pci_sysfs=root, proc_nvidia=proc)
         mon.detect()
         assert mon._check_dynamic_boost_supported() is False
+
+
+class TestDgpuGateFastPaths:
+    def test_dgpu_gate_is_gated_off_fast_path_and_self_heal(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        gate_state = {"gated": True, "bdf": "0000:01:00.0"}
+        with patch.object(dgpu_gate, "find_dgpu_topology") as find_mock:
+            assert dgpu_gate.is_gated_off(pci_sysfs=tmp_path, gate_state=gate_state) is True
+            find_mock.assert_not_called()
+
+            (tmp_path / "0000:01:00.0").mkdir()
+            assert dgpu_gate.is_gated_off(pci_sysfs=tmp_path, gate_state=gate_state) is False
+            find_mock.assert_not_called()
+
+    def test_dgpu_gate_get_status_single_scan(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state",
+                          return_value={"gated": True, "bdf": "0000:01:00.0", "vendor": "nvidia"}), \
+             patch.object(dgpu_gate, "get_gate_config", return_value=None), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "find_dgpu_topology") as find_mock:
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gated"] is True
+            assert st["bdf"] == "0000:01:00.0"
+            find_mock.assert_not_called()
+
+        topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", vendor="nvidia")
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state", return_value={}), \
+             patch.object(dgpu_gate, "get_gate_config", return_value=None), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo) as find_mock:
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gated"] is False
+            assert st["bdf"] == "0000:01:00.0"
+            assert find_mock.call_count == 1
+
+    def test_dgpu_gate_get_status_with_autodiscovered_gate_config(self, tmp_path):
+        from gigamate import dgpu_gate
+
+        cfg = dgpu_gate.DgpuGateConfig(
+            path="\\_SB.PCI0.GPP9.PG00",
+            method="_OFF",
+            quirks=["remove_before_off"],
+            source="sysfs:power_resource",
+        )
+        topo = dgpu_gate.DgpuTopology(bdf="0000:01:00.0", vendor="nvidia")
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "read_gate_state", return_value={}), \
+             patch.object(dgpu_gate, "resolve_gate_config", return_value=(cfg, None)), \
+             patch.object(dgpu_gate, "acpi_eval_backend", return_value="module"), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo):
+            st = dgpu_gate.get_status(check_helper=False)
+            assert st["gate_config"]["path"] == "\\_SB.PCI0.GPP9.PG00"
+            assert st["gate_config"]["method"] == "_OFF"
+            assert st["profile_source"] == "sysfs:power_resource"
+            assert st["experimental"] is False
+
+    def test_should_pause_tuning_eco_auto_battery(self):
+        from gigamate import dgpu_gate
+
+        with patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+             patch.object(dgpu_gate, "is_supported", return_value=True):
+            with patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_ECO):
+                assert dgpu_gate.should_pause_tuning(ac_online=False) is True
+                assert dgpu_gate.should_pause_tuning(ac_online=True) is False
+            with patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_AUTO):
+                assert dgpu_gate.should_pause_tuning(ac_online=False) is True
+                assert dgpu_gate.should_pause_tuning(ac_online=True) is False
+            with patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_OPTIMUS):
+                assert dgpu_gate.should_pause_tuning(ac_online=False) is False
+
+    def test_watcher_tick_boot_on_battery_suspended_and_active_fallback(self, tmp_path):
+        from unittest.mock import MagicMock
+        from gigamate import dgpu_gate
+
+        bdf = "0000:01:00.0"
+        pwr = tmp_path / bdf / "power"
+        pwr.mkdir(parents=True)
+        (pwr / "runtime_status").write_text("suspended")
+
+        topo = dgpu_gate.DgpuTopology(bdf=bdf, vendor="nvidia")
+        batt = MagicMock()
+        batt.is_ac_online.return_value = False
+
+        for mode in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO):
+            dgpu_gate._watcher_state.update({
+                "last_ac": None,
+                "last_event_mtime": None,
+                "last_mode": None,
+                "last_attempt_at": 0.0,
+                "last_attempt_rstatus": None,
+                "last_policy_publish": 0.0,
+                "awaiting_confirm_at": 0.0,
+                "supported_cache": None,
+                "supported_checked_at": 0.0,
+                "want_off_since": 0.0,
+                "boot_prompted": False,
+            })
+            (pwr / "runtime_status").write_text("suspended")
+            with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+                 patch.object(dgpu_gate, "configured_mode", return_value=mode), \
+                 patch.object(dgpu_gate, "get_battery_manager", return_value=batt), \
+                 patch.object(dgpu_gate, "_ac_event_mtime", return_value=None), \
+                 patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+                 patch.object(dgpu_gate, "is_supported", return_value=True), \
+                 patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False), \
+                 patch.object(dgpu_gate, "is_transition_in_progress", return_value=False), \
+                 patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo), \
+                 patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+                 patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+                 patch.object(dgpu_gate, "boot_settle_remaining", return_value=0.0), \
+                 patch.object(dgpu_gate, "sync_policy") as sync_mock:
+                dgpu_gate.watcher_tick(now=100.0)
+                sync_mock.assert_called_once_with(reason="watcher_gate_off")
+
+        # Active GPU on boot-on-battery: after 12s with empty holders -> gate_off(allow_active=True)
+        (pwr / "runtime_status").write_text("active")
+        dgpu_gate._watcher_state.update({
+            "last_ac": None,
+            "last_event_mtime": None,
+            "last_mode": None,
+            "last_attempt_at": 0.0,
+            "last_attempt_rstatus": None,
+            "last_policy_publish": 0.0,
+            "awaiting_confirm_at": 0.0,
+            "supported_cache": None,
+            "supported_checked_at": 0.0,
+            "want_off_since": 0.0,
+            "boot_prompted": False,
+        })
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_AUTO), \
+             patch.object(dgpu_gate, "get_battery_manager", return_value=batt), \
+             patch.object(dgpu_gate, "_ac_event_mtime", return_value=None), \
+             patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+             patch.object(dgpu_gate, "is_supported", return_value=True), \
+             patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False), \
+             patch.object(dgpu_gate, "is_transition_in_progress", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "boot_settle_remaining", return_value=0.0), \
+             patch.object(dgpu_gate, "list_gpu_holder_processes", return_value=[]), \
+             patch.object(dgpu_gate, "_publish_policy"), \
+             patch.object(dgpu_gate, "gate_off") as gate_off_mock:
+            dgpu_gate.watcher_tick(now=100.0)
+            gate_off_mock.assert_not_called()
+            dgpu_gate.watcher_tick(now=113.0)
+            gate_off_mock.assert_called_once_with(allow_active=True)
+
+        # Active GPU on boot-on-battery: after 12s with non-empty holders -> launch_confirm_dialog once
+        dgpu_gate._watcher_state.update({
+            "last_ac": None,
+            "last_event_mtime": None,
+            "last_mode": None,
+            "last_attempt_at": 0.0,
+            "last_attempt_rstatus": None,
+            "last_policy_publish": 0.0,
+            "awaiting_confirm_at": 0.0,
+            "supported_cache": None,
+            "supported_checked_at": 0.0,
+            "want_off_since": 0.0,
+            "boot_prompted": False,
+        })
+        with patch.object(dgpu_gate, "PCI_SYSFS", tmp_path), \
+             patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_ECO), \
+             patch.object(dgpu_gate, "get_battery_manager", return_value=batt), \
+             patch.object(dgpu_gate, "_ac_event_mtime", return_value=None), \
+             patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+             patch.object(dgpu_gate, "is_supported", return_value=True), \
+             patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False), \
+             patch.object(dgpu_gate, "is_transition_in_progress", return_value=False), \
+             patch.object(dgpu_gate, "find_dgpu_topology", return_value=topo), \
+             patch.object(dgpu_gate, "connected_dgpu_displays", return_value=[]), \
+             patch.object(dgpu_gate, "is_gpu_wedged", return_value=False), \
+             patch.object(dgpu_gate, "boot_settle_remaining", return_value=0.0), \
+             patch.object(dgpu_gate, "list_gpu_holder_processes", return_value=[{"pid": 1234, "comm": "python"}]) as holders_mock, \
+             patch.object(dgpu_gate, "_publish_policy"), \
+             patch.object(dgpu_gate, "launch_confirm_dialog") as dialog_mock, \
+             patch.dict("os.environ", {"DISPLAY": ":0"}):
+            dgpu_gate.watcher_tick(now=200.0)
+            dialog_mock.assert_not_called()
+            dgpu_gate.watcher_tick(now=213.0)
+            holders_mock.assert_called_once_with()
+            dialog_mock.assert_called_once_with(
+                trigger="boot_battery",
+                target_mode=dgpu_gate.MODE_ECO,
+                prev_mode=dgpu_gate.MODE_ECO,
+            )
+            dgpu_gate.watcher_tick(now=220.0)
+            assert dialog_mock.call_count == 1
+
+    def test_dgpu_watcher_tick_skips_nvml_when_should_pause_tuning(self):
+        from gigamate import dgpu_gate, dgpu_tune
+
+        watcher = dgpu_tune.DgpuWatcher()
+        with patch.object(dgpu_gate, "read_gate_state", return_value={"gated": False, "bdf": "0000:01:00.0"}), \
+             patch.object(dgpu_gate, "should_pause_tuning", return_value=True), \
+             patch.object(dgpu_tune, "find_nvidia_bdf") as find_mock:
+            watcher.tick(now=100.0)
+            find_mock.assert_not_called()
+            assert watcher.status()["runtime"] == "gated_off"
+
+
+def test_nvidia_sync_power_skips_powerd_when_dgpu_gate_pauses_tuning(tmp_path):
+    from gigamate import dgpu_gate
+
+    root = _nvidia_gpu(tmp_path, status="active", power_state="D0")
+    mon = NvidiaGpuMonitor(pci_sysfs=root)
+    with patch.object(dgpu_gate, "is_gated_off", return_value=False), \
+         patch.object(dgpu_gate, "should_pause_tuning", return_value=True), \
+         patch.object(mon, "_check_dynamic_boost_supported", return_value=True), \
+         patch.object(mon, "_check_dynamic_boost_active", return_value=False), \
+         patch.object(mon, "_start_nvidia_powerd") as start_mock:
+        assert mon.sync_power(3) is True
+        start_mock.assert_not_called()
+
+
+def test_tray_automation_waits_for_dgpu_wake_on_ac_and_clamps_battery_high_power():
+    from gigamate import daemon as daemon_module, dgpu_gate
+
+    d = daemon_module.GigaMateDaemon()
+    d._last_ac_online = False
+    d._current_acpi_profile = 0
+    d.get_discovered_profiles = lambda: {0: "Quiet", 1: "Balanced", 2: "Performance", 3: "Gaming"}
+
+    cfg = {
+        "ac_profile_mode": "switch",
+        "ac_profile_id": 2,
+        "battery_profile_id": 3,
+        "disabled_profiles": [],
+    }
+    allowed_state = {"val": False}
+
+    with patch.object(daemon_module, "load_config", return_value=cfg), \
+         patch.object(daemon_module, "power_config_mtime_token", return_value=1), \
+         patch.object(daemon_module, "detect_power_managers", return_value={"conflicts": [], "has_external_ac_switching": False}), \
+         patch.object(dgpu_gate, "high_power_profiles_allowed", side_effect=lambda: allowed_state["val"]), \
+         patch.object(dgpu_gate, "configured_mode", return_value=dgpu_gate.MODE_AUTO), \
+         patch.object(daemon_module.hardware, "apply_profile") as apply_mock:
+        # Transition False -> True while dGPU is still asleep: should defer, not apply
+        d._run_profile_automation(True)
+        apply_mock.assert_not_called()
+        assert d._pending_ac_profile_target is not None
+
+        # Next tick after dGPU wakes: should apply profile 2
+        d._last_ac_online = True
+        allowed_state["val"] = True
+        d._run_profile_automation(True)
+        apply_mock.assert_called_once_with(2, cfg=cfg, sync_system=True)
+        assert d._pending_ac_profile_target is None
+
+        # Transition True -> False on battery with battery_profile_id=3 under auto mode: clamps to 0 (Quiet)
+        apply_mock.reset_mock()
+        d._run_profile_automation(False)
+        apply_mock.assert_called_once_with(0, cfg=cfg, sync_system=True)
+
+
+def test_dgpu_gate_helper_wakes_bridge_and_retrains_degraded_pcie_link(tmp_path):
+    """_wake_bridge_to_d0 forces D0 and _pcie_retrain_link sets LNKCTL bit 5."""
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+
+    helper_path = Path(__file__).resolve().parents[1] / "data" / "gigamate-dgpu-gate"
+    loader = importlib.machinery.SourceFileLoader("gigamate_dgpu_gate_helper", str(helper_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+
+    pci_root = tmp_path / "pci"
+    bdf = "0000:00:03.1"
+    bdir = pci_root / bdf
+    (bdir / "power").mkdir(parents=True)
+    (bdir / "power" / "control").write_text("auto\n", encoding="utf-8")
+    (bdir / "power" / "runtime_status").write_text("active\n", encoding="utf-8")
+    (bdir / "power_state").write_text("D0\n", encoding="utf-8")
+    (bdir / "current_link_width").write_text("1\n", encoding="utf-8")
+    (bdir / "max_link_width").write_text("8\n", encoding="utf-8")
+
+    # Build minimal 256-byte PCI config space:
+    # cap_ptr at 0x34 -> 0x50 (non-PCIe cap 0x01 -> next 0x60) -> 0x60 (PCIe cap 0x10)
+    cfg = bytearray(256)
+    cfg[0x34] = 0x50
+    cfg[0x50] = 0x01
+    cfg[0x51] = 0x60
+    cfg[0x60] = 0x10
+    cfg[0x61] = 0x00
+    # LNKCTL at 0x60 + 0x10 = 0x70, initial value 0x0040
+    cfg[0x70] = 0x40
+    cfg[0x71] = 0x00
+    (bdir / "config").write_bytes(bytes(cfg))
+
+    with patch.object(mod, "_PCI_DEVICES", pci_root):
+        assert mod._wake_bridge_to_d0(bdf, wait_sec=0.2) is True
+        assert (bdir / "power" / "control").read_text(encoding="utf-8").strip() == "on"
+
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0")
+        updated = (bdir / "config").read_bytes()
+        lnkctl = int.from_bytes(updated[0x70:0x72], "little")
+        assert lnkctl & 0x0020 == 0x0020  # Retrain Link bit set
+        assert lnkctl & 0x0040 == 0x0040  # Existing bits preserved
+
+        # SBR safety: must NOT touch reset_subordinate when GPU has a bound driver
+        gdir = pci_root / "0000:64:00.0"
+        gdir.mkdir(parents=True)
+        (gdir / "driver").mkdir()
+        sbr = bdir / "reset_subordinate"
+        sbr.write_text("0\n", encoding="utf-8")
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0", allow_sbr=True)
+        assert sbr.read_text(encoding="utf-8").strip() == "0"
+
+        # When GPU is unbound, allow_sbr=True triggers reset_subordinate
+        (gdir / "driver").rmdir()
+        mod._ensure_full_pcie_link_width(bdf, "0000:64:00.0", allow_sbr=True)
+        assert sbr.read_text(encoding="utf-8").strip() == "1"
+
+    # _pause_pci_autoprobe must always restore 1 even on exception
+    ap = tmp_path / "drivers_autoprobe"
+    ap.write_text("1\n", encoding="utf-8")
+    with patch.object(mod, "_PCI_DRIVERS_AUTOPROBE", ap):
+        try:
+            with mod._pause_pci_autoprobe():
+                assert ap.read_text(encoding="utf-8").strip() == "0"
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert ap.read_text(encoding="utf-8").strip() == "1"
+
+
+def test_dgpu_gate_helper_blocks_sbr_on_non_exclusive_or_bound_bridge(tmp_path):
+    """_bridge_exclusively_hosts_unbound_dgpu blocks SBR if sibling slots, USB-C funcs, or bound drivers exist."""
+    import importlib.machinery
+    import importlib.util
+    import shutil
+    from pathlib import Path
+
+    helper_path = Path(__file__).resolve().parents[1] / "data" / "gigamate-dgpu-gate"
+    loader = importlib.machinery.SourceFileLoader("gigamate_dgpu_gate_sbr_test", str(helper_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+
+    pci_root = tmp_path / "pci"
+    bridge = "0000:00:03.1"
+    bdir = pci_root / bridge
+    bdir.mkdir(parents=True)
+    (bdir / "class").write_text("0x060400\n", encoding="utf-8")
+
+    # Downstream devices nested under bridge (real sysfs topology).
+    gpu = bdir / "0000:64:00.0"
+    aud = bdir / "0000:64:00.1"
+    gpu.mkdir()
+    aud.mkdir()
+    (gpu / "class").write_text("0x030000\n", encoding="utf-8")
+    (aud / "class").write_text("0x040300\n", encoding="utf-8")
+    (pci_root / "0000:64:00.0").symlink_to(gpu)
+    (pci_root / "0000:64:00.1").symlink_to(aud)
+
+    with patch.object(mod, "_PCI_DEVICES", pci_root):
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is True
+
+        # Bound audio sibling blocks SBR
+        (aud / "driver").mkdir()
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+        (aud / "driver").rmdir()
+
+        # USB-C xHCI/UCSI function (.2) on GPU slot blocks SBR
+        ucsi = bdir / "0000:64:00.2"
+        ucsi.mkdir()
+        (ucsi / "class").write_text("0x0c0330\n", encoding="utf-8")
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+        shutil.rmtree(ucsi)
+
+        # Non-GPU sibling slot on the same root bridge blocks SBR
+        nvme = bdir / "0000:64:01.0"
+        nvme.mkdir()
+        (nvme / "class").write_text("0x010802\n", encoding="utf-8")
+        assert mod._bridge_exclusively_hosts_unbound_dgpu(bridge, "0000:64:00.0") is False
+
+
+def test_probe_dgpu_gate_handles_cached_tuple_with_none_match(monkeypatch):
+    """probe_dgpu_gate() must not crash when get_gate_config() returns (cfg, None)."""
+    from gigamate import dgpu_gate
+
+    topo = dgpu_gate.DgpuTopology(
+        bdf="0000:64:00.0",
+        vendor="nvidia",
+        bridge_bdf="0000:00:03.1",
+        acpi_path="\\_SB.PCI0.GPP9.PEGP",
+        power_resources=["\\_SB.PCI0.GPP9.PG00"],
+    )
+    cfg = dgpu_gate.DgpuGateConfig(path="\\_SB.PCI0.GPP9.PG00", source="auto")
+
+    monkeypatch.setattr(dgpu_gate, "_GATE_PROBE_IN_PROGRESS", False)
+    monkeypatch.setattr(dgpu_gate, "find_dgpu_topology", lambda: topo)
+    monkeypatch.setattr(dgpu_gate, "acpi_eval_backend", lambda: "none")
+    monkeypatch.setattr(dgpu_gate, "get_gate_config", lambda: (cfg, None))
+
+    res = dgpu_gate.probe_dgpu_gate(live_test=False)
+    assert res["candidates"]
+    assert res["candidates"][0]["source"] == "auto"
+    assert res["profile_match"]["source"] == "auto"
+
+
+def test_cli_gpu_power_confirm_dialog_accepts_boot_battery_trigger(monkeypatch):
+    """`gigamate gpu power confirm-dialog --trigger boot_battery` parses and forwards args."""
+    import sys
+    import types
+    import pytest
+    from gigamate import cli
+
+    captured = {}
+    fake_mod = types.ModuleType("gigamate.ui.dgpu_gate_dialog")
+
+    def fake_main(argv):
+        captured["argv"] = argv
+        return 0
+
+    fake_mod.main = fake_main
+    monkeypatch.setitem(sys.modules, "gigamate.ui.dgpu_gate_dialog", fake_mod)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["gigamate", "gpu", "power", "confirm-dialog", "--trigger", "boot_battery", "--target-mode", "auto"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert "--trigger" in captured["argv"]
+    assert "boot_battery" in captured["argv"]
+
+
+def test_daemon_usbc_power_budget_integration(tmp_path, monkeypatch):
+    from gigamate import config as config_mod
+    from gigamate import daemon as daemon_module
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+    assert daemon_module.GigaMateDaemon.desired_poll_interval_ms(True, usbc_fast_poll=True) == 2000
+    assert daemon_module.GigaMateDaemon.desired_poll_interval_ms(False, usbc_fast_poll=False) == 15000
+
+    d = daemon_module.GigaMateDaemon()
+    called = {"ticks": 0, "shutdown": 0}
+    monkeypatch.setattr(d._usbc_power, "tick", lambda *a, **kw: (called.__setitem__("ticks", called["ticks"] + 1) or {}))
+    monkeypatch.setattr(d._usbc_power, "shutdown", lambda *a, **kw: called.__setitem__("shutdown", called["shutdown"] + 1))
+
+    with patch.object(d, "sync_from_external_config"), \
+         patch.object(d, "_ensure_acpi_controller"), \
+         patch.object(d, "_maybe_retry_keyboard"), \
+         patch.object(d, "_run_profile_automation"), \
+         patch("gigamate.daemon.get_gpu_state", return_value=GpuState(present=False)), \
+         patch("gigamate.daemon.get_battery_manager"):
+        d.poll_tick(run_automation=True)
+    assert called["ticks"] == 1
+    d.stop()
+    assert called["shutdown"] == 1
+
+
+def test_cli_gpu_usbc_budget_and_doctor(tmp_path, monkeypatch, capsys):
+    import sys
+    from gigamate import cli, config as config_mod, doctor, usbc_power
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+
+    for argv in (
+        ["gigamate", "gpu", "usbc-budget", "on"],
+        ["gigamate", "gpu", "usbc-budget", "set", "58"],
+        ["gigamate", "gpu", "usbc-budget", "buffer", "20"],
+        ["gigamate", "gpu", "usbc-budget", "off"],
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        cli.main()
+
+    cfg = config_mod.load()
+    assert cfg["usbc_power_budget_disclaimer_accepted"] is True
+    assert cfg["usbc_power_budget_enabled"] is False
+    assert cfg["usbc_gpu_budget_w"] == 58
+    assert cfg["usbc_buffer_pct"] == 20
+
+    fake_src = usbc_power.PowerSourceSnapshot(
+        kind="usbc_pd", ac_online=True, usbc_online=True, is_pd=True,
+        detected_wattage_w=100, wattage_source="pd_current_inferred",
+        negotiated_current_a=5.0, negotiated_voltage_v=None, firmware_usbc_flag=True,
+        bat_present=True, bat_status="Charging", bat_capacity=80, bat_power_w=2.0,
+    )
+    with patch("gigamate.usbc_power.detect_power_source", return_value=fake_src), \
+         patch("gigamate.usbc_power.read_cached_gpu_caps_only", return_value=usbc_power.GpuPowerCaps(default_tgp_w=50, max_constraint_w=85)), \
+         patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml:
+        monkeypatch.setattr(sys, "argv", ["gigamate", "gpu", "usbc-budget", "status"])
+        cli.main()
+        out = capsys.readouterr().out
+        assert "usbc_pd" in out and "100 W" in out
+        mock_nvml.assert_not_called()
+
+        with patch("gigamate.doctor.find_keyboard_hidraws", return_value=[]), \
+             patch("gigamate.doctor.session_details", return_value=({}, "active")), \
+             patch("gigamate.doctor.acpi_module_status") as mock_ms, \
+             patch("gigamate.dgpu_gate.get_status", return_value={}):
+            mock_ms.return_value.running_kernel = "test"
+            mock_ms.return_value.summary = "loaded"
+            mock_ms.return_value.hint = "ok"
+            rc = doctor.run_doctor()
+            assert rc == 0
+            doc_out = capsys.readouterr().out
+            assert "USB-C Power Budget" in doc_out
+            assert "100 W" in doc_out
+        mock_nvml.assert_not_called()

@@ -1,0 +1,2 @@
+# Notify GigaMate's dGPU power-gate watcher when AC mains power changes.
+SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains", ACTION=="change", RUN+="/bin/sh -c 'mkdir -p /run/gigamate && touch /run/gigamate/ac-event'"

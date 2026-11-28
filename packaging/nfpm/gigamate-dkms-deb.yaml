@@ -1,0 +1,21 @@
+name: "gigamate-dkms"
+arch: "all"
+platform: "linux"
+version: "${VERSION}"
+section: "kernel"
+priority: "optional"
+maintainer: "adriansc <goodeesh@users.noreply.github.com>"
+description: "GigaMate ACPI kernel driver (DKMS)"
+homepage: "https://github.com/goodeesh/GigaMate"
+license: "MIT"
+depends:
+  - "dkms"
+  - "make"
+  - "gcc | clang"
+contents:
+  - src: "${STAGE_DIR}/dkms/usr/"
+    dst: "/usr"
+    type: tree
+scripts:
+  postinstall: packaging/scripts/postinst-dkms.sh
+  preremove: packaging/scripts/prerm-dkms.sh

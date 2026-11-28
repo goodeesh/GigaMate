@@ -334,6 +334,279 @@ def admin_status(run: Callable = subprocess.run) -> str:
 
 
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
+INSTALL_METHOD_FILE = Path("/usr/lib/gigamate/install-method")
+_PACKAGE_INSTALL_METHODS = frozenset({"apt", "dnf", "zypper", "pacman", "aur"})
+
+
+def detect_install_method(
+        marker_path: Path = INSTALL_METHOD_FILE,
+        which: Callable[[str], Optional[str]] = shutil.which,
+        run: Callable = subprocess.run) -> str:
+    """Detect how GigaMate was installed.
+
+    Returns one of ``"apt"``, ``"dnf"``, ``"zypper"``, ``"pacman"``, ``"aur"``,
+    or ``"script"``. Checks ``marker_path`` first, then falls back to probing
+    the system package manager owning the ``gigamate`` binary. Never raises.
+    """
+    try:
+        if marker_path.exists():
+            val = marker_path.read_text(encoding="utf-8", errors="replace").strip().lower()
+            if val in _PACKAGE_INSTALL_METHODS:
+                return val
+            if val == "script":
+                return "script"
+    except Exception:
+        pass
+
+    try:
+        exe = which("gigamate")
+    except Exception:
+        exe = None
+    if not exe:
+        return "script"
+
+    def _owns(cmd: list) -> bool:
+        try:
+            proc = run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            return getattr(proc, "returncode", 1) == 0
+        except Exception:
+            return False
+
+    try:
+        if which("pacman") and _owns(["pacman", "-Qo", exe]):
+            return "pacman"
+        if which("dpkg") and _owns(["dpkg", "-S", exe]):
+            return "apt"
+        if which("rpm") and _owns(["rpm", "-qf", exe]):
+            if which("zypper") and not which("dnf"):
+                return "zypper"
+            return "dnf"
+    except Exception:
+        pass
+
+    return "script"
+
+
+def is_package_managed(method: Optional[str] = None) -> bool:
+    """True when GigaMate is managed by a native Linux package manager."""
+    if method is None:
+        method = detect_install_method()
+    return method in _PACKAGE_INSTALL_METHODS
+
+
+def package_upgrade_command(
+        method: str,
+        which: Callable[[str], Optional[str]] = shutil.which) -> Optional[str]:
+    """Return the package-manager upgrade command for ``method``, or None."""
+    if method == "apt":
+        return "sudo apt update && sudo apt upgrade gigamate gigamate-dkms"
+    if method == "dnf":
+        return "sudo dnf upgrade gigamate gigamate-dkms"
+    if method == "zypper":
+        return "sudo zypper update gigamate gigamate-dkms"
+    if method == "pacman":
+        return "sudo pacman -Syu gigamate gigamate-dkms"
+    if method == "aur":
+        if which("paru"):
+            return "paru -Syu gigamate gigamate-dkms"
+        if which("yay"):
+            return "yay -Syu gigamate gigamate-dkms"
+        return "paru -Syu gigamate gigamate-dkms"
+    return None
+
+
+def build_package_terminal_update_command(
+        method: str,
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which,
+        detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
+        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+    """Argv opening the user's terminal running the package-manager upgrade."""
+    cmd = package_upgrade_command(method, which=which)
+    if not cmd:
+        return None
+    return _open_terminal_with(
+        f"{cmd}; exec bash",
+        desktop=desktop,
+        which=which,
+        detect=detect,
+        env=env,
+    )
+
+
+_LEGACY_BIN_NAMES = (
+    "gigamate",
+    "gigamate-tray",
+    "gigamate-center",
+    "gigamate-dgpu-watch",
+)
+_LEGACY_UNIT_NAMES = (
+    "gigamate.service",
+    "gigamate-dgpu.service",
+)
+_LEGACY_DESKTOP_NAMES = (
+    "gigamate.desktop",
+    "gigamate-center.desktop",
+)
+_LEGACY_ICON_NAMES = (
+    "gigamate.svg",
+    "gigamate-nvidia.svg",
+    "gigamate-amd.svg",
+    "gigamate-update.svg",
+    "gigamate-nvidia-update.svg",
+    "gigamate-amd-update.svg",
+    "checkbox-checked.svg",
+)
+_PIP_CONSOLE_SCRIPT_RE = re.compile(
+    r"\b(?:from|import)\s+gigamate\b|load_entry_point\(\s*['\"]gigamate\b"
+)
+
+
+def _is_legacy_pip_script(text: str) -> bool:
+    """True when ``text`` looks like a pip/setuptools gigamate console script."""
+    first_line = text.splitlines()[0] if text else ""
+    return (
+        first_line.startswith("#!")
+        and "python" in first_line.lower()
+        and bool(_PIP_CONSOLE_SCRIPT_RE.search(text))
+    )
+
+
+def migrate_legacy_user_install(
+        home: Optional[Path] = None,
+        state_file: Path = STATE_FILE,
+        marker_path: Path = INSTALL_METHOD_FILE,
+        run: Callable = subprocess.run,
+        which: Callable[[str], Optional[str]] = shutil.which,
+        system_share_dir: Path = Path("/usr/share")) -> list[str]:
+    """One-time cleanup of legacy install.sh user files on packaged installs.
+
+    No-op for script-managed installs or once ``migrated_to_pkg`` is persisted
+    in ``state_file``. Preserves user configuration under ``~/.config/gigamate``
+    and any custom scripts, desktop overrides, icons, or systemd units that do
+    not match install.sh signatures or packaged files. Never raises on OSError.
+    """
+    if load_state(state_file).get("migrated_to_pkg"):
+        return []
+    method = detect_install_method(
+        marker_path=marker_path, which=which, run=run
+    )
+    if not is_package_managed(method):
+        return []
+
+    user_home = home if home is not None else Path.home()
+    removed: list[str] = []
+    removed_unit = False
+
+    bin_dir = user_home / ".local" / "bin"
+    for name in _LEGACY_BIN_NAMES:
+        path = bin_dir / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if _is_legacy_pip_script(text):
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    unit_dir = user_home / ".config" / "systemd" / "user"
+    wants_dir = unit_dir / "graphical-session.target.wants"
+    for name in _LEGACY_UNIT_NAMES:
+        path = unit_dir / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if ".local/bin/gigamate" in text:
+                unit_resolved = path.resolve(strict=False)
+                path.unlink()
+                removed.append(str(path))
+                removed_unit = True
+                wants_link = wants_dir / name
+                try:
+                    if wants_link.is_symlink() and (
+                        wants_link.resolve(strict=False) == unit_resolved
+                        or not wants_link.exists()
+                    ):
+                        wants_link.unlink()
+                        removed.append(str(wants_link))
+                except OSError:
+                    pass
+        except OSError:
+            continue
+
+    apps_dir = user_home / ".local" / "share" / "applications"
+    sys_apps_dir = system_share_dir / "applications"
+    for name in _LEGACY_DESKTOP_NAMES:
+        path = apps_dir / name
+        try:
+            if not (path.is_file() and not path.is_symlink()):
+                continue
+            pkg_desktop = sys_apps_dir / name
+            matches_pkg = (
+                pkg_desktop.is_file()
+                and path.read_bytes() == pkg_desktop.read_bytes()
+            )
+            matches_legacy = False
+            if not matches_pkg:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                matches_legacy = (
+                    "StartupWMClass=gigamate-center" in text
+                    and ".local/bin/gigamate" in text
+                )
+            if matches_pkg or matches_legacy:
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    icons_dir = (
+        user_home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps"
+    )
+    sys_icons_dir = (
+        system_share_dir / "icons" / "hicolor" / "scalable" / "apps"
+    )
+    for name in _LEGACY_ICON_NAMES:
+        path = icons_dir / name
+        try:
+            if not (path.is_file() and not path.is_symlink()):
+                continue
+            pkg_icon = sys_icons_dir / name
+            if pkg_icon.is_file() and path.read_bytes() == pkg_icon.read_bytes():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+
+    if removed_unit:
+        try:
+            if which("systemctl"):
+                run(
+                    ["systemctl", "--user", "daemon-reload"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+        except Exception:
+            pass
+
+    try:
+        def _mark_migrated(state: Dict) -> Dict:
+            state["migrated_to_pkg"] = True
+            return state
+
+        update_update_state(_mark_migrated, state_file=state_file)
+    except OSError:
+        pass
+
+    return removed
 
 
 def install_script_url(tag: Optional[str] = None) -> str:

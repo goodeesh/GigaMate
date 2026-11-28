@@ -1,0 +1,2 @@
+enable gigamate.service
+enable gigamate-dgpu.service

@@ -40,3 +40,26 @@ class TestOSD:
             assert res is True
             mock_kde.assert_called_once()
             mock_free.assert_called_once()
+
+
+def test_cli_profile_cycle_passes_profile_name_and_description_to_osd(capsys):
+    from gigamate.acpi import FanProfile
+    from gigamate.cli import cmd_profile_cycle
+
+    mock_ctrl = MagicMock()
+    mock_ctrl.get_profile.return_value = FanProfile.QUIET
+    mock_ctrl.set_profile.return_value = True
+    profiles_map = {
+        0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+        1: {"name": "Balanced", "description": "Balanced performance and noise"},
+    }
+
+    with patch("gigamate.cli._open_profiles", return_value=(mock_ctrl, profiles_map, {"disabled_profiles": []})), \
+         patch("gigamate.cli._record_profile_and_sync"), \
+         patch("gigamate.dgpu_gate.high_power_profiles_allowed", return_value=True), \
+         patch("gigamate.cli.show_profile_osd") as mock_osd:
+        cmd_profile_cycle(MagicMock())
+
+    out = capsys.readouterr().out
+    assert "Power profile cycled to: Balanced  (1)" in out
+    mock_osd.assert_called_once_with("Balanced", "Balanced performance and noise")

@@ -803,3 +803,140 @@ def test_helper_probe_reports_ceiling(capsys):
     assert out["mem_max_clock_mhz"] == 12001
     assert out["mem_offset_api"] is True
     assert out["helper_version"] == mod.HELPER_VERSION
+
+
+def test_write_state_skips_unchanged_snapshots():
+    w = dgpu_tune.DgpuWatcher()
+    written = []
+    times = iter([100.0, 102.0])
+    with mock.patch.object(dgpu_tune, "_write_state_file", side_effect=written.append), \
+         mock.patch.object(dgpu_tune.time, "time", side_effect=lambda: next(times)) as ts_mock:
+        w.write_state()
+        w.write_state()  # Unchanged snapshot -> must not write again.
+        assert len(written) == 1
+        assert written[0]["ts"] == 100.0
+        assert ts_mock.call_count == 1
+
+        w.set_desired(True, 120, True)
+        w.write_state()
+        assert len(written) == 2
+        assert written[1]["desired_offset"] == 120
+        assert written[1]["ts"] == 102.0
+        assert ts_mock.call_count == 2
+
+
+def test_watcher_sleep_interval_adaptive():
+    from gigamate import dgpu_gate
+
+    w = dgpu_tune.DgpuWatcher()
+    with mock.patch.object(dgpu_gate, "is_transition_in_progress", return_value=False), \
+         mock.patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False):
+        w._status["runtime"] = "gated_off"
+        w._status["power_state"] = "OFF"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_IDLE_SEC
+
+        w._status["runtime"] = "suspended"
+        w._status["power_state"] = "D3cold"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_IDLE_SEC
+
+        w._status["runtime"] = "active"
+        w._status["power_state"] = "D0"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_SEC
+
+    with mock.patch.object(dgpu_gate, "is_transition_in_progress", return_value=True), \
+         mock.patch.object(dgpu_gate, "is_confirm_dialog_open", return_value=False):
+        w._status["runtime"] = "gated_off"
+        w._status["power_state"] = "OFF"
+        assert dgpu_tune._watcher_sleep_interval(w) == dgpu_tune.TICK_SEC
+
+
+def test_find_nvidia_bdf_caches_and_recovers(tmp_path):
+    import shutil
+
+    pci = tmp_path / "pci"
+    dev = pci / "0000:01:00.0"
+    dev.mkdir(parents=True)
+    (dev / "vendor").write_text("0x10de\n")
+    (dev / "class").write_text("0x030000\n")
+
+    with mock.patch.object(dgpu_tune, "PCI_SYSFS", pci), \
+         mock.patch.object(dgpu_tune, "_nvidia_bdf_cache", None):
+        assert dgpu_tune.find_nvidia_bdf() == "0000:01:00.0"
+
+        with mock.patch.object(dgpu_tune.os, "listdir", wraps=dgpu_tune.os.listdir) as ld:
+            assert dgpu_tune.find_nvidia_bdf() == "0000:01:00.0"
+            assert ld.call_count == 0
+
+        shutil.rmtree(dev)
+        assert dgpu_tune.find_nvidia_bdf() is None
+
+
+def test_has_discrete_gpu_detection(tmp_path):
+    gate = tmp_path / "gate.json"
+
+    # iGPU-only Intel laptop -> False
+    pci_intel = tmp_path / "pci_intel"
+    intel = pci_intel / "0000:00:02.0"
+    intel.mkdir(parents=True)
+    (intel / "vendor").write_text("0x8086\n")
+    (intel / "class").write_text("0x030000\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_intel, gate_state_path=gate) is False
+
+    # NVIDIA VGA (0x0300) -> True
+    pci_nv_vga = tmp_path / "pci_nv_vga"
+    nv_vga = pci_nv_vga / "0000:01:00.0"
+    nv_vga.mkdir(parents=True)
+    (nv_vga / "vendor").write_text("0x10DE\n")
+    (nv_vga / "class").write_text("0x030000\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_nv_vga, gate_state_path=gate) is True
+
+    # NVIDIA 3D controller (0x0302) -> True
+    pci_nv_3d = tmp_path / "pci_nv_3d"
+    nv_3d = pci_nv_3d / "0000:01:00.0"
+    nv_3d.mkdir(parents=True)
+    (nv_3d / "vendor").write_text("0x10de\n")
+    (nv_3d / "class").write_text("0x030200\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_nv_3d, gate_state_path=gate) is True
+
+    # Discrete AMD (0x1002 + 0x0302, no uma) -> True
+    pci_amd_dgpu = tmp_path / "pci_amd_dgpu"
+    amd_d = pci_amd_dgpu / "0000:03:00.0"
+    amd_d.mkdir(parents=True)
+    (amd_d / "vendor").write_text("0x1002\n")
+    (amd_d / "class").write_text("0x030200\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_dgpu, gate_state_path=gate) is True
+
+    # Integrated AMD APU (0x1002 + 0x0302 with uma file) -> False
+    (amd_d / "uma").write_text("1\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_dgpu, gate_state_path=gate) is False
+
+    # Discrete AMD VGA controller (0x1002 + 0x0300, no uma, boot_vga == 0) -> True
+    pci_amd_vga = tmp_path / "pci_amd_vga"
+    amd_vga = pci_amd_vga / "0000:03:00.0"
+    amd_vga.mkdir(parents=True)
+    (amd_vga / "vendor").write_text("0x1002\n")
+    (amd_vga / "class").write_text("0x030000\n")
+    (amd_vga / "boot_vga").write_text("0\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_vga, gate_state_path=gate) is True
+
+    # Primary/integrated AMD VGA controller (0x1002 + 0x0300, boot_vga == 1) -> False
+    (amd_vga / "boot_vga").write_text("1\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_vga, gate_state_path=gate) is False
+
+    # Gated-off dGPU (no PCI device visible, gate state file exists) -> True
+    gate.write_text('{"gated": true}\n')
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_intel, gate_state_path=gate) is True
+
+
+def test_run_watcher_exits_cleanly_without_dgpu():
+    with mock.patch.object(dgpu_tune, "has_discrete_gpu", return_value=False), \
+         mock.patch.object(dgpu_tune.watcher, "load_desired_from_config") as load_cfg, \
+         mock.patch.object(dgpu_tune, "reset_legacy_mem_pin") as reset_mem, \
+         mock.patch.object(dgpu_tune.watcher, "write_state") as write_st, \
+         mock.patch.object(dgpu_tune.time, "sleep") as sleep_fn:
+        assert dgpu_tune.run_watcher() is None
+        load_cfg.assert_not_called()
+        reset_mem.assert_not_called()
+        write_st.assert_not_called()
+        sleep_fn.assert_not_called()
+

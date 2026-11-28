@@ -1,0 +1,1446 @@
+#!/usr/bin/env python3
+"""GigaMate — privileged discrete GPU power-gate helper.
+
+Installed root-owned (0755) at /usr/lib/gigamate/gigamate-dgpu-gate and invoked
+via pkexec by the unprivileged GigaMate CLI/tray/Center/watcher. It performs
+exactly one validated power-gate action or read-only ACPI status/probe query and
+exits.
+
+Commands (argv):
+    version
+    status --path <acpi_path> [--sta-method <_STA|_PSC>]
+    probe --path <acpi_path> [--path <acpi_path> ...]
+    prepare-off --bdf <bdf> [--allow-active]
+    gate-off --bdf <bdf> --path <acpi_path> --method <_OFF|_PS3>
+             [--audio-bdf <bdf>] [--bridge-bdf <bdf>]
+             [--sta-method <_STA|_PSC>] [--on-method <_ON|_PS0>]
+             [--quirk <name> ...]
+             [--allow-active] [--stopped-nvidia-powerd]
+    gate-on --path <acpi_path> --method <_ON|_PS0>
+            [--bridge-bdf <bdf>] [--sta-method <_STA|_PSC>]
+            [--restart-nvidia-powerd]
+
+Output: a single JSON object on stdout. Exit code 0 on command completion
+(with {"ok": true|false, ...}), 2 on usage/validation error.
+
+nvidia-powerd is never sent SIGTERM while the dGPU is suspended: its cleanup
+path forces a runtime resume whose FSP "clock boost" step intermittently hangs
+(wedging daemon and GPU). The gate-off sequence wakes the GPU first via a plain
+runtime resume (powerd still alive — with up to 45s budget for cold PG00._ON),
+stops the daemon on the awake GPU, then for remove_before_off unbinds/removes
+the PCI functions immediately while awake before cutting ACPI power (or hands back
+to runtime PM and waits for re-suspend when off_before_remove is required). A
+stop that does not settle aborts with reason "powerd_stop_timeout" and the GPU
+is left untouched; a GPU left stuck is reported as reason "wedged".
+"""
+
+from contextlib import contextmanager
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+HELPER_VERSION = 4
+
+_PCI_DEVICES = Path("/sys/bus/pci/devices")
+_PCI_BUS_RESCAN = Path("/sys/bus/pci/rescan")
+_PCI_DRIVERS_AUTOPROBE = Path("/sys/bus/pci/drivers_autoprobe")
+_PCI_DRIVERS_PROBE = Path("/sys/bus/pci/drivers_probe")
+_DRM_SYSFS = Path("/sys/class/drm")
+_ACPI_EVAL = Path("/sys/devices/platform/gigamate_acpi/acpi_eval")
+_ACPI_CALL = Path("/proc/acpi/call")
+_STATE_FILE = Path("/run/gigamate-dgpu-gate.json")
+_LOCK_FILE = Path("/run/gigamate-dgpu-gate.lock")
+
+_NVIDIA_VENDOR = "0x10de"
+_AMD_VENDOR = "0x1002"
+_UMA_APERTURE_MAX_BYTES = 1 << 30
+
+_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
+_ACPI_PATH_RE = re.compile(r"^\\_SB_?\.[A-Za-z0-9_.]{1,100}$")
+_OFF_METHODS = ("_OFF", "_PS3")
+_ON_METHODS = ("_ON", "_PS0")
+_STA_METHODS = ("_STA", "_PSC")
+_KNOWN_QUIRKS = {"remove_before_off", "off_before_remove"}
+
+
+def _emit(payload: Dict, code: int = 0) -> int:
+    print(json.dumps(payload, sort_keys=True), flush=True)
+    return code
+
+
+def _read_text(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        return text or None
+    except OSError:
+        return None
+
+
+def _is_valid_bdf(bdf: Optional[str]) -> bool:
+    return bool(bdf and _BDF_RE.fullmatch(bdf))
+
+
+def _is_valid_acpi_path(path: Optional[str]) -> bool:
+    return bool(path and _ACPI_PATH_RE.fullmatch(path))
+
+
+def _acquire_lock(timeout: float = 2.0) -> Tuple[Optional[object], bool]:
+    """Try to acquire an exclusive flock within ``timeout`` seconds.
+
+    Returns ``(file_handle, timed_out)``. Never blocks forever behind a wedged
+    transition.
+    """
+    try:
+        _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(_LOCK_FILE, "a+", encoding="utf-8")
+    except OSError:
+        return None, False
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh, False
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+                return None, True
+            time.sleep(0.1)
+        except OSError:
+            return fh, False
+
+
+def _release_lock(fh) -> None:
+    if fh is None:
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        fh.close()
+    except OSError:
+        pass
+
+
+def _is_integrated_amd(dev: Path) -> bool:
+    if (dev / "uma").is_dir():
+        return True
+    total = _read_text(dev / "mem_info_vram_total")
+    if total:
+        try:
+            if int(total) < _UMA_APERTURE_MAX_BYTES:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _find_dgpu() -> Tuple[Optional[str], Optional[str]]:
+    """Scan PCI sysfs for a discrete GPU (sysfs only, never wakes it)."""
+    if not _PCI_DEVICES.is_dir():
+        return None, None
+    try:
+        entries = sorted(_PCI_DEVICES.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return None, None
+
+    amd_candidate: Optional[str] = None
+    for entry in entries:
+        if not entry.is_dir() or not _is_valid_bdf(entry.name):
+            continue
+        vendor = _read_text(entry / "vendor")
+        klass = _read_text(entry / "class")
+        if not vendor or not klass or not klass.startswith("0x03"):
+            continue
+        if vendor.lower() == _NVIDIA_VENDOR and (
+            klass.startswith("0x0300") or klass.startswith("0x0302")
+        ):
+            return entry.name, "nvidia"
+        if vendor.lower() == _AMD_VENDOR and amd_candidate is None:
+            if _is_integrated_amd(entry):
+                continue
+            boot_vga = _read_text(entry / "boot_vga")
+            if boot_vga == "0" or (klass.startswith("0x0302") and boot_vga != "1"):
+                amd_candidate = entry.name
+
+    if amd_candidate is not None:
+        return amd_candidate, "amd"
+    return None, None
+
+
+def _verify_dgpu_bdf(bdf: str) -> Tuple[bool, Optional[str], str]:
+    if not _is_valid_bdf(bdf):
+        return False, None, f"invalid PCI BDF: {bdf!r}"
+    dev = _PCI_DEVICES / bdf
+    if not dev.is_dir():
+        return False, None, f"PCI device not found: {bdf}"
+    vendor = (_read_text(dev / "vendor") or "").lower()
+    klass = (_read_text(dev / "class") or "").lower()
+    if vendor == _NVIDIA_VENDOR and (klass.startswith("0x0300") or klass.startswith("0x0302")):
+        return True, "nvidia", ""
+    if vendor == _AMD_VENDOR and not _is_integrated_amd(dev):
+        boot_vga = _read_text(dev / "boot_vga")
+        if boot_vga == "0" or (klass.startswith("0x0302") and boot_vga != "1"):
+            return True, "amd", ""
+    return False, None, f"{bdf} is not a discrete GPU (vendor={vendor}, class={klass})"
+
+
+def _verify_audio_sibling(gpu_bdf: str, audio_bdf: Optional[str]) -> Optional[str]:
+    if not audio_bdf:
+        return None
+    if not _is_valid_bdf(audio_bdf):
+        return None
+    if audio_bdf[:-1] != gpu_bdf[:-1] or audio_bdf == gpu_bdf:
+        return None
+    dev = _PCI_DEVICES / audio_bdf
+    if not dev.is_dir():
+        return None
+    klass = (_read_text(dev / "class") or "").lower()
+    if klass.startswith("0x0403"):
+        return audio_bdf
+    return None
+
+
+def _verify_bridge_bdf(gpu_bdf: str, bridge_bdf: Optional[str]) -> Optional[str]:
+    if not bridge_bdf or not _is_valid_bdf(bridge_bdf):
+        return None
+    gpu_real = os.path.realpath(_PCI_DEVICES / gpu_bdf)
+    bridge_real = os.path.realpath(_PCI_DEVICES / bridge_bdf)
+    if not os.path.isdir(bridge_real):
+        return None
+    if os.path.dirname(gpu_real) != bridge_real:
+        return None
+    klass = (_read_text(Path(bridge_real) / "class") or "").lower()
+    if klass.startswith("0x0604"):
+        return bridge_bdf
+    return None
+
+
+def _connected_dgpu_displays(bdf: str) -> List[str]:
+    """Return connector names (e.g. 'HDMI-A-1') wired to ``bdf`` with status == 'connected'."""
+    if not _DRM_SYSFS.is_dir():
+        return []
+    gpu_real = os.path.realpath(_PCI_DEVICES / bdf)
+    connected: List[str] = []
+    try:
+        entries = sorted(_DRM_SYSFS.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return []
+    for entry in entries:
+        if "-" not in entry.name or not entry.name.startswith("card"):
+            continue
+        card_dev = entry / "device"
+        if not card_dev.exists():
+            continue
+        card_dev_real = os.path.realpath(card_dev)
+        pci_dev = card_dev / "device"
+        pci_dev_real = os.path.realpath(pci_dev) if pci_dev.exists() else ""
+        if not (
+            card_dev_real == gpu_real
+            or pci_dev_real == gpu_real
+            or card_dev_real.startswith(gpu_real + os.sep)
+        ):
+            continue
+        status = (_read_text(entry / "status") or "").lower()
+        if status == "connected":
+            # Strip 'cardN-' prefix for clear user display.
+            connected.append(entry.name.split("-", 1)[1])
+    return connected
+
+
+_MANAGED_POWER_DAEMONS = frozenset({"nvidia-powerd"})
+
+
+def _audio_card_holders(audio_bdf: Optional[str]) -> List[str]:
+    """Return process names holding ALSA device nodes for ``audio_bdf`` (e.g. controlC0)."""
+    if not audio_bdf or not _is_valid_bdf(audio_bdf):
+        return []
+    sound_dir = _PCI_DEVICES / audio_bdf / "sound"
+    if not sound_dir.is_dir():
+        return []
+    indices: List[str] = []
+    try:
+        for entry in sound_dir.iterdir():
+            m = re.fullmatch(r"card(\d+)", entry.name)
+            if m:
+                indices.append(m.group(1))
+    except OSError:
+        return []
+    if not indices:
+        return []
+    pat = re.compile(rf"^/dev/snd/.*C(?:{'|'.join(indices)})(?:\D|$)")
+    holders = set()
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return []
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        fd_dir = Path("/proc") / pid / "fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd_dir / fd)
+            except OSError:
+                continue
+            if pat.match(target):
+                comm = _read_text(Path("/proc") / pid / "comm")
+                holders.add(comm or pid)
+                break
+    return sorted(holders)
+
+
+def _wake_holders(ignore_managed_daemons: bool = False) -> List[str]:
+    """Return process names holding /dev/nvidia* file descriptors."""
+    holders = set()
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return []
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        fd_dir = Path("/proc") / pid / "fd"
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd_dir / fd)
+            except OSError:
+                continue
+            if target.startswith("/dev/nvidia"):
+                comm = _read_text(Path("/proc") / pid / "comm")
+                name = comm or pid
+                if ignore_managed_daemons and name in _MANAGED_POWER_DAEMONS:
+                    break
+                holders.add(name)
+                break
+    return sorted(holders)
+
+
+def _eval_backend() -> str:
+    if _ACPI_EVAL.exists():
+        return "module"
+    if _ACPI_CALL.exists():
+        return "acpi_call"
+    return "none"
+
+
+def _eval_acpi_method(full_method: str) -> Tuple[bool, Optional[str], str, Optional[str]]:
+    """Evaluate an ACPI method path via gigamate_acpi/acpi_eval or /proc/acpi/call."""
+    if not _ACPI_PATH_RE.fullmatch(full_method):
+        return False, None, _eval_backend(), f"invalid ACPI method path: {full_method!r}"
+
+    if _ACPI_EVAL.exists():
+        try:
+            _ACPI_EVAL.write_text(f"{full_method}\n", encoding="utf-8")
+            result = _read_text(_ACPI_EVAL)
+            return True, result or "ok", "module", None
+        except OSError as exc:
+            return False, None, "module", f"acpi_eval({full_method}) failed: {exc}"
+
+    if _ACPI_CALL.exists():
+        try:
+            _ACPI_CALL.write_text(full_method, encoding="utf-8")
+            raw = _ACPI_CALL.read_bytes().split(b"\x00", 1)[0].decode("utf-8", errors="ignore").strip()
+            if raw.lower().startswith("error"):
+                return False, raw, "acpi_call", f"acpi_call({full_method}) failed: {raw}"
+            return True, raw or "ok", "acpi_call", None
+        except OSError as exc:
+            return False, None, "acpi_call", f"acpi_call({full_method}) failed: {exc}"
+
+    return False, None, "none", "no ACPI evaluation backend available (load gigamate_acpi or acpi_call)"
+
+
+def _read_state() -> Dict:
+    try:
+        return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(payload: Dict) -> None:
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATE_FILE.with_name(f"{_STATE_FILE.name}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, _STATE_FILE)
+    except OSError:
+        pass
+
+
+def _service_active(name: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-active", "--quiet", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+_POWERD_STOP_WAIT_SEC = 60.0
+_WAKE_DEADLINE_SEC = 45.0
+_HOLDERS_DRAIN_SEC = 3.0
+
+
+def _restore_gpu_control_auto(bdf: Optional[str]) -> None:
+    """Best-effort return of PCI runtime PM control to ``auto``."""
+    if not bdf or not _is_valid_bdf(bdf):
+        return
+    ctrl = _PCI_DEVICES / bdf / "power" / "control"
+    try:
+        if ctrl.exists():
+            ctrl.write_text("auto\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _restore_after_abort(bdf: Optional[str], stopped_powerd: bool) -> None:
+    """Cleanly restore runtime PM control and restart nvidia-powerd if we stopped it."""
+    _restore_gpu_control_auto(bdf)
+    if stopped_powerd:
+        _start_service("nvidia-powerd.service")
+
+
+def _wake_and_stop_powerd(bdf: str) -> Tuple[bool, bool, Optional[Dict]]:
+    """Wake the dGPU safely (up to 45 s) before stopping nvidia-powerd.service.
+
+    Returns ``(ok, stopped_powerd, error_payload)``.
+    """
+    if not _service_active("nvidia-powerd.service"):
+        return True, False, None
+
+    state_pd, _result_pd = _powerd_state()
+    if state_pd in ("activating", "deactivating"):
+        return False, False, {
+            "ok": False,
+            "reason": "powerd_transition",
+            "error": (
+                "nvidia-powerd is mid-transition (starting/stopping); "
+                "not touching the GPU. Retry in a few seconds."
+            ),
+        }
+
+    # Wake-first hand-off. powerd's SIGTERM cleanup path issues a GSP RPC that
+    # runtime-resumes a suspended dGPU while RM holds an internal 4 s threadNode
+    # timeout, so cold ~30.6 s PG00._ON hangs can abort FSP boot and wedge the GPU.
+    # Doing a plain runtime resume first completes PG00._ON outside that window.
+    gpu_ctrl = _PCI_DEVICES / bdf / "power" / "control"
+    if _read_text(_PCI_DEVICES / bdf / "power" / "runtime_status") == "suspended":
+        waker: Optional[subprocess.Popen] = None
+        try:
+            waker = subprocess.Popen(
+                ["sh", "-c", f"echo on > '{gpu_ctrl}'"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            waker = None
+        wake_deadline = time.monotonic() + _WAKE_DEADLINE_SEC
+        while time.monotonic() < wake_deadline:
+            if _read_text(_PCI_DEVICES / bdf / "power" / "runtime_status") == "active":
+                break
+            time.sleep(0.25)
+        if waker is not None:
+            try:
+                waker.wait(timeout=1.0)
+            except Exception:
+                pass
+        rs_wake = _read_text(_PCI_DEVICES / bdf / "power" / "runtime_status")
+        if rs_wake != "active":
+            _restore_gpu_control_auto(bdf)
+            return False, False, {
+                "ok": False,
+                "reason": "wedged",
+                "reboot_recommended": True,
+                "runtime_status": rs_wake,
+                "error": (
+                    "dGPU did not wake for the pre-stop hand-off (driver wedged, "
+                    "reset required). No power changes were made; reboot the laptop."
+                ),
+            }
+
+    stop_res = _stop_service_graceful("nvidia-powerd.service", wait_sec=15.0)
+    if stop_res != "stopped":
+        try:
+            subprocess.run(
+                ["systemctl", "kill", "--signal=SIGKILL", "nvidia-powerd.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+            subprocess.run(
+                ["systemctl", "stop", "--no-block", "nvidia-powerd.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            pass
+        exit_deadline = time.monotonic() + 10.0
+        while time.monotonic() < exit_deadline and _service_active("nvidia-powerd.service"):
+            time.sleep(0.25)
+        if _service_active("nvidia-powerd.service"):
+            _restore_gpu_control_auto(bdf)
+            return False, False, {
+                "ok": False,
+                "reason": "powerd_stop_timeout",
+                "reboot_recommended": True,
+                "error": (
+                    "nvidia-powerd did not exit (stuck in a driver call). Aborted "
+                    "before any power change so the GPU cannot be left wedged. "
+                    "Reboot the laptop before trying again."
+                ),
+            }
+
+    drain_deadline = time.monotonic() + _HOLDERS_DRAIN_SEC
+    rem = _wake_holders(ignore_managed_daemons=False)
+    while rem and time.monotonic() < drain_deadline:
+        if any(h not in _MANAGED_POWER_DAEMONS for h in rem):
+            break
+        time.sleep(0.1)
+        rem = _wake_holders(ignore_managed_daemons=False)
+    if rem:
+        _restore_after_abort(bdf, True)
+        rs_now = _read_text(_PCI_DEVICES / bdf / "power" / "runtime_status")
+        holder_str = f" (held by: {', '.join(rem)})"
+        return False, False, {
+            "ok": False,
+            "reason": "gpu_active",
+            "runtime_status": rs_now,
+            "holders": rem,
+            "error": (
+                f"dGPU is currently {rs_now or 'active'}{holder_str}; "
+                "cannot cut power while in use."
+            ),
+        }
+
+    return True, True, None
+
+
+def _unit_show(name: str, props: List[str]) -> List[str]:
+    """Read systemd unit properties via ``systemctl show`` (root query)."""
+    cmd = ["systemctl", "show", name]
+    for prop in props:
+        cmd.extend(["-p", prop])
+    cmd.append("--value")
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+
+
+def _powerd_state() -> Tuple[str, Optional[str]]:
+    """Return ``(ActiveState, Result)`` for nvidia-powerd.service ('' if unknown)."""
+    vals = _unit_show("nvidia-powerd.service", ["ActiveState", "Result"])
+    state = vals[0] if vals else ""
+    result: Optional[str] = vals[1] if len(vals) > 1 else None
+    return state, result
+
+
+def _powerd_stop_timed_out() -> bool:
+    """Whether nvidia-powerd.service is failed with Result=timeout.
+
+    That is the systemd signature of a stop whose SIGKILL could not remove the
+    daemon (stuck in an uninterruptible driver call) — i.e. the GPU resume path
+    hung and the GPU is wedged until reboot.
+    """
+    state, result = _powerd_state()
+    return state == "failed" and result == "timeout"
+
+
+def _stop_service_graceful(name: str, wait_sec: float = _POWERD_STOP_WAIT_SEC) -> str:
+    """Queue a non-blocking ``systemctl stop`` and poll for the unit to settle.
+
+    A blocking ``systemctl stop`` client call hangs for as long as systemd
+    fights a stuck daemon (SIGTERM timeout -> SIGKILL -> final timeout), so the
+    helper must never wait inside it: ``--no-block`` returns immediately and the
+    stop job runs inside systemd while we poll the unit state.
+
+    Returns "stopped" (unit inactive), "failed" (unit hit failed while
+    stopping) or "timeout" (still stopping after ``wait_sec``).
+    """
+    try:
+        subprocess.run(
+            ["systemctl", "stop", "--no-block", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return "failed"
+
+    deadline = time.monotonic() + max(1.0, wait_sec)
+    while time.monotonic() < deadline:
+        vals = _unit_show(name, ["ActiveState"])
+        state = vals[0] if vals else ""
+        if state in ("active", "activating", "deactivating", "reloading"):
+            time.sleep(0.5)
+            continue
+        if state in ("", "inactive"):
+            return "stopped"
+        return "failed"
+    return "timeout"
+
+
+def _start_service(name: str) -> bool:
+    try:
+        # Clear any systemd start-limit-hit / failed latch so rapid ECO <-> Optimus
+        # toggling can never permanently lock out nvidia-powerd Dynamic Boost.
+        subprocess.run(
+            ["systemctl", "reset-failed", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        proc = subprocess.run(
+            ["systemctl", "start", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _unit_exists(name: str) -> bool:
+    for d in (Path("/usr/lib/systemd/system"), Path("/etc/systemd/system")):
+        if (d / name).is_file():
+            return True
+    return False
+
+
+def _service_enabled(name: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "is-enabled", "--quiet", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _pci_remove(bdf: Optional[str]) -> Tuple[bool, Optional[str]]:
+    if not bdf or not _is_valid_bdf(bdf):
+        return True, None
+    rem = _PCI_DEVICES / bdf / "remove"
+    if not rem.exists():
+        return True, None
+    try:
+        rem.write_text("1\n", encoding="utf-8")
+        return True, None
+    except OSError as exc:
+        return False, f"failed to remove {bdf}: {exc}"
+
+
+def _cmd_version() -> int:
+    return _emit({
+        "ok": True,
+        "helper_version": HELPER_VERSION,
+        "backend": _eval_backend(),
+    })
+
+
+def _cmd_status(acpi_path: str, sta_method: str) -> int:
+    if not _is_valid_acpi_path(acpi_path) or sta_method not in _STA_METHODS:
+        return _emit({"ok": False, "error": "invalid ACPI path or status method"}, code=2)
+    full = f"{acpi_path}.{sta_method}"
+    ok, raw, backend, err = _eval_acpi_method(full)
+    return _emit({
+        "ok": ok,
+        "method": full,
+        "result": raw,
+        "backend": backend,
+        "error": err,
+    })
+
+
+def _cmd_probe(paths: List[str]) -> int:
+    results = []
+    backend = _eval_backend()
+    for p in paths:
+        if not _is_valid_acpi_path(p):
+            results.append({"path": p, "ok": False, "error": "invalid path"})
+            continue
+        item: Dict[str, object] = {"path": p}
+        for meth in _STA_METHODS:
+            ok, raw, b, err = _eval_acpi_method(f"{p}.{meth}")
+            backend = b if b != "none" else backend
+            item[meth] = {"ok": ok, "result": raw, "error": err}
+        results.append(item)
+    return _emit({"ok": backend != "none", "backend": backend, "candidates": results})
+
+
+def _check_off_preconditions(
+    bdf: str,
+    *,
+    allow_active: bool = False,
+    ignore_managed_daemons: bool = True,
+) -> Tuple[Optional[str], Optional[Dict]]:
+    """Verify BDF, displays, runtime status, and holders before gating off."""
+    ok_dev, vendor, err_dev = _verify_dgpu_bdf(bdf)
+    if not ok_dev:
+        return None, {"ok": False, "reason": "not_present", "error": err_dev}
+
+    displays = _connected_dgpu_displays(bdf)
+    if displays:
+        joined = ", ".join(displays)
+        return None, {
+            "ok": False,
+            "reason": "display_connected",
+            "displays": displays,
+            "error": f"Cannot power off dGPU while external display is attached ({joined}). Unplug it first.",
+        }
+
+    rstatus = _read_text(_PCI_DEVICES / bdf / "power" / "runtime_status")
+    holders = _wake_holders(ignore_managed_daemons=ignore_managed_daemons) if vendor == "nvidia" else []
+    if vendor == "nvidia" and not holders and rstatus == "active" and _powerd_stop_timed_out():
+        # Signature of a previous gate-off whose nvidia-powerd stop wedged
+        # the GPU resume: active D0, nothing holding it, unit failed by
+        # hang. Only a reboot recovers this; never poke the GPU further.
+        return None, {
+            "ok": False,
+            "reason": "wedged",
+            "reboot_recommended": True,
+            "runtime_status": rstatus,
+            "holders": holders,
+            "error": (
+                "GPU is wedged (driver reset required) after a hung nvidia-powerd stop. "
+                "Reboot the laptop to recover it; refusing further power changes."
+            ),
+        }
+
+    status_bad = (rstatus not in ("suspended", "active")) if allow_active else (rstatus != "suspended")
+    if holders or status_bad:
+        holder_str = f" (held by: {', '.join(holders)})" if holders else ""
+        return None, {
+            "ok": False,
+            "reason": "gpu_active",
+            "runtime_status": rstatus,
+            "holders": holders,
+            "error": (
+                f"dGPU is currently {rstatus or 'active'}{holder_str}; "
+                "cannot cut power until it suspends."
+            ),
+        }
+
+    return vendor, None
+
+
+def _cmd_prepare_off(args: argparse.Namespace) -> int:
+    vendor, err_payload = _check_off_preconditions(
+        args.bdf,
+        allow_active=bool(args.allow_active),
+        ignore_managed_daemons=True,
+    )
+    if err_payload is not None:
+        return _emit(err_payload)
+
+    stopped_pd = False
+    if vendor == "nvidia":
+        ok_pd, stopped_pd, pd_err = _wake_and_stop_powerd(args.bdf)
+        if not ok_pd:
+            return _emit(pd_err or {"ok": False, "error": "failed to prepare nvidia-powerd"})
+
+    return _emit({
+        "ok": True,
+        "prepared": True,
+        "bdf": args.bdf,
+        "vendor": vendor,
+        "stopped_nvidia_powerd": stopped_pd,
+    })
+
+
+def _cmd_gate_off(args: argparse.Namespace) -> int:
+    if not _is_valid_acpi_path(args.path):
+        return _emit({"ok": False, "error": f"invalid ACPI path: {args.path!r}"}, code=2)
+    if args.method not in _OFF_METHODS:
+        return _emit({"ok": False, "error": f"invalid off method: {args.method!r}"}, code=2)
+    sta_method = args.sta_method or ("_PSC" if args.method == "_PS3" else "_STA")
+    on_method = args.on_method or ("_PS0" if args.method == "_PS3" else "_ON")
+    if sta_method not in _STA_METHODS or on_method not in _ON_METHODS:
+        return _emit({"ok": False, "error": "invalid sta/on method"}, code=2)
+    quirks = [q for q in (args.quirk or []) if q in _KNOWN_QUIRKS]
+
+    stopped_powerd = bool(args.stopped_nvidia_powerd)
+    vendor, err_payload = _check_off_preconditions(
+        args.bdf,
+        allow_active=bool(args.allow_active),
+        ignore_managed_daemons=not stopped_powerd,
+    )
+    if err_payload is not None:
+        if err_payload.get("reason") != "wedged" and err_payload.get("reason") != "not_present":
+            _restore_after_abort(args.bdf, stopped_powerd)
+        return _emit(err_payload)
+
+    audio_bdf = _verify_audio_sibling(args.bdf, args.audio_bdf)
+    bridge_bdf = _verify_bridge_bdf(args.bdf, args.bridge_bdf)
+
+    # Prevent ALSA snd_card_free() D-state deadlock if PipeWire/WirePlumber still
+    # holds /dev/snd/controlC<N>. Check BEFORE waking GPU or stopping nvidia-powerd.
+    audio_holders = _audio_card_holders(audio_bdf)
+    if audio_holders:
+        _restore_after_abort(args.bdf, stopped_powerd)
+        return _emit({
+            "ok": False,
+            "reason": "audio_busy",
+            "audio_holders": audio_holders,
+            "error": (
+                f"dGPU HDMI audio ({audio_bdf}) is held by {', '.join(audio_holders)}; "
+                "release it before removing PCI device to avoid kernel hang."
+            ),
+        })
+
+    if vendor == "nvidia" and _service_active("nvidia-powerd.service"):
+        ok_pd, did_stop, pd_err = _wake_and_stop_powerd(args.bdf)
+        if not ok_pd:
+            return _emit(pd_err or {"ok": False, "error": "failed to stop nvidia-powerd"})
+        stopped_powerd = stopped_powerd or did_stop
+
+    # Final check before PCI removal / ACPI power-off.
+    if vendor == "nvidia":
+        if "off_before_remove" in quirks:
+            _restore_gpu_control_auto(args.bdf)
+            deadline_pd = time.monotonic() + 30.0
+            while time.monotonic() < deadline_pd:
+                rem = _wake_holders(ignore_managed_daemons=False)
+                rs_now = _read_text(_PCI_DEVICES / args.bdf / "power" / "runtime_status")
+                if not rem and rs_now == "suspended":
+                    break
+                # Abort early if a non-powerd user app grabbed the GPU.
+                if any(h not in _MANAGED_POWER_DAEMONS for h in rem):
+                    break
+                time.sleep(0.2)
+
+            rem_holders = _wake_holders(ignore_managed_daemons=False)
+            rstatus_now = _read_text(_PCI_DEVICES / args.bdf / "power" / "runtime_status")
+            if rem_holders or rstatus_now != "suspended":
+                if stopped_powerd and not rem_holders and rstatus_now == "active":
+                    # The only client was powerd and the GPU never re-suspended:
+                    # a resume along the way hung — the driver is wedged. Do not
+                    # restart powerd into a dead GPU.
+                    return _emit({
+                        "ok": False,
+                        "reason": "wedged",
+                        "reboot_recommended": True,
+                        "runtime_status": rstatus_now,
+                        "holders": rem_holders,
+                        "error": (
+                            "GPU did not go back to sleep after nvidia-powerd exited "
+                            "(driver wedged, reset required). No power changes were made. "
+                            "Reboot the laptop to recover the dGPU."
+                        ),
+                    })
+                _restore_after_abort(args.bdf, stopped_powerd)
+                holder_str = f" (held by: {', '.join(rem_holders)})" if rem_holders else ""
+                return _emit({
+                    "ok": False,
+                    "reason": "gpu_active",
+                    "runtime_status": rstatus_now,
+                    "holders": rem_holders,
+                    "error": (
+                        f"dGPU is currently {rstatus_now or 'active'}{holder_str}; "
+                        "cannot cut power until it suspends."
+                    ),
+                })
+        else:
+            # remove_before_off (default): pci_device_remove wakes to D0 anyway
+            # and nv_pci_remove_helper only requires usage_count == 0 (no open
+            # /dev/nvidia* descriptors). Skip waiting 20s for RTD3 re-suspend.
+            drain_deadline = time.monotonic() + _HOLDERS_DRAIN_SEC
+            rem_holders = _wake_holders(ignore_managed_daemons=False)
+            while rem_holders and time.monotonic() < drain_deadline:
+                if any(h not in _MANAGED_POWER_DAEMONS for h in rem_holders):
+                    break
+                time.sleep(0.1)
+                rem_holders = _wake_holders(ignore_managed_daemons=False)
+            if rem_holders:
+                _restore_after_abort(args.bdf, stopped_powerd)
+                rstatus_now = _read_text(_PCI_DEVICES / args.bdf / "power" / "runtime_status")
+                holder_str = f" (held by: {', '.join(rem_holders)})"
+                return _emit({
+                    "ok": False,
+                    "reason": "gpu_active",
+                    "runtime_status": rstatus_now,
+                    "holders": rem_holders,
+                    "error": (
+                        f"dGPU is currently {rstatus_now or 'active'}{holder_str}; "
+                        "cannot cut power while in use."
+                    ),
+                })
+
+    # Re-verify no process opened /dev/snd/controlC<N> during wake/hand-off.
+    audio_holders = _audio_card_holders(audio_bdf)
+    if audio_holders:
+        _restore_after_abort(args.bdf, stopped_powerd)
+        return _emit({
+            "ok": False,
+            "reason": "audio_busy",
+            "audio_holders": audio_holders,
+            "error": (
+                f"dGPU HDMI audio ({audio_bdf}) is held by {', '.join(audio_holders)}; "
+                "release it before removing PCI device to avoid kernel hang."
+            ),
+        })
+
+    full_off = f"{args.path}.{args.method}"
+    full_sta = f"{args.path}.{sta_method}"
+    backend = _eval_backend()
+
+    if "off_before_remove" in quirks:
+        ok_eval, _, backend, eval_err = _eval_acpi_method(full_off)
+        if not ok_eval:
+            _restore_after_abort(args.bdf, stopped_powerd)
+            return _emit({"ok": False, "backend": backend, "error": eval_err})
+        ok_rem, rem_err = _pci_remove(audio_bdf)
+        if ok_rem:
+            ok_rem, rem_err = _pci_remove(args.bdf)
+        if not ok_rem:
+            try:
+                _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
+            except OSError:
+                pass
+            _restore_after_abort(args.bdf, stopped_powerd)
+            return _emit({"ok": False, "backend": backend, "error": rem_err})
+        _, sta_after, _, _ = _eval_acpi_method(full_sta)
+        if sta_after in ("0x1", "1"):
+            _eval_acpi_method(full_off)
+    else:
+        # Default / remove_before_off: cleanly unbind NVIDIA & audio first so
+        # PCI removal never trips over a powered-off config space (0xFFFFFFFF).
+        ok_rem, rem_err = _pci_remove(audio_bdf)
+        if ok_rem:
+            ok_rem, rem_err = _pci_remove(args.bdf)
+        if not ok_rem:
+            try:
+                _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
+            except OSError:
+                pass
+            _restore_after_abort(args.bdf, stopped_powerd)
+            return _emit({"ok": False, "backend": backend, "error": rem_err})
+
+        deadline = time.monotonic() + 3.0
+        while (_PCI_DEVICES / args.bdf).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        if bridge_bdf:
+            bridge_ctrl = _PCI_DEVICES / bridge_bdf / "power" / "control"
+            if bridge_ctrl.exists():
+                try:
+                    bridge_ctrl.write_text("auto\n", encoding="utf-8")
+                except OSError:
+                    pass
+
+        ok_eval, _, backend, eval_err = _eval_acpi_method(full_off)
+        if not ok_eval:
+            try:
+                _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
+            except OSError:
+                pass
+            _restore_after_abort(args.bdf, stopped_powerd)
+            return _emit({"ok": False, "backend": backend, "error": eval_err})
+
+    _, sta_after, _, _ = _eval_acpi_method(full_sta)
+
+    state = {
+        "gated": True,
+        "bdf": args.bdf,
+        "audio_bdf": audio_bdf,
+        "bridge_bdf": bridge_bdf,
+        "vendor": vendor,
+        "acpi_path": args.path,
+        "method": args.method,
+        "on_method": on_method,
+        "sta_method": sta_method,
+        "quirks": quirks,
+        "stopped_nvidia_powerd": stopped_powerd,
+        "sta_after": sta_after,
+        "backend": backend,
+        "ts": time.time(),
+    }
+    _write_state(state)
+    return _emit({
+        "ok": True,
+        "gated": True,
+        "bdf": args.bdf,
+        "vendor": vendor,
+        "sta_after": sta_after,
+        "backend": backend,
+    })
+
+
+def _wake_bridge_to_d0(bridge_bdf: Optional[str], wait_sec: float = 2.0) -> bool:
+    """Force the upstream PCIe root port into D0 before evaluating PG00._ON.
+
+    If the root port is runtime-suspended (D3), its config window returns
+    0xFFFF for the downstream GPU's vendor ID (NVID), causing PG00._ON's
+    ``While (NVID != 0x10DE)`` loop to hit AE_AML_LOOP_TIMEOUT and abort
+    before clearing ``EC0.DSMD = 0`` (leaving Dynamic Boost capped at 50 W)
+    and leaving the PCIe link trained at x1.
+    """
+    if not bridge_bdf or not _is_valid_bdf(bridge_bdf):
+        return False
+    bdir = _PCI_DEVICES / bridge_bdf
+    if not bdir.exists():
+        return False
+    ctrl = bdir / "power" / "control"
+    if ctrl.exists():
+        try:
+            ctrl.write_text("on\n", encoding="utf-8")
+        except OSError:
+            pass
+    deadline = time.monotonic() + max(0.2, float(wait_sec))
+    while time.monotonic() < deadline:
+        pstate = _read_text(bdir / "power_state")
+        rstatus = _read_text(bdir / "power" / "runtime_status")
+        if pstate == "D0" and rstatus in ("active", None, ""):
+            return True
+        time.sleep(0.05)
+    return _read_text(bdir / "power_state") == "D0"
+
+
+def _read_int_sysfs(path: Path) -> Optional[int]:
+    raw = _read_text(path)
+    if not raw:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def _pcie_retrain_link(bridge_bdf: str, wait_sec: float = 1.5) -> Optional[int]:
+    """Set the PCIe Capability Link Control Retrain Link bit (bit 5) on ``bridge_bdf``."""
+    bdir = _PCI_DEVICES / bridge_bdf
+    cfg_path = bdir / "config"
+    if not cfg_path.exists():
+        return None
+    try:
+        with open(cfg_path, "r+b", buffering=0) as fh:
+            fh.seek(0x34)
+            cap_ptr = fh.read(1)[0] & 0xFC
+            visited = set()
+            pcie_cap: Optional[int] = None
+            while cap_ptr and cap_ptr not in visited and len(visited) < 48:
+                visited.add(cap_ptr)
+                fh.seek(cap_ptr)
+                hdr = fh.read(2)
+                if len(hdr) < 2:
+                    break
+                if hdr[0] == 0x10:  # PCI_CAP_ID_EXP
+                    pcie_cap = cap_ptr
+                    break
+                cap_ptr = hdr[1] & 0xFC
+            if pcie_cap is None:
+                return None
+            lnkctl_off = pcie_cap + 0x10
+            fh.seek(lnkctl_off)
+            raw_ctl = fh.read(2)
+            if len(raw_ctl) < 2:
+                return None
+            ctl = int.from_bytes(raw_ctl, "little")
+            ctl |= 0x0020  # PCI_EXP_LNKCTL_RL (Retrain Link)
+            fh.seek(lnkctl_off)
+            fh.write(ctl.to_bytes(2, "little"))
+    except OSError:
+        return None
+
+    max_w = _read_int_sysfs(bdir / "max_link_width")
+    deadline = time.monotonic() + max(0.2, float(wait_sec))
+    while time.monotonic() < deadline:
+        cur_w = _read_int_sysfs(bdir / "current_link_width")
+        if cur_w is not None and max_w is not None and cur_w >= max_w:
+            return cur_w
+        time.sleep(0.1)
+    return _read_int_sysfs(bdir / "current_link_width")
+
+
+@contextmanager
+def _pause_pci_autoprobe():
+    """Temporarily pause PCI driver auto-binding during gate-on bring-up.
+
+    Prevents ``pciehp`` from binding ``nvidia`` (and booting GSP) onto a
+    degraded ``x4`` link before ``PG00._ON`` timeout recovery (``EC0.DSMD=0``,
+    ``\\_SB.ALIB(0x18, 1)``) and an unbound Secondary Bus Reset complete.
+    Always restores ``drivers_autoprobe`` in ``finally``.
+    """
+    prev: Optional[str] = None
+    if _PCI_DRIVERS_AUTOPROBE.exists():
+        try:
+            prev = _PCI_DRIVERS_AUTOPROBE.read_text(encoding="utf-8").strip()
+            if prev == "1":
+                _PCI_DRIVERS_AUTOPROBE.write_text("0\n", encoding="utf-8")
+        except OSError:
+            prev = None
+    try:
+        yield prev == "1"
+    finally:
+        if prev == "1" and _PCI_DRIVERS_AUTOPROBE.exists():
+            try:
+                _PCI_DRIVERS_AUTOPROBE.write_text("1\n", encoding="utf-8")
+            except OSError:
+                pass
+
+
+def _probe_pci_devices(bdfs: List[str]) -> None:
+    """Explicitly trigger driver probing for unbound PCI BDFs."""
+    if not _PCI_DRIVERS_PROBE.exists():
+        return
+    for bdf in bdfs:
+        if not bdf or not _is_valid_bdf(bdf):
+            continue
+        dev_dir = _PCI_DEVICES / bdf
+        if not dev_dir.exists() or (dev_dir / "driver").exists():
+            continue
+        try:
+            _PCI_DRIVERS_PROBE.write_text(f"{bdf}\n", encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _bridge_exclusively_hosts_unbound_dgpu(bridge_bdf: str, gpu_bdf: str) -> bool:
+    """Return True only when ``bridge_bdf`` downstream has no bound drivers or non-dGPU siblings.
+
+    Prevents Secondary Bus Reset (``reset_subordinate``) from resetting
+    unrelated sibling PCI/Thunderbolt/USB4/NVMe devices sharing a root bridge or
+    multi-function USB-C controllers (.2/.3) or still-bound drivers (e.g. Xid 154).
+    """
+    if not bridge_bdf or not _is_valid_bdf(bridge_bdf) or not gpu_bdf or not _is_valid_bdf(gpu_bdf):
+        return False
+    if (_PCI_DEVICES / gpu_bdf / "driver").exists():
+        return False
+
+    bridge_path = _PCI_DEVICES / bridge_bdf
+    bklass = (_read_text(bridge_path / "class") or "").lower()
+    if bklass and not bklass.startswith("0x0604"):
+        return False
+
+    try:
+        bdir_real = Path(os.path.realpath(bridge_path))
+        entries = list(bdir_real.iterdir()) if bdir_real.is_dir() else []
+    except OSError:
+        return False
+
+    gpu_slot_prefix = gpu_bdf[:-1]
+    for child in entries:
+        if not child.is_dir() or not _is_valid_bdf(child.name):
+            continue
+        if (child / "driver").exists():
+            return False
+        if child.name[:-1] != gpu_slot_prefix:
+            return False
+        cklass = (_read_text(child / "class") or "").lower()
+        if cklass and not (cklass.startswith("0x03") or cklass.startswith("0x0403")):
+            return False
+
+    return True
+
+
+def _ensure_full_pcie_link_width(
+    bridge_bdf: Optional[str],
+    gpu_bdf: str,
+    *,
+    allow_sbr: bool = False,
+) -> Tuple[Optional[int], Optional[int]]:
+    """Verify PCIe link width; run Secondary Bus Reset (only when unbound & exclusive) or retrain if degraded."""
+    target_bdf = bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else gpu_bdf
+    tdir = _PCI_DEVICES / target_bdf
+    cur_w = _read_int_sysfs(tdir / "current_link_width")
+    max_w = _read_int_sysfs(tdir / "max_link_width")
+    if (
+        bridge_bdf
+        and _is_valid_bdf(bridge_bdf)
+        and cur_w is not None
+        and max_w is not None
+        and 0 < cur_w < max_w
+    ):
+        # Secondary Bus Reset (SBR) is ONLY safe when NO driver is bound to the
+        # downstream GPU/audio and no non-dGPU siblings share the root bridge.
+        sbr_safe = _bridge_exclusively_hosts_unbound_dgpu(bridge_bdf, gpu_bdf)
+        sbr_path = _PCI_DEVICES / bridge_bdf / "reset_subordinate"
+        if allow_sbr and sbr_safe and sbr_path.exists():
+            try:
+                sbr_path.write_text("1\n", encoding="utf-8")
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    new_w = _read_int_sysfs(tdir / "current_link_width")
+                    if new_w is not None:
+                        cur_w = new_w
+                        if cur_w >= max_w:
+                            break
+                    time.sleep(0.1)
+            except OSError:
+                pass
+        if cur_w < max_w:
+            retr = _pcie_retrain_link(bridge_bdf)
+            if retr is not None:
+                cur_w = retr
+    return cur_w, max_w
+
+
+def _cmd_gate_on(args: argparse.Namespace) -> int:
+    if not _is_valid_acpi_path(args.path):
+        return _emit({"ok": False, "error": f"invalid ACPI path: {args.path!r}"}, code=2)
+    if args.method not in _ON_METHODS:
+        return _emit({"ok": False, "error": f"invalid on method: {args.method!r}"}, code=2)
+    sta_method = args.sta_method or ("_PSC" if args.method == "_PS0" else "_STA")
+    if sta_method not in _STA_METHODS:
+        return _emit({"ok": False, "error": "invalid sta method"}, code=2)
+
+    prev_state = _read_state()
+    bridge_bdf = args.bridge_bdf or prev_state.get("bridge_bdf")
+    full_on = f"{args.path}.{args.method}"
+
+    found_bdf: Optional[str] = None
+    found_vendor: Optional[str] = None
+    driver_name: Optional[str] = None
+    rescan_err: Optional[str] = None
+    link_width: Optional[int] = None
+    max_link_width: Optional[int] = None
+
+    # Pause PCI driver autoprobe so pciehp does not bind nvidia before
+    # PG00._ON recovery (EC0.DSMD=0 + \_SB.ALIB(0x18, 1)) and an unbound
+    # Secondary Bus Reset restore full PCIe x8 link width.
+    with _pause_pci_autoprobe():
+        _wake_bridge_to_d0(bridge_bdf)
+
+        ok_eval, _, backend, eval_err = _eval_acpi_method(full_on)
+        if ok_eval:
+            time.sleep(0.2)
+
+        if bridge_bdf and _is_valid_bdf(bridge_bdf):
+            bridge_rescan = _PCI_DEVICES / bridge_bdf / "rescan"
+            if bridge_rescan.exists():
+                try:
+                    bridge_rescan.write_text("1\n", encoding="utf-8")
+                except OSError:
+                    pass
+
+        try:
+            _PCI_BUS_RESCAN.write_text("1\n", encoding="utf-8")
+        except OSError as exc:
+            rescan_err = str(exc)
+
+        # Wait for PCI enumeration (device present on bus, driver still unbound).
+        enum_deadline = time.monotonic() + 10.0
+        while time.monotonic() < enum_deadline:
+            found_bdf, found_vendor = _find_dgpu()
+            if found_bdf is not None:
+                break
+            time.sleep(0.2)
+
+        if found_bdf is not None:
+            # Retrain degraded link (e.g. x4 -> x8) via SBR while strictly unbound.
+            link_width, max_link_width = _ensure_full_pcie_link_width(
+                bridge_bdf, found_bdf, allow_sbr=True
+            )
+
+    if found_bdf is None:
+        msg = eval_err or (f"PCI rescan failed ({rescan_err})" if rescan_err else "dGPU did not re-enumerate after ACPI power-on and PCI rescan")
+        return _emit({
+            "ok": False,
+            "gated": True,
+            "reboot_recommended": True,
+            "backend": backend,
+            "error": f"{msg}. Reboot your laptop to recover the discrete GPU cleanly.",
+        })
+
+    # drivers_autoprobe is now restored to 1: probe GPU + audio sibling cleanly
+    # onto the full-width link AFTER EC0.DSMD=0 and \_SB.ALIB(0x18, 1) ran.
+    _probe_pci_devices([found_bdf, f"{found_bdf[:-1]}1"])
+
+    bind_deadline = time.monotonic() + 10.0
+    while time.monotonic() < bind_deadline:
+        drv_link = _PCI_DEVICES / found_bdf / "driver"
+        if drv_link.exists():
+            try:
+                driver_name = os.path.basename(os.path.realpath(drv_link))
+            except OSError:
+                driver_name = "bound"
+            break
+        time.sleep(0.25)
+
+    # Re-read final link width after driver bind.
+    tdir = _PCI_DEVICES / (bridge_bdf if (bridge_bdf and _is_valid_bdf(bridge_bdf)) else found_bdf)
+    final_w = _read_int_sysfs(tdir / "current_link_width")
+    if final_w is not None:
+        link_width = final_w
+
+    # Ensure kernel runtime PM is enabled again on GPU, audio sibling, and root port.
+    pm_targets = [found_bdf, f"{found_bdf[:-1]}1"]
+    if bridge_bdf and _is_valid_bdf(bridge_bdf):
+        pm_targets.append(bridge_bdf)
+    for target_bdf in pm_targets:
+        ctrl = _PCI_DEVICES / target_bdf / "power" / "control"
+        if ctrl.exists():
+            try:
+                ctrl.write_text("auto\n", encoding="utf-8")
+            except OSError:
+                pass
+
+    want_powerd = bool(
+        args.restart_nvidia_powerd or prev_state.get("stopped_nvidia_powerd")
+    )
+    powerd_active: Optional[bool] = None
+    if (
+        found_vendor == "nvidia"
+        and _unit_exists("nvidia-powerd.service")
+        and (want_powerd or _service_enabled("nvidia-powerd.service"))
+    ):
+        # Wait briefly for /dev/nvidia0 to finish registering after PCI bind so
+        # nvidia-powerd does not exit immediately on startup.
+        dev_deadline = time.monotonic() + 3.0
+        while time.monotonic() < dev_deadline:
+            if Path("/dev/nvidia0").exists() or Path("/dev/nvidiactl").exists():
+                break
+            time.sleep(0.1)
+        _start_service("nvidia-powerd.service")
+        time.sleep(0.4)
+        powerd_active = _service_active("nvidia-powerd.service")
+        if not powerd_active:
+            time.sleep(1.0)
+            _start_service("nvidia-powerd.service")
+            time.sleep(0.4)
+            powerd_active = _service_active("nvidia-powerd.service")
+
+    rstatus = _read_text(_PCI_DEVICES / found_bdf / "power" / "runtime_status")
+    pstate = _read_text(_PCI_DEVICES / found_bdf / "power_state")
+    _, sta_after, _, _ = _eval_acpi_method(f"{args.path}.{sta_method}")
+
+    _write_state({
+        "gated": False,
+        "bdf": found_bdf,
+        "vendor": found_vendor,
+        "acpi_path": args.path,
+        "sta_after": sta_after,
+        "backend": backend,
+        "ts": time.time(),
+    })
+    out = {
+        "ok": True,
+        "gated": False,
+        "bdf": found_bdf,
+        "vendor": found_vendor,
+        "driver": driver_name,
+        "runtime_status": rstatus,
+        "power_state": pstate,
+        "sta_after": sta_after,
+        "nvidia_powerd_active": powerd_active,
+        "link_width": link_width,
+        "max_link_width": max_link_width,
+        "backend": backend,
+    }
+    if not ok_eval and eval_err:
+        out["acpi_warning"] = eval_err
+    return _emit(out)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="gigamate-dgpu-gate")
+    sub = parser.add_subparsers(dest="cmd")
+
+    sub.add_parser("version")
+
+    p_status = sub.add_parser("status")
+    p_status.add_argument("--path", required=True)
+    p_status.add_argument("--sta-method", default="_STA")
+
+    p_probe = sub.add_parser("probe")
+    p_probe.add_argument("--path", action="append", required=True)
+
+    p_prep = sub.add_parser("prepare-off")
+    p_prep.add_argument("--bdf", required=True)
+    p_prep.add_argument("--allow-active", action="store_true")
+
+    p_off = sub.add_parser("gate-off")
+    p_off.add_argument("--bdf", required=True)
+    p_off.add_argument("--path", required=True)
+    p_off.add_argument("--method", required=True)
+    p_off.add_argument("--audio-bdf", default=None)
+    p_off.add_argument("--bridge-bdf", default=None)
+    p_off.add_argument("--sta-method", default=None)
+    p_off.add_argument("--on-method", default=None)
+    p_off.add_argument("--quirk", action="append", default=[])
+    p_off.add_argument("--allow-active", action="store_true")
+    p_off.add_argument("--stopped-nvidia-powerd", action="store_true")
+
+    p_on = sub.add_parser("gate-on")
+    p_on.add_argument("--path", required=True)
+    p_on.add_argument("--method", required=True)
+    p_on.add_argument("--bridge-bdf", default=None)
+    p_on.add_argument("--sta-method", default=None)
+    p_on.add_argument("--restart-nvidia-powerd", action="store_true")
+
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        return _emit({"ok": False, "error": "missing command"}, code=2)
+
+    if args.cmd == "version":
+        return _cmd_version()
+
+    is_readonly = args.cmd in ("status", "probe")
+    lock, busy = _acquire_lock(timeout=2.0 if is_readonly else 30.0)
+    if busy:
+        return _emit({
+            "ok": False,
+            "busy": True,
+            "error": "Another dGPU power transition is in progress.",
+        })
+    try:
+        if args.cmd == "status":
+            return _cmd_status(args.path, args.sta_method)
+        if args.cmd == "probe":
+            return _cmd_probe(args.path)
+        if args.cmd == "prepare-off":
+            return _cmd_prepare_off(args)
+        if args.cmd == "gate-off":
+            return _cmd_gate_off(args)
+        if args.cmd == "gate-on":
+            return _cmd_gate_on(args)
+        return _emit({"ok": False, "error": f"unknown command: {args.cmd}"}, code=2)
+    finally:
+        _release_lock(lock)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

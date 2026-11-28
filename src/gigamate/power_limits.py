@@ -169,7 +169,9 @@ def parse_wmbd_0xed_aml(aml_bytes: bytes) -> Dict[int, RawProfileAml]:
     if not aml_bytes:
         return {}
     ed_idx = aml_bytes.find(b"\x0a\xed")
-    search_buf = aml_bytes[ed_idx:] if ed_idx != -1 else aml_bytes
+    if ed_idx == -1:
+        return {}
+    search_buf = aml_bytes[ed_idx:]
 
     positions: list[Tuple[int, int]] = []
     cursor = 0
@@ -188,6 +190,54 @@ def parse_wmbd_0xed_aml(aml_bytes: bytes) -> Dict[int, RawProfileAml]:
         mode_slice = search_buf[start_pos:end_pos]
         result[mode_id] = _parse_mode_slice(mode_id, mode_slice)
     return result
+
+
+_PROFILE_PRESETS: Dict[Tuple[int, ...], Dict[int, Dict[str, str]]] = {
+    (0, 1): {
+        0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+        1: {"name": "Performance", "description": "High performance, more fan noise"},
+    },
+    (0, 1, 2): {
+        0: {"name": "Eco", "description": "Lowest power and quietest fans"},
+        1: {"name": "Balanced", "description": "Balanced performance and noise"},
+        2: {"name": "Boost", "description": "Maximum power and cooling"},
+    },
+    (0, 1, 2, 3): {
+        0: {"name": "Quiet", "description": "Low fan noise, capped GPU power"},
+        1: {"name": "Balanced", "description": "Balanced performance and noise"},
+        2: {"name": "Performance", "description": "High performance, more fan noise"},
+        3: {"name": "Gaming", "description": "Maximum GPU power and cooling"},
+    },
+}
+
+
+def discover_acpi_profiles(aml_bytes: Optional[bytes] = None) -> Dict[int, Dict[str, str]]:
+    """Auto-discover supported ACPI power profiles from WMBD(0xED) AML bytecode."""
+    if aml_bytes is None:
+        from .acpi import GIGAMATE_ACPI_SYSFS
+
+        try:
+            aml_bytes = (GIGAMATE_ACPI_SYSFS / "wmbd_aml").read_bytes()
+        except OSError:
+            return {}
+
+    raw = parse_wmbd_0xed_aml(aml_bytes)
+    if len(raw) < 2 or 0 not in raw or 1 not in raw:
+        return {}
+
+    sorted_ids = sorted(raw.keys())
+    preset = _PROFILE_PRESETS.get(tuple(sorted_ids))
+    if preset is not None:
+        return {pid: dict(info) for pid, info in preset.items()}
+
+    base = _PROFILE_PRESETS[(0, 1, 2, 3)]
+    discovered: Dict[int, Dict[str, str]] = {}
+    for pid in sorted_ids:
+        if pid in base:
+            discovered[pid] = dict(base[pid])
+        else:
+            discovered[pid] = {"name": f"Profile {pid}", "description": f"ACPI power profile {pid}"}
+    return discovered
 
 
 # ──────────────────────────────────────────────

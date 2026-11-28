@@ -1,0 +1,23 @@
+name: "gigamate"
+arch: "noarch"
+platform: "linux"
+version: "${VERSION}"
+section: "utils"
+priority: "optional"
+maintainer: "adriansc <goodeesh@users.noreply.github.com>"
+description: "Gigabyte laptop management for Linux — keyboard RGB, fan monitoring, power profiles, and dGPU tuning"
+homepage: "https://github.com/goodeesh/GigaMate"
+license: "MIT"
+depends:
+  - "python3 >= 3.10"
+  - "(python3-qt6 or python3-PyQt6)"
+  - "python3-evdev"
+  - "polkit"
+  - "gigamate-dkms"
+contents:
+  - src: "${STAGE_DIR}/app/usr/"
+    dst: "/usr"
+    type: tree
+scripts:
+  postinstall: packaging/scripts/postinst-app.sh
+  postremove: packaging/scripts/postrm-app.sh

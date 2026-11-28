@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .acpi import acpi_module_status
+from .updates import is_package_managed
 
 
 RULE_PATH = Path("/etc/udev/rules.d/70-gigamate.rules")
+VENDOR_RULE_PATH = Path("/usr/lib/udev/rules.d/70-gigamate.rules")
 LEGACY_RULE_PATH = Path("/etc/udev/rules.d/99-gigamate.rules")
 RULE_URL = (
     "https://raw.githubusercontent.com/goodeesh/GigaMate/main/data/70-gigamate.rules"
@@ -146,8 +148,16 @@ def open_error(path: str) -> Optional[OSError]:
     return None
 
 
+def _active_rule_path() -> Optional[Path]:
+    for path in (RULE_PATH, VENDOR_RULE_PATH):
+        if path.exists():
+            return path
+    return None
+
+
 def rule_state() -> str:
-    new_present = RULE_PATH.exists()
+    active_rule = _active_rule_path()
+    new_present = active_rule is not None
     old_present = LEGACY_RULE_PATH.exists()
     if old_present and not new_present:
         return "old 99-gigamate.rules present; reinstall GigaMate"
@@ -156,12 +166,47 @@ def rule_state() -> str:
     if not new_present:
         return "missing"
     try:
-        text = RULE_PATH.read_text()
+        text = active_rule.read_text()
     except OSError:
         return "unreadable"
     if 'SUBSYSTEM=="hidraw"' in text and "0414" in text:
         return "present"
     return "present but does not cover Gigabyte keyboards"
+
+
+def find_shadowed_legacy_files(
+    home: Optional[Path] = None,
+    etc_polkit_dir: Path = Path("/etc/polkit-1/rules.d"),
+    etc_udev_dir: Path = Path("/etc/udev/rules.d"),
+    method: Optional[str] = None,
+) -> List[str]:
+    """Return leftover legacy install files that may shadow a native package."""
+    if not is_package_managed(method):
+        return []
+    home_dir = home if home is not None else Path.home()
+    candidates = [
+        home_dir / ".local" / "bin" / "gigamate",
+        home_dir / ".local" / "bin" / "gigamate-tray",
+        home_dir / ".local" / "bin" / "gigamate-center",
+        home_dir / ".local" / "bin" / "gigamate-dgpu-watch",
+        home_dir / ".config" / "systemd" / "user" / "gigamate.service",
+        home_dir / ".config" / "systemd" / "user" / "gigamate-dgpu.service",
+        etc_polkit_dir / "50-gigamate-dgpu.rules",
+        etc_polkit_dir / "50-gigamate-dgpu-gate.rules",
+        etc_polkit_dir / "50-gigamate-repair.rules",
+        etc_polkit_dir / "50-gigamate-powerd.rules",
+        etc_udev_dir / "70-gigamate.rules",
+        etc_udev_dir / "99-gigamate-dgpu-ac.rules",
+        etc_udev_dir / "99-gigamate-smartshift.rules",
+    ]
+    found: List[str] = []
+    for path in candidates:
+        try:
+            if path.exists() or path.is_symlink():
+                found.append(str(path))
+        except OSError:
+            continue
+    return found
 
 
 def session_details() -> Tuple[Dict[str, str], str]:
@@ -202,7 +247,8 @@ def session_details() -> Tuple[Dict[str, str], str]:
 
 def permission_lines(path: str) -> List[str]:
     """Return a short, actionable explanation for a denied hidraw open."""
-    lines = [f"udev rule: {rule_state()} ({RULE_PATH})"]
+    rule_path = _active_rule_path() or RULE_PATH
+    lines = [f"udev rule: {rule_state()} ({rule_path})"]
     try:
         state = node_state(path)
         lines.append(f"node: {state['mode']} {state['owner']}:{state['group']}")
@@ -281,7 +327,22 @@ def run_doctor() -> int:
             iface = keyboard["interface"]
             label = f"iface {iface}" if iface is not None else "iface ?"
             print(f"    {node}  {label}  {permissions}  {access}")
-        print(f"  udev rule    {rule_state()} ({RULE_PATH})")
+        rule_path = _active_rule_path() or RULE_PATH
+        print(f"  udev rule    {rule_state()} ({rule_path})")
+        from .lamparray import diagnose_lamparray
+
+        diag = diagnose_lamparray(int(vid), int(pid))
+        status = diag["status"]
+        if status == "supported":
+            rgb_mode = "24-bit HID LampArray"
+        elif status in ("unsupported_firmware", "unsupported_layout"):
+            rgb_mode = "unavailable (unsupported)"
+        else:
+            rgb_mode = "unavailable"
+        print(f"  rgb mode     {rgb_mode}")
+        print(f"  lamparray    {status} — {diag['reason']}")
+        if status in ("unsupported_firmware", "unsupported_layout"):
+            print("  note         GigaMate 5.0+ requires HID LampArray (Usage Page 0x59); for pre-2025 keyboards install GigaMate v4.5.x from GitHub Releases.")
         print()
 
     details, logind = session_details()
@@ -301,7 +362,113 @@ def run_doctor() -> int:
     print(f"  kernel       {status.running_kernel}")
     print(f"  module       {status.summary}")
     print(f"  {status.hint}")
+    try:
+        from .power_limits import discover_acpi_profiles
+
+        discovered = discover_acpi_profiles()
+    except Exception:
+        discovered = {}
+    if discovered:
+        profiles_str = ", ".join(
+            f"{pid}: {info.get('name', f'Profile {pid}')}"
+            for pid, info in sorted(discovered.items())
+        )
+        print(f"  profiles     {profiles_str}")
+    else:
+        print("  profiles     none (WMBD 0xED not found in wmbd_aml)")
     print()
+
+    try:
+        from . import dgpu_gate
+
+        gst = dgpu_gate.get_status(check_helper=False)
+        if gst.get("bdf") or gst.get("gated"):
+            print("dGPU Power Gate")
+            print(f"  mode         {gst['mode']}")
+            print(f"  state        {'Off (gated)' if gst['gated'] else (gst.get('runtime_status') or 'present')}")
+            print(f"  eval backend {gst['eval_backend']}")
+            print(f"  helper       {'installed' if gst['helper_installed'] else 'missing (/usr/lib/gigamate/gigamate-dgpu-gate)'}")
+            ac_rule_present = (
+                Path("/etc/udev/rules.d/99-gigamate-dgpu-ac.rules").exists()
+                or Path("/usr/lib/udev/rules.d/99-gigamate-dgpu-ac.rules").exists()
+            )
+            print(f"  ac udev rule {'present' if ac_rule_present else 'missing'}")
+            gcfg = gst.get("gate_config")
+            if gcfg:
+                print(f"  gate target  {gcfg['path']}.{gcfg['method']} ({gcfg.get('source', 'acpi')})")
+            else:
+                print("  gate target  none detected in ACPI")
+            print()
+    except Exception:
+        pass
+
+    try:
+        from . import usbc_power
+        from .acpi import AcpiController
+        from .config import load as load_config
+        from .gpu import get_gpu_state
+
+        cfg = load_config()
+        src = usbc_power.detect_power_source()
+        caps = usbc_power.read_cached_gpu_caps_only()
+        ctrl = AcpiController()
+        gpu = get_gpu_state()
+        has_cpu_ppt = ctrl.available and ctrl.has_cpu_ppt_control()
+        has_ctgp = ctrl.available and ctrl.has_gpu_ctgp_control()
+        has_db = ctrl.available and ctrl.has_gpu_dynamic_boost_control()
+        fw_usbc = ctrl.read_usbc_adapter() if ctrl.available else src.firmware_usbc_flag
+        env = usbc_power.compute_budget_envelope(
+            src.detected_wattage_w,
+            caps.default_tgp_w,
+            caps.max_constraint_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_db,
+            has_nvidia_gpu=bool(gpu.present and gpu.vendor == "nvidia"),
+            buffer_pct=int(cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT),
+        )
+        print("USB-C Power Budget")
+        w_str = f"{src.detected_wattage_w} W ({src.wattage_source})" if src.detected_wattage_w else "unknown"
+        curr_str = f", {src.negotiated_current_a:.2f} A" if src.negotiated_current_a is not None else ""
+        print(f"  power source {src.kind} (charger={w_str}{curr_str}, ac_online={src.ac_online})")
+        print(
+            f"  sysfs ctrls  cpu_ppt={'yes' if has_cpu_ppt else 'no'}, "
+            f"gpu_ctgp={'yes' if has_ctgp else 'no'}, "
+            f"dyn_boost={'yes' if has_db else 'no'}, "
+            f"usbc_adapter={fw_usbc}"
+        )
+        tgp_str = (
+            f"{caps.default_tgp_w} W" + (f" (max {caps.max_constraint_w} W)" if caps.max_constraint_w else "")
+            if caps.default_tgp_w is not None
+            else "uncached (not queried to keep sleeping dGPU off)"
+        )
+        print(f"  cached gpu   {tgp_str}")
+        buf_cfg = int(cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT)
+        opt_str = (
+            f"enabled (target {cfg.get('usbc_gpu_budget_w', 55)} W, buffer {buf_cfg}%)"
+            if cfg.get("usbc_power_budget_enabled")
+            else f"disabled (opt-in, buffer {buf_cfg}%)"
+        )
+        print(f"  opt-in       {opt_str}")
+        if env.supported:
+            print(
+                f"  envelope     {env.buffer_w} W buffer ({env.buffer_pct}%) + {env.silicon_budget_w} W silicon "
+                f"(GPU {env.gpu_min_w}..{env.gpu_max_w} W)"
+            )
+        elif src.kind == "usbc_pd":
+            print(f"  envelope     unsupported ({env.reason})")
+        print()
+    except Exception:
+        pass
+
+    shadowed = find_shadowed_legacy_files()
+    if shadowed:
+        print("Legacy Install Shadowing (warning)")
+        print("  Package-managed install detected, but legacy files still exist and may shadow system files:")
+        for path in shadowed:
+            print(f"    {path}")
+        print("  Remove these leftover files so the native package files take effect.")
+        print()
 
     if failed_node is not None:
         print("Keyboard access failed:")

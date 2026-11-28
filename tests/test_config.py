@@ -229,12 +229,6 @@ def test_save_handles_bogus_brightness(isolated_config):
 
 
 
-def test_save_handles_null_profile_id(isolated_config):
-    config_module.save({"profile_id": None})
-    loaded = config_module.load()
-    assert loaded["profile_id"] == config_module.DEFAULT_CONFIG["profile_id"]
-
-
 def test_update_config_is_read_modify_write(isolated_config):
     config_module.save({"colour": "red", "idle_timeout_sec": 60})
 
@@ -280,12 +274,10 @@ def test_clean_install_no_config_file(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "CONFIG_FILE", fresh_dir / "config.json")
     monkeypatch.setattr(config_module, "_OLD_CONFIG_FILE", tmp_path / "nonexistent.json")
     monkeypatch.setattr(config_module, "_OLD_CONFIG_DIR", tmp_path / "nonexistent_dir")
-    monkeypatch.setattr(config_module, "detect_device", lambda: None)
 
     cfg = config_module.load()
     assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
     assert cfg["brightness"] == config_module.DEFAULT_CONFIG["brightness"]
-    assert cfg["profile_id"] == list(config_module.DEFAULT_CONFIG["profile_id"])
     assert cfg["onboarding_complete"] is False
 
 
@@ -295,18 +287,6 @@ def test_empty_dict_config(isolated_config):
     isolated_config.write_text("{}")
     cfg = config_module.load()
     assert cfg["colour"] == config_module.DEFAULT_CONFIG["colour"]
-
-
-def test_profile_id_coercion_formats():
-    """Verify _coerce_profile_id handles hex strings, colon notation, and lists."""
-    assert config_module._coerce_profile_id(["0x0414", "0x8105"]) == [1044, 33029]
-    assert config_module._coerce_profile_id(["0414", "8105"]) == [1044, 33029]
-    assert config_module._coerce_profile_id("0414:8105") == [1044, 33029]
-    assert config_module._coerce_profile_id("0x0414:0x8105") == [1044, 33029]
-    assert config_module._coerce_profile_id([1044, 33029]) == [1044, 33029]
-    # Invalid fallback
-    assert config_module._coerce_profile_id("invalid") == list(config_module.DEFAULT_CONFIG["profile_id"])
-    assert config_module._coerce_profile_id([123]) == list(config_module.DEFAULT_CONFIG["profile_id"])
 
 
 def test_brightness_migration_variants():
@@ -384,3 +364,227 @@ def test_hotkey_overrides_sanitized(isolated_config):
     loaded = config_module.load()
     assert set(loaded["hotkey_overrides"]) == {"open_center"}
     assert loaded["hotkey_overrides"]["open_center"]["payload"] == "000091"
+
+
+def test_rgb_hex_and_brightness_pct_sanitization(isolated_config):
+    """rgb_hex and brightness_pct are sanitized on load and mapped cleanly."""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(json.dumps({
+        "rgb_hex": "AA11BB",
+        "brightness_pct": 150,
+    }))
+    cfg = config_module.load()
+    assert cfg["rgb_hex"] == "#aa11bb"
+    assert cfg["brightness_pct"] == 100
+    assert config_module.effective_brightness_pct(cfg) == 100
+
+    isolated_config.write_text(json.dumps({
+        "rgb_hex": "not-hex",
+        "brightness_pct": "bad",
+        "brightness": 1,
+    }))
+    cfg2 = config_module.load()
+    assert cfg2["rgb_hex"] is None
+    assert cfg2["brightness_pct"] is None
+    assert config_module.effective_brightness_pct(cfg2) == 25
+
+
+def test_rgb_hex_and_brightness_pct_persist_through_update_config(isolated_config):
+    """rgb_hex, brightness_pct, and rgb_enabled survive update_config() + load()."""
+    config_module.update_config(lambda c: c.update({
+        "rgb_hex": "#00b4a0",
+        "brightness_pct": 5,
+        "rgb_enabled": True,
+    }))
+    cfg = config_module.load()
+    assert cfg["rgb_hex"] == "#00b4a0"
+    assert cfg["brightness_pct"] == 5
+    assert cfg["rgb_enabled"] is True
+
+
+def test_dgpu_gate_disclaimer_accepted_persists(isolated_config):
+    """dgpu_gate_disclaimer_accepted persists through update_config() + load()."""
+    assert config_module.load()["dgpu_gate_disclaimer_accepted"] is False
+    config_module.update_config(lambda c: c.update({"dgpu_gate_disclaimer_accepted": True}))
+    assert config_module.load()["dgpu_gate_disclaimer_accepted"] is True
+
+
+def test_load_ignores_unknown_legacy_4x_keys(isolated_config):
+    """Unknown 4.x keys in config.json must not crash load()."""
+    import json
+
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(json.dumps({
+        "colour": "red",
+        "experimental_profiles_enabled": True,
+        "rgb_legacy_mode": True,
+        "profile_id": [0x0414, 0x8105],
+    }))
+    cfg = config_module.load()
+    assert cfg["colour"] == "red"
+    assert "experimental_profiles_enabled" not in cfg
+    assert "rgb_legacy_mode" not in cfg
+    assert "profile_id" not in cfg
+
+
+def test_batch1_new_config_keys_roundtrip_and_sanitization(isolated_config):
+    """Verify new Batch 1/2 config keys load defaults, sanitize, and persist."""
+    cfg = config_module.load()
+    assert cfg["idle_keep_on_ac"] is False
+    assert cfg["charge_calibration_baseline_ts"] == 0
+    assert cfg["profile_rgb_enabled"] is False
+    assert cfg["profile_rgb_map"] == {
+        "0": "#2563eb",
+        "1": "#00b4a0",
+        "2": "#f59e0b",
+        "3": "#ef4444",
+    }
+    assert cfg["ac_profile_mode"] == "off"
+    assert cfg["ac_profile_id"] == 1
+    assert cfg["battery_profile_id"] == 0
+    assert cfg["custom_hotkeys"] == {}
+
+    cfg["idle_keep_on_ac"] = True
+    cfg["charge_calibration_baseline_ts"] = -10
+    cfg["profile_rgb_enabled"] = True
+    cfg["profile_rgb_map"] = {"0": "112233", "1": "not-a-color"}
+    cfg["ac_profile_mode"] = "invalid_mode"
+    cfg["ac_profile_id"] = 99
+    cfg["battery_profile_id"] = 3
+    cfg["custom_hotkeys"] = {"my_action": {"key": "F1"}}
+    config_module._write_config(cfg)
+
+    reloaded = config_module.load()
+    assert reloaded["idle_keep_on_ac"] is True
+    assert reloaded["charge_calibration_baseline_ts"] == 0
+    assert reloaded["profile_rgb_enabled"] is True
+    assert reloaded["profile_rgb_map"]["0"] == "#112233"
+    assert reloaded["profile_rgb_map"]["1"] == "#00b4a0"
+    assert reloaded["ac_profile_mode"] == "off"
+    assert reloaded["ac_profile_id"] == 1
+    assert reloaded["battery_profile_id"] == 3
+    assert reloaded["custom_hotkeys"] == {"my_action": {"key": "F1"}}
+
+
+def test_profile_rgb_for_helper():
+    """profile_rgb_for returns sanitized hex or falls back to defaults/#ffffff."""
+    cfg = {"profile_rgb_map": {"0": "AABBCC", "2": "invalid"}}
+    assert config_module.profile_rgb_for(cfg, 0) == "#aabbcc"
+    assert config_module.profile_rgb_for(cfg, 2) == "#f59e0b"
+    assert config_module.profile_rgb_for(cfg, 9) == "#ffffff"
+
+
+def test_disabled_profiles_sanitization():
+    """_sanitize_disabled_profiles keeps unique ints in 0..7 sorted."""
+    sanitize = config_module._sanitize_disabled_profiles
+    assert sanitize([3, "1", 3, -1, 8, "bad", None, True, 0, "7"]) == [0, 1, 3, 7]
+    assert sanitize("123") == []
+    assert sanitize({"0": 1}) == []
+    assert sanitize(123) == []
+    assert sanitize(None) == []
+
+
+def test_disabled_profiles_persistence(tmp_path, monkeypatch):
+    """disabled_profiles persists through update_config() + load()."""
+    monkeypatch.setattr(config_module, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", tmp_path / "config.json")
+
+    config_module.update_config(lambda cfg: cfg.__setitem__("disabled_profiles", [3, "0", 3, 99, "invalid"]))
+    reloaded = config_module.load()
+    assert reloaded["disabled_profiles"] == [0, 3]
+
+
+def test_enabled_acpi_profiles_filtering_and_guard():
+    """enabled_acpi_profiles filters disabled IDs and keeps all if all disabled."""
+    discovered = {
+        0: {"name": "Quiet"},
+        1: {"name": "Balanced"},
+        2: {"name": "Performance"},
+    }
+    filtered = config_module.enabled_acpi_profiles(discovered, {"disabled_profiles": [0, 2]})
+    assert list(filtered.keys()) == [1]
+
+    # Guard: if all discovered profiles are disabled, return all discovered profiles
+    all_disabled = config_module.enabled_acpi_profiles(discovered, {"disabled_profiles": [0, 1, 2]})
+    assert all_disabled == discovered
+    assert all_disabled is not discovered
+
+
+def test_v453_config_upgrade_preserves_settings_and_rollback_keys(isolated_config):
+    """Upgrading from a realistic v4.5.3 config.json preserves preferences & rollback keys."""
+    import json
+
+    v453_payload = {
+        "colour": "purple",
+        "brightness": 2,
+        "startup_apply": True,
+        "idle_off_enabled": True,
+        "idle_timeout_sec": 120,
+        "charge_limit": 75,
+        "charge_limit_enabled": True,
+        "dgpu_undervolt_enabled": True,
+        "dgpu_undervolt_offset_mhz": 150,
+        "dgpu_power_mode": "optimus",
+        "profile_id": [1044, 33029],
+        "rgb_legacy_mode": True,
+        "experimental_profiles_enabled": True,
+        "vid": "0414",
+        "pid": "8105",
+        "dgpu_telemetry": True,
+    }
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(json.dumps(v453_payload), encoding="utf-8")
+
+    cfg = config_module.load()
+    assert cfg["colour"] == "purple"
+    assert cfg["brightness"] == 2
+    assert cfg["startup_apply"] is True
+    assert cfg["idle_off_enabled"] is True
+    assert cfg["idle_timeout_sec"] == 120
+    assert cfg["charge_limit"] == 75
+    assert cfg["charge_limit_enabled"] is True
+    assert cfg["dgpu_undervolt_enabled"] is True
+    assert cfg["dgpu_undervolt_offset_mhz"] == 150
+    assert cfg["dgpu_power_mode"] == "optimus"
+    assert cfg["ui_theme"] == "system"
+    assert cfg["idle_internal_only"] is False
+    assert cfg["dgpu_gate_disclaimer_accepted"] is False
+    assert "profile_id" not in cfg
+    assert "rgb_legacy_mode" not in cfg
+    assert "experimental_profiles_enabled" not in cfg
+
+    assert config_module.save(cfg) is True
+    raw_saved = json.loads(isolated_config.read_text(encoding="utf-8"))
+    # Obsolete keys dropped, but rollback-safe keys on disk preserved
+    for dropped in ("vid", "pid", "dgpu_telemetry"):
+        assert dropped not in raw_saved
+    assert raw_saved["profile_id"] == [1044, 33029]
+    assert raw_saved["rgb_legacy_mode"] is True
+
+
+def test_usbc_power_budget_config_defaults_and_coercion(isolated_config):
+    defaults = config_module.load()
+    assert defaults["usbc_power_budget_enabled"] is False
+    assert defaults["usbc_power_budget_disclaimer_accepted"] is False
+    assert defaults["usbc_gpu_budget_w"] == 55
+    assert defaults["usbc_buffer_pct"] == 25
+
+    config_module.save({
+        "usbc_power_budget_enabled": True,
+        "usbc_power_budget_disclaimer_accepted": True,
+        "usbc_gpu_budget_w": 60,
+        "usbc_buffer_pct": 18,
+    })
+    loaded = config_module.load()
+    assert loaded["usbc_power_budget_enabled"] is True
+    assert loaded["usbc_power_budget_disclaimer_accepted"] is True
+    assert loaded["usbc_gpu_budget_w"] == 60
+    assert loaded["usbc_buffer_pct"] == 18
+
+    for bad in (True, 10, 200, "bogus", None):
+        config_module.save({"usbc_gpu_budget_w": bad})
+        assert config_module.load()["usbc_gpu_budget_w"] == 55
+
+    for bad_buf in (True, 10, 30, "bogus", None):
+        config_module.save({"usbc_buffer_pct": bad_buf})
+        assert config_module.load()["usbc_buffer_pct"] == 25

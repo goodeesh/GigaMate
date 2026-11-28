@@ -29,42 +29,52 @@ import threading
 import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
 
-from ... import dgpu_tune
-from ...config import load as load_config
+from ... import dgpu_gate, dgpu_tune, usbc_power
+from ...acpi import GIGAMATE_ACPI_SYSFS
+from ...battery import get_battery_manager
+from ...config import load as load_config, update_config
 from ...gpu import get_gpu_state, gpu_status_text
-
-
-class _SliderNoWheel(QSlider):
-    """A slider that never eats the page's scroll wheel.
-
-    These sliders now live in a scrollable page. Qt's default behaviour is to
-    change the value on any wheel event over the widget, so scrolling the page
-    would silently retune the GPU clocks. Ignoring the event hands it to the
-    scroll area, which is what the user actually asked for.
-    """
-
-    def wheelEvent(self, event):  # noqa: N802 (Qt naming)
-        event.ignore()
+from .. import icons
+from ..flow_layout import FlowContainer
+from ..theme import THEME
+from ..widgets import (
+    LinkPillButton,
+    M3Card,
+    M3IconHelpButton,
+    M3PageHeader,
+    M3ResponsiveGrid,
+    M3SegmentButton,
+    M3SegmentedBar,
+    M3Slider,
+    M3StatusPill,
+    M3Switch,
+    UsbcBudgetBarWidget,
+    VfCurveWidget,
+)
 
 
 class GpuPage(QWidget):
     """dGPU undervolt, max-clock and memory-clock controls (apply only awake)."""
 
+    navigate_requested = pyqtSignal(str)
     _POLL_TICKS = 8  # refresh the applied state roughly every ~12 s (8 * 1.5 s)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._accent_hex = THEME.primary
+        self._woke_from_auto = False
         self._tick_count = 0
         self._hw: dict = {}
         self._observed_ceiling = 0
@@ -76,6 +86,11 @@ class GpuPage(QWidget):
         self._uv_cfg_key = None
         self._max_cfg_key = None
         self._mem_offset_cfg_key = None
+        self._usbc_cfg_key = None
+        self._usbc_buf_cfg_key = None
+        self._usbc_env: Optional[usbc_power.BudgetEnvelope] = None
+        self._usbc_preview_total_w: int = 100
+        self._usbc_preview_mode: bool = False
         # NVML probe cache + wake-transition tracking. Probing is an NVML open,
         # so it is limited to reloads and wake transitions (see _recompute_normal_max).
         self._probed: dict = {}
@@ -88,6 +103,20 @@ class GpuPage(QWidget):
         self._holders_timer = QTimer(self)
         self._holders_timer.setInterval(100)
         self._holders_timer.timeout.connect(self._collect_holders)
+        self._gate_supported: Optional[bool] = None
+        self._gate_buttons: dict[str, QPushButton] = {}
+        self._gate_results: queue.Queue = queue.Queue()
+        self._gate_busy = False
+        self._controls_enabled: bool = False
+        self._mem_controls_enabled: bool = False
+        self._is_gated: bool = False
+        self._gate_timer = QTimer(self)
+        self._gate_timer.setInterval(100)
+        self._gate_timer.timeout.connect(self._collect_gate_result)
+        self._usbc_save_timer = QTimer(self)
+        self._usbc_save_timer.setSingleShot(True)
+        self._usbc_save_timer.setInterval(300)
+        self._usbc_save_timer.timeout.connect(self._commit_usbc_settings)
         self._init_ui()
 
         # Prime the watcher state before the first timer tick so the dGPU-asleep
@@ -107,12 +136,15 @@ class GpuPage(QWidget):
         self._uv_cfg_key = None
         self._max_cfg_key = None
         self._mem_offset_cfg_key = None
+        self._usbc_cfg_key = None
+        self._usbc_buf_cfg_key = None
         # Load the watcher state file first so self._hw is populated before the
         # first _refresh. This ensures the dGPU-asleep fallback (reading
         # supported/device from the state file rather than from an NVML probe)
         # is available on the very first render.
+        self._gate_supported = None
         self._read_published()
-        self._refresh()
+        self._refresh(recheck_gate=True)
         self._read_published(force_probe=True)
         self._refresh()
 
@@ -192,223 +224,936 @@ class GpuPage(QWidget):
             self._read_published()
         self._refresh()
 
+    def set_accent(self, accent_hex: str) -> None:
+        self._accent_hex = accent_hex
+        self._update_vf_curve()
+        if hasattr(self, "apply_bar"):
+            self._update_apply_bar_style(dirty=bool(self._staged_controls()) and not self._is_gated)
+        if hasattr(self, "usbc_budget_card"):
+            self._sync_usbc_budget_card()
+
+    def _update_vf_curve(self) -> None:
+        if not hasattr(self, "vf_curve"):
+            return
+        max_clk = (
+            self.max_slider.value()
+            if self.max_slider.value() < self._observed_ceiling
+            else None
+        )
+        self.vf_curve.set_curve(
+            self.uv_slider.value(),
+            max_clk,
+            self._observed_ceiling,
+            self._accent_hex,
+        )
+
     # ── UI ──
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(20)
-        layout.addWidget(self._build_state_card())
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(12)
+
+        header = M3PageHeader("GPU", "Power gate & sleep-aware NVIDIA V/F tuning")
+        pills_box = QWidget()
+        pills_row = QHBoxLayout(pills_box)
+        pills_row.setContentsMargins(0, 0, 0, 0)
+        pills_row.setSpacing(8)
+        self.auto_gate_link_pill = LinkPillButton("Battery Auto-Gate: OFF ↗", "automation:dgpu_gate")
+        self.auto_gate_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        self.boot_apply_link_pill = LinkPillButton("Boot Apply: ON ↗", "automation:boot_apply")
+        self.boot_apply_link_pill.navigate_requested.connect(self.navigate_requested.emit)
+        pills_row.addWidget(self.auto_gate_link_pill)
+        pills_row.addWidget(self.boot_apply_link_pill)
+        header.set_trailing_widget(pills_box)
+        layout.addWidget(header)
+
+        layout.addWidget(self._build_power_gate_card())
+        layout.addWidget(self._build_usbc_budget_card())
         layout.addWidget(self._build_core_clock_card())
-        layout.addWidget(self._build_mem_clock_card())
-        layout.addLayout(self._build_apply_bar())
+        layout.addWidget(self._build_apply_bar())
         layout.addStretch()
 
-    def _build_state_card(self) -> QFrame:
-        state_card = QFrame()
-        state_card.setProperty("class", "Card")
-        sc = QVBoxLayout(state_card)
-        sc.setSpacing(8)
-        t = QLabel("Discrete GPU")
-        t.setProperty("class", "CardTitle")
-        sc.addWidget(t)
+    def _build_power_gate_card(self) -> M3Card:
+        self.power_gate_card = M3Card()
+        box = QVBoxLayout(self.power_gate_card)
+        box.setContentsMargins(18, 16, 18, 16)
+        box.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        self._gpu_icon_lbl = QLabel()
+        self._gpu_icon_lbl.setFixedSize(18, 18)
+        self._gpu_icon_lbl.setPixmap(icons.render_icon_pixmap("gpu", color=THEME.primary, size=18))
+        self._gpu_icon_lbl.setStyleSheet("background: transparent;")
+        hdr.addWidget(self._gpu_icon_lbl)
+
+        t = QLabel("DISCRETE GPU")
+        t.setProperty("class", "SectionLabel")
+        hdr.addWidget(t)
+
         self.gpu_state_lbl = QLabel("—")
-        self.gpu_state_lbl.setStyleSheet("color: #ffffff; font-size: 18px; font-weight: 700;")
-        sc.addWidget(self.gpu_state_lbl)
-        self.gpu_holders_lbl = QLabel("")
-        self.gpu_holders_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
-        self.gpu_holders_lbl.setWordWrap(True)
-        sc.addWidget(self.gpu_holders_lbl)
-        return state_card
-
-    def _build_core_clock_card(self) -> QFrame:
-        card = QFrame()
-        card.setProperty("class", "Card")
-        box = QVBoxLayout(card)
-        box.setSpacing(14)
-
-        title = QLabel("Core Clock Tuning (Undervolt & Curve Flattening)")
-        title.setProperty("class", "CardTitle")
-        box.addWidget(title)
-
-        tech_explainer = QLabel(
-            "<b>How modern NVIDIA undervolting works:</b><br/>"
-            "• <b>Curve Offset (Overclock / Undervolt):</b> Shifts the voltage/frequency curve upward so the core reaches higher clock speeds at lower voltages, reducing heat and power draw.<br/>"
-            "• <b>Boost Clock Cap (Flattening):</b> An aggressive offset pushes top frequencies into unstable territory under peak boost. Capping the max clock \"flattens\" the top of the curve, keeping the efficiency gains of the undervolt while maintaining total stability."
+        self.gpu_state_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
         )
-        tech_explainer.setStyleSheet("color: #94a3b8; font-size: 11px; line-height: 1.4;")
-        tech_explainer.setWordWrap(True)
-        box.addWidget(tech_explainer)
+        hdr.addWidget(self.gpu_state_lbl)
+
+        self.gpu_meta_lbl = M3StatusPill("", tone="neutral")
+        self.gpu_meta_lbl.setVisible(False)
+        hdr.addWidget(self.gpu_meta_lbl)
+
+        self.gate_exp_badge = M3StatusPill("Auto-discovered ACPI", tone="warning")
+        self.gate_exp_badge.setToolTip(
+            "Hardware rail gating is firmware-dependent (verified on Gigabyte AERO X16 1VH). "
+            "Optimus is the safe default; reboot recovers if wake ever fails."
+        )
+        self.gate_exp_badge.setVisible(False)
+        hdr.addWidget(self.gate_exp_badge)
+
+        hdr.addStretch()
+        self.gate_rail_pill = M3StatusPill("", tone="neutral")
+        hdr.addWidget(self.gate_rail_pill)
+        box.addLayout(hdr)
+
+        self.gpu_holders_lbl = QLabel("")
+        self.gpu_holders_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
+        self.gpu_holders_lbl.setWordWrap(True)
+        self.gpu_holders_lbl.setVisible(False)
+        box.addWidget(self.gpu_holders_lbl)
+
+        self.gate_bar = M3SegmentedBar()
+        self.gate_btn_group = QButtonGroup(self)
+        self.gate_btn_group.setExclusive(True)
+        for mode_key, label, tip in (
+            ("optimus", "dGPU On · Optimus", "Default: kernel RTD3 runtime PM manages D3cold"),
+            ("eco", "dGPU Off · Battery Only (~0 W)", "Prompt & close GPU apps if needed, then cut power rail until switched back"),
+        ):
+            btn = self.gate_bar.add_segment(label, tooltip=tip, checkable=True, min_height=38)
+            btn.clicked.connect(lambda _checked=False, m=mode_key: self._on_gate_mode_clicked(m))
+            self.gate_btn_group.addButton(btn)
+            self._gate_buttons[mode_key] = btn
+        box.addWidget(self.gate_bar)
+
+        self.gate_info_lbl = QLabel(
+            "Optimus: runtime D3cold  ·  Battery Only: rail off (~0 W); saved tuning re-applies on wake"
+        )
+        self.gate_info_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
+        self.gate_info_lbl.setWordWrap(True)
+        box.addWidget(self.gate_info_lbl)
+
+        self.gate_status_lbl = QLabel("")
+        self.gate_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
+        self.gate_status_lbl.setWordWrap(True)
+        box.addWidget(self.gate_status_lbl)
+
+        force_row = QHBoxLayout()
+        self.gate_force_close_btn = QPushButton("Close Apps && Power Off")
+        self.gate_force_close_btn.setProperty("class", "DangerTonalButton")
+        self.gate_force_close_btn.setIcon(
+            icons.make_icon("power_off", color=THEME.error, size=15)
+        )
+        self.gate_force_close_btn.setIconSize(QSize(15, 15))
+        self.gate_force_close_btn.setToolTip(
+            "Open confirmation dialog listing user apps/services currently holding the dGPU"
+        )
+        self.gate_force_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.gate_force_close_btn.setVisible(False)
+        self.gate_force_close_btn.clicked.connect(self._on_gate_force_close_clicked)
+        force_row.addWidget(self.gate_force_close_btn)
+        force_row.addStretch()
+        box.addLayout(force_row)
+
+        note_row = QHBoxLayout()
+        note_row.setSpacing(6)
+        note_icon = QLabel()
+        note_icon.setFixedSize(14, 14)
+        note_icon.setPixmap(icons.render_icon_pixmap("info", color=THEME.on_surface_muted, size=14))
+        note_icon.setStyleSheet("background: transparent;")
+        note_row.addWidget(note_icon, alignment=Qt.AlignmentFlag.AlignTop)
+        note = QLabel(
+            "Firmware-dependent (Optimus is always the safe default). HDMI/DisplayPort outputs "
+            "wired directly to the dGPU stop working while gated off, and audio pauses briefly "
+            "(~0.5 s) while detaching HDMI audio. Reboot recovers if wake ever fails."
+        )
+        note.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
+        note.setWordWrap(True)
+        note_row.addWidget(note, 1)
+        box.addLayout(note_row)
+
+        self._sync_power_gate_card(recheck_supported=True)
+        return self.power_gate_card
+
+    def _build_usbc_budget_card(self) -> M3Card:
+        self.usbc_budget_card = M3Card()
+        box = QVBoxLayout(self.usbc_budget_card)
+        box.setContentsMargins(18, 16, 18, 16)
+        box.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        usbc_icon = QLabel()
+        usbc_icon.setFixedSize(18, 18)
+        usbc_icon.setPixmap(icons.render_icon_pixmap("bolt", color=THEME.primary, size=18))
+        usbc_icon.setStyleSheet("background: transparent;")
+        hdr.addWidget(usbc_icon)
+
+        title = QLabel("USB-C POWER BUDGET")
+        title.setProperty("class", "SectionLabel")
+        hdr.addWidget(title)
+        hdr.addWidget(
+            M3IconHelpButton(
+                "Opt-in USB-C PD power budget:\n"
+                "• Overrides NVIDIA's 30 W \"Undersized Power Source\" cap when connected to a "
+                ">= 90 W USB-C PD charger.\n"
+                "• Charger wattage is detected read-only with a configurable 15%–25% safety buffer "
+                "(default 25%, min 15 W).\n"
+                "• Adjust the GPU <-> CPU split below; sustained battery drain (> 3 W for 5 s) "
+                "automatically steps power down safely."
+            )
+        )
+        hdr.addStretch()
+
+        self.usbc_switch = M3Switch()
+        self.usbc_switch.setToolTip(
+            "Opt in to override NVIDIA's 30 W cap on >= 90 W USB-C PD chargers"
+        )
+        self.usbc_switch.toggled.connect(self._on_usbc_toggled)
+        hdr.addWidget(self.usbc_switch)
+        box.addLayout(hdr)
+
+        pills = FlowContainer(spacing=8)
+        self.usbc_charger_pill = M3StatusPill("Detected: Barrel AC", tone="neutral")
+        self.usbc_state_pill = M3StatusPill("Off · Stock 30 W cap on USB-C", tone="neutral")
+        pills.addWidget(self.usbc_charger_pill)
+        pills.addWidget(self.usbc_state_pill)
+        box.addWidget(pills)
+
+        self.usbc_budget_bar = UsbcBudgetBarWidget()
+        box.addWidget(self.usbc_budget_bar)
+
+        split_hdr = QHBoxLayout()
+        split_hdr.setSpacing(8)
+        split_lbl = QLabel("GPU ↔ CPU Split")
+        split_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+        )
+        split_hdr.addWidget(split_lbl)
+        self.usbc_split_val = QLabel("55 W GPU / 20 W CPU")
+        self.usbc_split_val.setProperty("class", "ValueReadoutPill")
+        self.usbc_split_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        split_hdr.addWidget(self.usbc_split_val)
+        split_hdr.addStretch()
+        box.addLayout(split_hdr)
+
+        self.usbc_split_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
+        self.usbc_split_slider.setRange(50, 60)
+        self.usbc_split_slider.setSingleStep(1)
+        self.usbc_split_slider.setPageStep(5)
+        self.usbc_split_slider.setValue(55)
+        self.usbc_split_slider.valueChanged.connect(self._on_usbc_split_changed)
+        self.usbc_split_slider.sliderReleased.connect(self._commit_usbc_settings)
+        box.addWidget(self.usbc_split_slider)
+
+        buf_hdr = QHBoxLayout()
+        buf_hdr.setSpacing(8)
+        buf_lbl = QLabel("Safety Buffer")
+        buf_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+        )
+        buf_hdr.addWidget(buf_lbl)
+        self.usbc_buffer_val = QLabel("25% (25 W)")
+        self.usbc_buffer_val.setProperty("class", "ValueReadoutPill")
+        self.usbc_buffer_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        buf_hdr.addWidget(self.usbc_buffer_val)
+        buf_hdr.addStretch()
+        box.addLayout(buf_hdr)
+
+        self.usbc_buffer_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
+        self.usbc_buffer_slider.setRange(usbc_power.MIN_BUFFER_PCT, usbc_power.MAX_BUFFER_PCT)
+        self.usbc_buffer_slider.setSingleStep(1)
+        self.usbc_buffer_slider.setPageStep(5)
+        self.usbc_buffer_slider.setValue(usbc_power.DEFAULT_BUFFER_PCT)
+        self.usbc_buffer_slider.valueChanged.connect(self._on_usbc_buffer_changed)
+        self.usbc_buffer_slider.sliderReleased.connect(self._commit_usbc_settings)
+        box.addWidget(self.usbc_buffer_slider)
+
+        self.usbc_status_lbl = QLabel("")
+        self.usbc_status_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
+        self.usbc_status_lbl.setWordWrap(True)
+        box.addWidget(self.usbc_status_lbl)
+
+        note_row = QHBoxLayout()
+        note_row.setSpacing(6)
+        note_icon = QLabel()
+        note_icon.setFixedSize(14, 14)
+        note_icon.setPixmap(icons.render_icon_pixmap("info", color=THEME.on_surface_muted, size=14))
+        note_icon.setStyleSheet("background: transparent;")
+        note_row.addWidget(note_icon, alignment=Qt.AlignmentFlag.AlignTop)
+        usbc_note = QLabel(
+            "Charger wattage is auto-detected read-only; adjust the safety buffer (15%–25%, "
+            "default 25%), and sustained battery drain triggers automatic step-down."
+        )
+        usbc_note.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
+        usbc_note.setWordWrap(True)
+        note_row.addWidget(usbc_note, 1)
+        box.addLayout(note_row)
+
+        self._usbc_hw_caps: tuple = (None, None, False, False, False)
+        self._sync_usbc_budget_card()
+        return self.usbc_budget_card
+
+    def _on_usbc_toggled(self, checked: bool) -> None:
+        if checked and not load_config().get("usbc_power_budget_disclaimer_accepted", False):
+            reply = QMessageBox.warning(
+                self,
+                usbc_power.DISCLAIMER_TITLE,
+                usbc_power.DISCLAIMER_TEXT,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.usbc_switch.blockSignals(True)
+                self.usbc_switch.setChecked(False)
+                self.usbc_switch.blockSignals(False)
+                return
+            update_config(
+                lambda c: {
+                    **c,
+                    "usbc_power_budget_disclaimer_accepted": True,
+                    "usbc_power_budget_enabled": True,
+                }
+            )
+        else:
+            update_config(lambda c: {**c, "usbc_power_budget_enabled": bool(checked)})
+        self._sync_usbc_budget_card()
+
+    def _on_usbc_split_changed(self, value: int) -> None:
+        if self._usbc_env is not None and self._usbc_env.supported:
+            gpu_w, cpu_w = usbc_power.clamp_split(value, self._usbc_env)
+            buf_w = self._usbc_env.buffer_w
+            total_w = self._usbc_preview_total_w
+        else:
+            gpu_w = int(value)
+            cpu_w = 0
+            buf_w = 0
+            total_w = 0
+        self.usbc_split_val.setText(f"{gpu_w} W GPU / {cpu_w} W CPU")
+        self.usbc_budget_bar.set_allocation(
+            gpu_w,
+            cpu_w,
+            buf_w,
+            total_w,
+            accent_hex=self._accent_hex,
+            dimmed=self._usbc_preview_mode or not self.usbc_switch.isChecked(),
+        )
+        self._usbc_save_timer.start()
+
+    def _on_usbc_buffer_changed(self, value: int) -> None:
+        pct = max(usbc_power.MIN_BUFFER_PCT, min(usbc_power.MAX_BUFFER_PCT, int(value)))
+        tgp_w, max_w, has_ctgp, has_cpu_ppt, has_dyn_boost = self._usbc_hw_caps
+        calc_w = self._usbc_preview_total_w if self._usbc_preview_total_w > 0 else None
+        env = usbc_power.compute_budget_envelope(
+            calc_w,
+            tgp_w,
+            max_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_dyn_boost,
+            has_nvidia_gpu=True,
+            buffer_pct=pct,
+        )
+        self._usbc_env = env
+        self.usbc_buffer_val.setText(
+            f"{env.buffer_pct}% ({env.buffer_w} W)" if env.buffer_w > 0 else f"{env.buffer_pct}%"
+        )
+        if env.supported:
+            can_slide = env.gpu_max_w > env.gpu_min_w
+            self.usbc_split_slider.setEnabled(can_slide)
+            if not self.usbc_split_slider.isSliderDown():
+                self.usbc_split_slider.blockSignals(True)
+                self.usbc_split_slider.setRange(env.gpu_min_w, env.gpu_max_w)
+                self.usbc_split_slider.blockSignals(False)
+            gpu_w, cpu_w = usbc_power.clamp_split(self.usbc_split_slider.value(), env)
+            total_w = int(calc_w or 0)
+        else:
+            self.usbc_split_slider.setEnabled(False)
+            gpu_w = env.gpu_min_w
+            cpu_w = max(0, env.silicon_budget_w - gpu_w) if env.silicon_budget_w else 0
+            total_w = int(calc_w or 0) if env.buffer_w else 0
+        self.usbc_split_val.setText(f"{gpu_w} W GPU / {cpu_w} W CPU")
+        self.usbc_budget_bar.set_allocation(
+            gpu_w,
+            cpu_w,
+            env.buffer_w,
+            total_w,
+            accent_hex=self._accent_hex,
+            dimmed=self._usbc_preview_mode or not self.usbc_switch.isChecked(),
+        )
+        self._usbc_save_timer.start()
+
+    def _commit_usbc_settings(self) -> None:
+        if self._usbc_save_timer.isActive():
+            self._usbc_save_timer.stop()
+        val = int(self.usbc_split_slider.value())
+        if self._usbc_env is not None and self._usbc_env.supported:
+            val, _ = usbc_power.clamp_split(val, self._usbc_env)
+        buf_pct = max(
+            usbc_power.MIN_BUFFER_PCT,
+            min(usbc_power.MAX_BUFFER_PCT, int(self.usbc_buffer_slider.value())),
+        )
+        update_config(
+            lambda c: {**c, "usbc_gpu_budget_w": val, "usbc_buffer_pct": buf_pct}
+        )
+        if self._usbc_env is not None and self._usbc_env.supported:
+            self._usbc_cfg_key = (val, self._usbc_env.gpu_min_w, self._usbc_env.gpu_max_w)
+        self._usbc_buf_cfg_key = buf_pct
+
+    def _commit_usbc_split(self) -> None:
+        self._commit_usbc_settings()
+
+    def _sync_usbc_budget_card(self, gpu=None) -> None:
+        if not hasattr(self, "usbc_budget_card"):
+            return
+        gpu = gpu if gpu is not None else get_gpu_state()
+        visible = bool(gpu.present and gpu.vendor == "nvidia")
+        self.usbc_budget_card.setVisible(visible)
+        if not visible:
+            return
+
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        st = usbc_power.read_state_file()
+        src = usbc_power.detect_power_source()
+        caps = usbc_power.read_cached_gpu_caps_only()
+
+        tgp_w = st.get("default_tgp_w") or caps.default_tgp_w
+        max_w = st.get("max_constraint_w") or caps.max_constraint_w
+        has_cpu_ppt = all(
+            (GIGAMATE_ACPI_SYSFS / n).exists()
+            for n in ("cpu_stapm_w", "cpu_slow_ppt_w", "cpu_fast_ppt_w")
+        )
+        has_ctgp = (GIGAMATE_ACPI_SYSFS / "gpu_ctgp_offset_w").exists()
+        has_dyn_boost = (GIGAMATE_ACPI_SYSFS / "gpu_dynamic_boost").exists()
+        self._usbc_hw_caps = (tgp_w, max_w, has_ctgp, has_cpu_ppt, has_dyn_boost)
+
+        enabled = bool(cfg.get("usbc_power_budget_enabled", False))
+        self.usbc_switch.blockSignals(True)
+        self.usbc_switch.setChecked(enabled)
+        self.usbc_switch.blockSignals(False)
+
+        saved_buf_pct = int(
+            cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT
+        )
+        saved_buf_pct = max(
+            usbc_power.MIN_BUFFER_PCT, min(usbc_power.MAX_BUFFER_PCT, saved_buf_pct)
+        )
+        if not self.usbc_buffer_slider.isSliderDown() and self._usbc_buf_cfg_key != saved_buf_pct:
+            self.usbc_buffer_slider.blockSignals(True)
+            self.usbc_buffer_slider.setValue(saved_buf_pct)
+            self.usbc_buffer_slider.blockSignals(False)
+            self._usbc_buf_cfg_key = saved_buf_pct
+
+        is_usbc_pd = src.kind == "usbc_pd"
+        if is_usbc_pd:
+            if src.detected_wattage_w is not None:
+                if src.detected_wattage_w >= usbc_power.MIN_USBC_PD_WATTS:
+                    self.usbc_charger_pill.setText(f"Detected: {src.detected_wattage_w} W USB-C PD")
+                    self.usbc_charger_pill.set_tone("info")
+                else:
+                    self.usbc_charger_pill.setText(
+                        f"Detected: {src.detected_wattage_w} W USB-C PD (<{usbc_power.MIN_USBC_PD_WATTS} W)"
+                    )
+                    self.usbc_charger_pill.set_tone("warning")
+            else:
+                self.usbc_charger_pill.setText("Detected: USB-C PD (unknown W)")
+                self.usbc_charger_pill.set_tone("warning")
+        elif src.kind == "barrel_ac":
+            self.usbc_charger_pill.setText("Detected: Barrel AC")
+            self.usbc_charger_pill.set_tone("neutral")
+        else:
+            self.usbc_charger_pill.setText("Detected: Battery")
+            self.usbc_charger_pill.set_tone("neutral")
+
+        preview_mode = not is_usbc_pd
+        calc_w = src.detected_wattage_w if is_usbc_pd else 100
+        active_buf_pct = int(self.usbc_buffer_slider.value())
+        env = usbc_power.compute_budget_envelope(
+            calc_w,
+            tgp_w,
+            max_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_dyn_boost,
+            has_nvidia_gpu=True,
+            buffer_pct=active_buf_pct,
+        )
+        self._usbc_env = env
+        self._usbc_preview_mode = preview_mode
+        self._usbc_preview_total_w = int(calc_w or 0)
+        self.usbc_buffer_val.setText(
+            f"{env.buffer_pct}% ({env.buffer_w} W)" if env.buffer_w > 0 else f"{env.buffer_pct}%"
+        )
+
+        saved_gpu_w = int(cfg.get("usbc_gpu_budget_w", env.default_gpu_w or 55) or 55)
+        if env.supported:
+            target_gpu_w, _ = usbc_power.clamp_split(saved_gpu_w, env)
+            can_slide = env.gpu_max_w > env.gpu_min_w
+            self.usbc_split_slider.setEnabled(can_slide)
+            if not self.usbc_split_slider.isSliderDown():
+                if (
+                    self.usbc_split_slider.minimum() != env.gpu_min_w
+                    or self.usbc_split_slider.maximum() != env.gpu_max_w
+                ):
+                    self.usbc_split_slider.blockSignals(True)
+                    self.usbc_split_slider.setRange(env.gpu_min_w, env.gpu_max_w)
+                    self.usbc_split_slider.blockSignals(False)
+                if self._usbc_cfg_key != (target_gpu_w, env.gpu_min_w, env.gpu_max_w):
+                    self.usbc_split_slider.blockSignals(True)
+                    self.usbc_split_slider.setValue(target_gpu_w)
+                    self.usbc_split_slider.blockSignals(False)
+                    self._usbc_cfg_key = (target_gpu_w, env.gpu_min_w, env.gpu_max_w)
+            disp_gpu_w, disp_cpu_w = usbc_power.clamp_split(self.usbc_split_slider.value(), env)
+        else:
+            self.usbc_split_slider.setEnabled(False)
+            disp_gpu_w = env.gpu_min_w
+            disp_cpu_w = max(0, env.silicon_budget_w - disp_gpu_w) if env.silicon_budget_w else 0
+
+        self.usbc_split_val.setText(f"{disp_gpu_w} W GPU / {disp_cpu_w} W CPU")
+
+        daemon_mode = str(st.get("mode") or "")
+        trimmed = False
+        bar_gpu_w = disp_gpu_w
+        bar_cpu_w = disp_cpu_w
+        dimmed = preview_mode or not enabled
+
+        bat_note = ""
+        if src.bat_present and src.bat_power_w is not None:
+            bat_note = f"Battery: {src.bat_status} ({src.bat_power_w:+.1f} W)"
+
+        if not enabled:
+            self.usbc_state_pill.setText("Off · Stock 30 W cap on USB-C")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Opt-in disabled — stock NVIDIA 30 W Undersized limit applies on USB-C PD."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif not env.supported and env.reason == "gpu_tgp_exceeds_budget":
+            self.usbc_state_pill.setText("Incompatible GPU TGP")
+            self.usbc_state_pill.set_tone("error")
+            self.usbc_status_lbl.setText(
+                f"Base GPU TGP ({tgp_w} W) exceeds the safe silicon budget "
+                f"({env.silicon_budget_w - env.cpu_floor_w} W max GPU on {calc_w} W charger); "
+                "stock 30 W safety cap kept."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif not env.supported and env.reason == "gpu_tgp_unknown":
+            self.usbc_state_pill.setText("Wake dGPU once to read TGP")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Base GPU TGP not cached yet — wakes cleanly next time the dGPU becomes active."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and not env.supported:
+            self.usbc_state_pill.setText(f"Charger < {usbc_power.MIN_USBC_PD_WATTS} W · Stock 30 W")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(
+                f"Detected USB-C charger is below {usbc_power.MIN_USBC_PD_WATTS} W; keeping stock 30 W cap."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("active") and daemon_mode == "auto_trimmed":
+            trimmed = True
+            dimmed = False
+            if not self.usbc_split_slider.isSliderDown():
+                bar_gpu_w = int(st.get("applied_gpu_w") or disp_gpu_w)
+                bar_cpu_w = int(st.get("applied_cpu_w") or disp_cpu_w)
+            aux_s = st.get("aux_state")
+            self.usbc_state_pill.setText(f"Auto-Trimmed · {bar_gpu_w} W GPU (P{aux_s})")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(
+                f"Battery drain protection stepped power down ({bar_gpu_w} W GPU + {bar_cpu_w} W CPU). "
+                + (bat_note or "")
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("active") and daemon_mode == "active":
+            dimmed = False
+            if not self.usbc_split_slider.isSliderDown():
+                bar_gpu_w = int(st.get("applied_gpu_w") or disp_gpu_w)
+                bar_cpu_w = int(st.get("applied_cpu_w") or disp_cpu_w)
+            self.usbc_state_pill.setText(f"Active · {bar_gpu_w} W GPU + {bar_cpu_w} W CPU")
+            self.usbc_state_pill.set_tone("success")
+            ctrl_note = "EC/NPCF limits enforced" if (has_ctgp and has_cpu_ppt) else "NVRM P0 + Profile 0"
+            self.usbc_status_lbl.setText(
+                f"Unlocked above 30 W cap ({ctrl_note}). " + (bat_note or "")
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and daemon_mode == "settling":
+            self.usbc_state_pill.setText("Settling PD contract…")
+            self.usbc_state_pill.set_tone("info")
+            self.usbc_status_lbl.setText("Waiting for USB-C PD negotiation and EC events to settle.")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.info}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and gpu.gated_off:
+            self.usbc_state_pill.setText("Standby · dGPU Gated Off")
+            self.usbc_state_pill.set_tone("gated")
+            self.usbc_status_lbl.setText("Engages automatically once the dGPU powers back on.")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and not self._gpu_awake:
+            self.usbc_state_pill.setText("Standby · Ready when dGPU wakes")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Sleep-safe: waiting for the dGPU to wake before applying USB-C PD budget."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("last_error"):
+            self.usbc_state_pill.setText("Pending / Retry")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(f"Daemon retry pending: {st.get('last_error')}")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        else:
+            src_label = "Barrel AC" if src.kind == "barrel_ac" else "Battery"
+            self.usbc_state_pill.setText(f"Standby · On {src_label}")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                f"Enabled for >= {usbc_power.MIN_USBC_PD_WATTS} W USB-C PD (showing 100 W preview while on {src_label})."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+
+        self.usbc_budget_bar.set_allocation(
+            bar_gpu_w,
+            bar_cpu_w,
+            env.buffer_w,
+            self._usbc_preview_total_w if env.supported else 0,
+            accent_hex=self._accent_hex,
+            dimmed=dimmed,
+            trimmed=trimmed,
+        )
+
+    def _build_core_clock_card(self) -> M3Card:
+        card = M3Card()
+        box = QVBoxLayout(card)
+        box.setContentsMargins(18, 13, 18, 13)
+        box.setSpacing(8)
+        box.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        title = QLabel("V/F & Clock Tuning")
+        title.setProperty("class", "CardTitle")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(
+            M3IconHelpButton(
+                "How modern NVIDIA undervolting works:\n"
+                "• Curve Offset (Overclock / Undervolt): Shifts the V/F curve upward so the core "
+                "reaches higher clock speeds at lower voltages, reducing heat and power draw.\n"
+                "• Boost Clock Cap (Flattening): Capping the max clock flattens the top of the "
+                "curve, keeping efficiency gains while preventing peak-boost instability.\n"
+                "• VRAM Clock: Independent memory frequency offset."
+            )
+        )
+        box.addLayout(hdr)
 
         self.uv_support_lbl = QLabel("")
-        self.uv_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
+        self.uv_support_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
         self.uv_support_lbl.setWordWrap(True)
         box.addWidget(self.uv_support_lbl)
 
-        # ── Sub-section 1: V/F Curve Offset ──
-        uv_sub_title = QLabel("1. V/F Curve Offset (Core Undervolt)")
-        uv_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600; margin-top: 4px;")
-        box.addWidget(uv_sub_title)
+        self.vf_curve = VfCurveWidget()
+        box.addWidget(self.vf_curve)
 
-        uv_sub_desc = QLabel(
-            "Shift frequency up across all voltage points (0 to +255 MHz). "
-            "Higher values reduce voltage for any given clock."
+        grid = M3ResponsiveGrid(wide_cols=3, narrow_cols=1, breakpoint=560, h_spacing=12, v_spacing=12)
+
+        # ── Column 1: V/F Curve Offset ──
+        uv_col = QFrame()
+        uv_col.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
         )
-        uv_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
-        uv_sub_desc.setWordWrap(True)
-        box.addWidget(uv_sub_desc)
+        uv_box = QVBoxLayout(uv_col)
+        uv_box.setContentsMargins(12, 10, 12, 10)
+        uv_box.setSpacing(6)
+        uv_sub_title = QLabel("1. Core V/F Offset")
+        uv_sub_title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"border: none; background: transparent;"
+        )
+        uv_box.addWidget(uv_sub_title)
+        uv_val_row = QHBoxLayout()
+        uv_val_row.setContentsMargins(0, 0, 0, 0)
+        self.uv_val = QLabel("+0 MHz")
+        self.uv_val.setProperty("class", "ValueReadoutPill")
+        self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        uv_val_row.addWidget(self.uv_val)
+        uv_val_row.addStretch()
+        uv_box.addLayout(uv_val_row)
 
-        uv_row = QHBoxLayout()
-        uv_row.setSpacing(10)
-        self.uv_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.uv_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.uv_slider.setMinimum(0)
         self.uv_slider.setMaximum(dgpu_tune.MAX_OFFSET_MHZ)
         self.uv_slider.setSingleStep(5)
         self.uv_slider.setValue(0)
         self.uv_slider.valueChanged.connect(self._on_uv_slider)
-        self.uv_val = QLabel("+0 MHz")
-        self.uv_val.setProperty("class", "ValueReadoutPill")
-        self.uv_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.uv_val.setMinimumWidth(80)
+        uv_box.addWidget(self.uv_slider)
+
+        uv_foot = QHBoxLayout()
+        self.uv_status_lbl = QLabel("")
+        self.uv_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.uv_status_lbl.setWordWrap(True)
+        uv_foot.addWidget(self.uv_status_lbl, 1)
         self.uv_reset_btn = QPushButton("Reset")
+        self.uv_reset_btn.setProperty("class", "OutlinedButton")
+        self.uv_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.uv_reset_btn.setIconSize(QSize(14, 14))
         self.uv_reset_btn.setToolTip("Return the V/F offset to stock (0 MHz) now")
         self.uv_reset_btn.clicked.connect(lambda: self._reset_uv())
-        uv_row.addWidget(self.uv_slider, 1)
-        uv_row.addWidget(self.uv_val)
-        uv_row.addWidget(self.uv_reset_btn)
-        box.addLayout(uv_row)
+        uv_foot.addWidget(self.uv_reset_btn)
+        uv_box.addLayout(uv_foot)
+        grid.addWidget(uv_col)
 
-        self.uv_status_lbl = QLabel("")
-        self.uv_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
-        box.addWidget(self.uv_status_lbl)
-
-        # Divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        divider.setStyleSheet("color: #232b3d; margin-top: 6px; margin-bottom: 6px;")
-        box.addWidget(divider)
-
-        # ── Sub-section 2: Max Clock Cap (Curve Flattening) ──
-        mc_sub_title = QLabel("2. Max Boost Clock Cap (Curve Flattening)")
-        mc_sub_title.setStyleSheet("color: #e2e8f0; font-size: 13px; font-weight: 600;")
-        box.addWidget(mc_sub_title)
-
-        mc_sub_desc = QLabel(
-            "Upper-bound the boost clock. The top of the slider is Stock (unlocked). "
-            "Lowering it flattens the curve above the specified MHz to prevent instability."
+        # ── Column 2: Max Boost Clock Cap ──
+        mc_col = QFrame()
+        mc_col.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
         )
-        mc_sub_desc.setStyleSheet("color: #718096; font-size: 11px;")
-        mc_sub_desc.setWordWrap(True)
-        box.addWidget(mc_sub_desc)
+        mc_box = QVBoxLayout(mc_col)
+        mc_box.setContentsMargins(12, 10, 12, 10)
+        mc_box.setSpacing(6)
+        mc_sub_title = QLabel("2. Max Boost Cap")
+        mc_sub_title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"border: none; background: transparent;"
+        )
+        mc_box.addWidget(mc_sub_title)
+        mc_val_row = QHBoxLayout()
+        mc_val_row.setContentsMargins(0, 0, 0, 0)
+        self.max_val = QLabel("Stock (unlocked)")
+        self.max_val.setProperty("class", "ValueReadoutPill")
+        self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mc_val_row.addWidget(self.max_val)
+        mc_val_row.addStretch()
+        mc_box.addLayout(mc_val_row)
 
-        mc_row = QHBoxLayout()
-        mc_row.setSpacing(10)
-        self.max_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.max_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.max_slider.setRange(self._normal_min, self._normal_max)
         self.max_slider.setSingleStep(25)
         self.max_slider.setValue(self._normal_max)
         self.max_slider.valueChanged.connect(self._on_max_slider)
-        self.max_val = QLabel("Stock (unlocked)")
-        self.max_val.setProperty("class", "ValueReadoutPill")
-        self.max_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.max_val.setMinimumWidth(160)
+        mc_box.addWidget(self.max_slider)
+
+        mc_foot = QHBoxLayout()
+        self.max_status_lbl = QLabel("")
+        self.max_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.max_status_lbl.setWordWrap(True)
+        mc_foot.addWidget(self.max_status_lbl, 1)
         self.max_reset_btn = QPushButton("Reset")
+        self.max_reset_btn.setProperty("class", "OutlinedButton")
+        self.max_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.max_reset_btn.setIconSize(QSize(14, 14))
         self.max_reset_btn.setToolTip("Unlock the boost clock now")
         self.max_reset_btn.clicked.connect(lambda: self._reset_max())
-        mc_row.addWidget(self.max_slider, 1)
-        mc_row.addWidget(self.max_val)
-        mc_row.addWidget(self.max_reset_btn)
-        box.addLayout(mc_row)
+        mc_foot.addWidget(self.max_reset_btn)
+        mc_box.addLayout(mc_foot)
+        grid.addWidget(mc_col)
 
-        self.max_status_lbl = QLabel("")
-        self.max_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
-        box.addWidget(self.max_status_lbl)
+        # ── Column 3: Memory Clock (VRAM) ──
+        grid.addWidget(self._build_mem_clock_card())
 
+        box.addWidget(grid)
         return card
 
     def _build_mem_clock_card(self) -> QFrame:
-        card = QFrame()
-        card.setProperty("class", "Card")
-        box = QVBoxLayout(card)
-        box.setSpacing(10)
-
-        title = QLabel("Memory Clock (VRAM Overclock)")
-        title.setProperty("class", "CardTitle")
-        box.addWidget(title)
-
-        note = QLabel(
-            "Independent memory frequency offset. Positive values overclock VRAM to increase "
-            "memory bandwidth (improving bandwidth-heavy games and workloads), negative values "
-            "underclock, and 0 is stock. The GPU driver automatically validates supported offsets."
+        self.mem_card = QFrame()
+        self.mem_card.setStyleSheet(
+            f"QFrame {{ background-color: {THEME.surface_container_low}; "
+            f"border: 1px solid {THEME.outline_variant}; border-radius: {THEME.radius_tile}px; }}"
         )
-        note.setStyleSheet("color: #8896ab; font-size: 11px; line-height: 1.4;")
-        note.setWordWrap(True)
-        box.addWidget(note)
+        box = QVBoxLayout(self.mem_card)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(6)
 
-        self.mem_support_lbl = QLabel("")
-        self.mem_support_lbl.setStyleSheet("color: #8896ab; font-size: 11px;")
-        self.mem_support_lbl.setWordWrap(True)
-        box.addWidget(self.mem_support_lbl)
+        title = QLabel("3. VRAM Clock")
+        title.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; "
+            f"border: none; background: transparent;"
+        )
+        box.addWidget(title)
+        mem_val_row = QHBoxLayout()
+        mem_val_row.setContentsMargins(0, 0, 0, 0)
+        self.mem_val = QLabel("+0 MHz")
+        self.mem_val.setProperty("class", "ValueReadoutPill")
+        self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mem_val_row.addWidget(self.mem_val)
+        mem_val_row.addStretch()
+        box.addLayout(mem_val_row)
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.mem_slider = _SliderNoWheel(Qt.Orientation.Horizontal)
+        self.mem_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
         self.mem_slider.setRange(dgpu_tune.MEM_OFFSET_MIN_MHZ, dgpu_tune.MEM_OFFSET_MAX_MHZ)
         self.mem_slider.setSingleStep(25)
         self.mem_slider.setPageStep(100)
         self.mem_slider.setValue(0)
         self.mem_slider.valueChanged.connect(self._on_mem_slider)
-        self.mem_val = QLabel("+0 MHz")
-        self.mem_val.setProperty("class", "ValueReadoutPill")
-        self.mem_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mem_val.setMinimumWidth(110)
+        box.addWidget(self.mem_slider)
+
+        self.mem_support_lbl = QLabel("")
+        self.mem_support_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; border: none; background: transparent;"
+        )
+        self.mem_support_lbl.setWordWrap(True)
+        self.mem_support_lbl.setVisible(False)
+        box.addWidget(self.mem_support_lbl)
+
+        foot = QHBoxLayout()
+        self.mem_status_lbl = QLabel("")
+        self.mem_status_lbl.setStyleSheet(
+            f"color: {THEME.success}; font-size: {THEME.text_overline}px; font-weight: 500; border: none; background: transparent;"
+        )
+        self.mem_status_lbl.setWordWrap(True)
+        foot.addWidget(self.mem_status_lbl, 1)
         self.mem_reset_btn = QPushButton("Reset")
+        self.mem_reset_btn.setProperty("class", "OutlinedButton")
+        self.mem_reset_btn.setIcon(icons.make_icon("undo", color=THEME.on_surface_variant, size=14))
+        self.mem_reset_btn.setIconSize(QSize(14, 14))
         self.mem_reset_btn.setToolTip("Return the memory clock offset to stock now")
         self.mem_reset_btn.clicked.connect(lambda: self._reset_mem())
-        row.addWidget(self.mem_slider, 1)
-        row.addWidget(self.mem_val)
-        row.addWidget(self.mem_reset_btn)
-        box.addLayout(row)
+        foot.addWidget(self.mem_reset_btn)
+        box.addLayout(foot)
+        return self.mem_card
 
-        self.mem_status_lbl = QLabel("")
-        self.mem_status_lbl.setStyleSheet("color: #48bb78; font-size: 12px; font-weight: 500;")
-        box.addWidget(self.mem_status_lbl)
-        return card
-
-    def _build_apply_bar(self) -> QHBoxLayout:
+    def _build_apply_bar(self) -> QFrame:
         """The single commit point for all three controls."""
-        row = QHBoxLayout()
+        self.apply_bar = QFrame()
+        self._update_apply_bar_style(dirty=False)
+        row = QHBoxLayout(self.apply_bar)
+        row.setContentsMargins(16, 12, 16, 12)
         row.setSpacing(12)
         self.apply_btn = QPushButton("Apply Tuning")
         self.apply_btn.setProperty("class", "PrimaryButton")
+        self.apply_btn.setIcon(
+            icons.make_icon("check", color=THEME.on_accent_cta, size=16)
+        )
+        self.apply_btn.setIconSize(QSize(16, 16))
         self.apply_btn.setMinimumHeight(38)
         self.apply_btn.setToolTip("Apply the core offset, boost clock cap and memory offset together")
         self.apply_btn.clicked.connect(self._apply_all)
         row.addWidget(self.apply_btn)
+
+        self.discard_btn = QPushButton("Discard")
+        self.discard_btn.setProperty("class", "OutlinedButton")
+        self.discard_btn.setMinimumHeight(38)
+        self.discard_btn.setToolTip("Revert staged slider changes back to saved settings")
+        self.discard_btn.setVisible(False)
+        self.discard_btn.clicked.connect(self._discard_staged)
+        row.addWidget(self.discard_btn)
+
         self.apply_hint_lbl = QLabel("")
-        self.apply_hint_lbl.setStyleSheet("color: #8896ab; font-size: 11px; font-weight: 500;")
+        self.apply_hint_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; "
+            f"font-weight: 500; background: transparent;"
+        )
         self.apply_hint_lbl.setWordWrap(True)
         row.addWidget(self.apply_hint_lbl, 1)
-        return row
+        return self.apply_bar
+
+    def _update_apply_bar_style(self, dirty: bool) -> None:
+        if not hasattr(self, "apply_bar"):
+            return
+        if dirty:
+            self.apply_bar.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.surface_container_high}; "
+                f"border-radius: 14px; border: 1px solid {self._accent_hex}; }}"
+            )
+        else:
+            self.apply_bar.setStyleSheet(
+                f"QFrame {{ background-color: {THEME.surface_container_high}; "
+                f"border-radius: 14px; border: 1px solid {THEME.outline_variant}; }}"
+            )
+
+    def _discard_staged(self) -> None:
+        if self._uv_cfg_key is not None:
+            self.uv_slider.blockSignals(True)
+            self.uv_slider.setValue(int(self._uv_cfg_key[1]))
+            self.uv_slider.blockSignals(False)
+            self.uv_val.setText(f"+{self.uv_slider.value()} MHz")
+        if self._max_cfg_key is not None:
+            saved_en, saved_val = self._max_cfg_key
+            target = int(saved_val) if saved_en else self._normal_max
+            self.max_slider.blockSignals(True)
+            self.max_slider.setValue(target)
+            self.max_slider.blockSignals(False)
+            self._update_max_readout(target)
+        if self._mem_offset_cfg_key is not None:
+            self.mem_slider.blockSignals(True)
+            self.mem_slider.setValue(int(self._mem_offset_cfg_key))
+            self.mem_slider.blockSignals(False)
+            self._update_mem_readout()
+        self._update_vf_curve()
+        self._sync_reset_buttons()
+        self._update_apply_hint(gated=self._is_gated)
 
     # ── slider handlers ──
     def _on_uv_slider(self, value: int) -> None:
         self.uv_val.setText(f"+{value} MHz")
+        self._update_vf_curve()
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _on_max_slider(self, value: int) -> None:
         self._update_max_readout(value)
+        self._update_vf_curve()
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _on_mem_slider(self, _value: int) -> None:
         self._update_mem_readout()
+        self._sync_reset_buttons()
         self._update_apply_hint()
 
     def _update_max_readout(self, value: int) -> None:
         if value >= self._observed_ceiling:
             self.max_val.setText("Stock (unlocked)")
         else:
-            self.max_val.setText(f"Cap {value} MHz (−{self._observed_ceiling - value})")
+            self.max_val.setText(f"Cap {value} MHz")
 
     def _update_mem_readout(self) -> None:
         offset = self._mem_offset()
@@ -417,19 +1162,130 @@ class GpuPage(QWidget):
         else:
             self.mem_val.setText("+0 MHz (stock)")
 
-    def _update_apply_hint(self) -> None:
-        """Tell the user when the sliders no longer match what is configured."""
-        staged = []
+    def _staged_controls(self) -> list[str]:
+        staged: list[str] = []
         if self._uv_cfg_key is not None and self.uv_slider.value() != self._uv_cfg_key[1]:
             staged.append("undervolt")
-        if self._max_cfg_key is not None and self.max_slider.value() != self._max_cfg_key[1]:
-            staged.append("max clock")
+        if self._max_cfg_key is not None:
+            saved_en, saved_val = self._max_cfg_key
+            cur_en = self.max_slider.value() < self._observed_ceiling
+            cur_val = self.max_slider.value() if cur_en else 0
+            if (cur_en, cur_val) != (bool(saved_en), int(saved_val) if saved_en else 0):
+                staged.append("max clock")
         if self._mem_offset_cfg_key is not None and self._mem_offset() != self._mem_offset_cfg_key:
             staged.append("memory offset")
+        return staged
+
+    def _sync_reset_buttons(self) -> None:
+        st = self._hw or {}
+        uv_dirty_or_active = (
+            (self.uv_slider.value() != 0)
+            or bool(self._uv_cfg_key and self._uv_cfg_key[1] != 0)
+            or (st.get("offset_mhz") not in (None, 0))
+        )
+        uv_can_reset = self._controls_enabled and not self._is_gated and uv_dirty_or_active
+        self.uv_reset_btn.setEnabled(uv_can_reset)
+        self.uv_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if uv_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.uv_reset_btn.setToolTip(
+            "Return the V/F offset to stock (0 MHz) now"
+            if uv_can_reset
+            else "Already at stock (0 MHz)"
+        )
+
+        max_dirty_or_active = (
+            (self.max_slider.value() < self._observed_ceiling)
+            or bool(self._max_cfg_key and self._max_cfg_key[0])
+            or bool(st.get("applied_max"))
+        )
+        max_can_reset = self._controls_enabled and not self._is_gated and max_dirty_or_active
+        self.max_reset_btn.setEnabled(max_can_reset)
+        self.max_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if max_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.max_reset_btn.setToolTip(
+            "Unlock the boost clock now"
+            if max_can_reset
+            else "Already unlocked (stock)"
+        )
+
+        mem_dirty_or_active = (
+            (self._mem_offset() != 0)
+            or bool(self._mem_offset_cfg_key)
+            or bool(st.get("applied_mem"))
+        )
+        mem_can_reset = self._mem_controls_enabled and not self._is_gated and mem_dirty_or_active
+        self.mem_reset_btn.setEnabled(mem_can_reset)
+        self.mem_reset_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if mem_can_reset else Qt.CursorShape.ArrowCursor
+        )
+        self.mem_reset_btn.setToolTip(
+            "Return the memory clock offset to stock now"
+            if mem_can_reset
+            else "Already at stock (0 MHz)"
+        )
+
+    def _update_apply_hint(self, gated: bool = False) -> None:
+        """Tell the user when the sliders no longer match what is configured."""
+        if gated:
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 500; background: transparent;"
+            )
+            self.apply_hint_lbl.setText(
+                "Tuning controls are read-only while dGPU is powered off (gated). "
+                "Switch to Optimus to edit or apply."
+            )
+            self.apply_btn.setEnabled(False)
+            self.apply_btn.setCursor(Qt.CursorShape.ArrowCursor)
+            self.apply_btn.setToolTip("Read-only while dGPU is powered off (gated)")
+            if hasattr(self, "discard_btn"):
+                self.discard_btn.setVisible(False)
+            self._update_apply_bar_style(dirty=False)
+            return
+
+        staged = self._staged_controls()
+        needs_manual_reapply = False
+        cfg = load_config()
+        st = self._hw or {}
+        if not bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True))) and self._gpu_awake:
+            uv_cfg = int(cfg.get("dgpu_undervolt_offset_mhz", 0) or 0) if cfg.get("dgpu_undervolt_enabled", False) else 0
+            max_cfg = int(cfg.get("dgpu_max_clock_mhz", 0) or 0) if cfg.get("dgpu_max_clock_enabled", False) else 0
+            mem_cfg = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0) if cfg.get("dgpu_mem_offset_enabled", False) else 0
+            if (
+                (uv_cfg and st.get("offset_mhz") != uv_cfg)
+                or (max_cfg and st.get("applied_max") != max_cfg)
+                or (mem_cfg and st.get("applied_mem") != mem_cfg)
+            ):
+                needs_manual_reapply = True
+
+        can_apply = bool(self._controls_enabled and not gated and (staged or needs_manual_reapply))
+        self.apply_btn.setEnabled(can_apply)
+        self.apply_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if can_apply else Qt.CursorShape.ArrowCursor
+        )
+        if hasattr(self, "discard_btn"):
+            self.discard_btn.setVisible(bool(staged))
+        self._update_apply_bar_style(dirty=bool(staged))
         if staged:
+            self.apply_btn.setToolTip("Apply staged tuning changes")
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 600; background: transparent;"
+            )
             self.apply_hint_lbl.setText(
                 "Unapplied: " + ", ".join(staged) + " — press Apply to send them to the GPU.")
         else:
+            self.apply_btn.setToolTip(
+                "Re-apply saved tuning for this session"
+                if needs_manual_reapply
+                else "Sliders already match saved settings"
+            )
+            self.apply_hint_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; "
+                f"font-weight: 500; background: transparent;"
+            )
             self.apply_hint_lbl.setText(
                 "Sliders match the saved settings. Tuning is applied while the dGPU "
                 "is awake and in use; it pauses when the dGPU is idle or asleep.")
@@ -506,9 +1362,11 @@ class GpuPage(QWidget):
             self._holders = []
             self._holders_checked_at = None
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
             return
         self.gpu_holders_lbl.setText(
             "Awake held by: " + ", ".join(self._holders) if self._holders else "")
+        self.gpu_holders_lbl.setVisible(bool(self._holders))
         now = time.monotonic()
         if self._holders_busy or (
             self._holders_checked_at is not None
@@ -545,75 +1403,493 @@ class GpuPage(QWidget):
             self._holders_checked_at = time.monotonic()
             self.gpu_holders_lbl.setText(
                 "Awake held by: " + ", ".join(holders) if holders else "")
+            self.gpu_holders_lbl.setVisible(bool(holders))
         else:
             self._holders = []
             self._holders_checked_at = None
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+
+    def _on_gate_mode_clicked(self, mode: str) -> None:
+        if self._gate_busy:
+            return
+        if mode == dgpu_gate.MODE_ECO and not dgpu_gate.eco_allowed_on_power():
+            self._sync_power_gate_card(recheck_supported=False)
+            return
+
+        current_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+        self._woke_from_auto = (
+            mode == dgpu_gate.MODE_OPTIMUS and current_mode == dgpu_gate.MODE_AUTO
+        )
+        if mode in ("eco", "auto") and not load_config().get("dgpu_gate_disclaimer_accepted", False):
+            reply = QMessageBox.warning(
+                self,
+                dgpu_gate.DISCLAIMER_TITLE,
+                dgpu_gate.DISCLAIMER_TEXT,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                for key, btn in self._gate_buttons.items():
+                    btn.blockSignals(True)
+                    btn.setChecked(key == current_mode)
+                    btn.blockSignals(False)
+                return
+            update_config(lambda c: {**c, "dgpu_gate_disclaimer_accepted": True})
+        gated_now = dgpu_gate.is_gated_off()
+        try:
+            policy = dgpu_gate.read_policy_state() or {}
+        except Exception:  # noqa: BLE001
+            policy = {}
+        if mode == current_mode:
+            if (mode == "optimus" and not gated_now) or (mode == "eco" and gated_now):
+                if mode in self._gate_buttons:
+                    self._gate_buttons[mode].setChecked(True)
+                return
+            if mode == "auto" and not policy.get("pending_off"):
+                try:
+                    ac_on = bool(get_battery_manager().is_ac_online())
+                except Exception:  # noqa: BLE001
+                    ac_on = True
+                if gated_now or ac_on:
+                    if mode in self._gate_buttons:
+                        self._gate_buttons[mode].setChecked(True)
+                    return
+        needs_confirm = False
+        try:
+            if not dgpu_gate.is_gated_off():
+                if mode == dgpu_gate.MODE_ECO:
+                    needs_confirm = True
+                elif mode == dgpu_gate.MODE_AUTO:
+                    try:
+                        ac_online = bool(get_battery_manager().is_ac_online())
+                    except Exception:  # noqa: BLE001
+                        ac_online = True
+                    needs_confirm = not ac_online
+        except Exception:  # noqa: BLE001
+            needs_confirm = False
+
+        if needs_confirm:
+            from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+            try:
+                prev_mode = str(load_config().get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+            except Exception:
+                prev_mode = dgpu_gate.MODE_OPTIMUS
+            dlg = DgpuGateConfirmDialog(
+                trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+                target_mode=mode,
+                prev_mode=prev_mode,
+                parent=self,
+            )
+            dlg.exec()
+            self._refresh(recheck_gate=False)
+            return
+
+        self._gate_busy = True
+        for btn in self._gate_buttons.values():
+            btn.setEnabled(False)
+        if hasattr(self, "gate_force_close_btn"):
+            self.gate_force_close_btn.setEnabled(False)
+        self.gate_status_lbl.setStyleSheet(
+            f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
+        self.gate_status_lbl.setText(f"Switching dGPU power mode to {mode}…")
+
+        def _worker() -> None:
+            closable = []
+            try:
+                res = dgpu_gate.set_mode(mode)
+                if not res.get("ok") and res.get("reason") == "gpu_active":
+                    closable = dgpu_gate.closable_gpu_holders()
+            except Exception as exc:  # noqa: BLE001
+                res = {"ok": False, "error": str(exc)}
+            self._gate_results.put((mode, res, closable, True))
+
+        threading.Thread(target=_worker, name="gigamate-gui-dgpu-gate", daemon=True).start()
+        self._gate_timer.start()
+
+    def _on_gate_force_close_clicked(self) -> None:
+        if self._gate_busy:
+            return
+        from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+        try:
+            cfg = load_config()
+            mode = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_ECO)).lower()
+            if mode not in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO):
+                mode = dgpu_gate.MODE_ECO
+        except Exception:
+            mode = dgpu_gate.MODE_ECO
+
+        dlg = DgpuGateConfirmDialog(
+            trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+            target_mode=mode,
+            prev_mode=mode,
+            parent=self,
+        )
+        dlg.exec()
+        self._refresh(recheck_gate=False)
+
+    def _collect_gate_result(self) -> None:
+        try:
+            item = self._gate_results.get_nowait()
+        except queue.Empty:
+            return
+        if len(item) == 4:
+            mode, res, closable, prompt_allowed = item
+        else:
+            mode, res = item
+            closable, prompt_allowed = [], False
+        self._gate_busy = False
+        self._controls_enabled: bool = False
+        self._mem_controls_enabled: bool = False
+        self._is_gated: bool = False
+        self._gate_timer.stop()
+        for btn in self._gate_buttons.values():
+            btn.setEnabled(True)
+        if hasattr(self, "gate_force_close_btn"):
+            self.gate_force_close_btn.setEnabled(True)
+        self._sync_power_gate_card(recheck_supported=False, override_result=(mode, res))
+        self._refresh(recheck_gate=False)
+
+        if (
+            prompt_allowed
+            and mode in (dgpu_gate.MODE_ECO, dgpu_gate.MODE_AUTO)
+            and not res.get("ok")
+            and res.get("reason") == "gpu_active"
+            and closable
+        ):
+            from ..dgpu_gate_dialog import DgpuGateConfirmDialog
+
+            dlg = DgpuGateConfirmDialog(
+                trigger="eco" if mode == dgpu_gate.MODE_ECO else "auto",
+                target_mode=mode,
+                prev_mode=mode,
+                parent=self,
+            )
+            dlg.exec()
+            self._refresh(recheck_gate=False)
+
+    def _sync_power_gate_card(
+        self,
+        recheck_supported: bool = False,
+        override_result: Optional[tuple] = None,
+    ) -> None:
+        if not hasattr(self, "power_gate_card"):
+            return
+        if recheck_supported or self._gate_supported is None:
+            try:
+                self._gate_supported = bool(dgpu_gate.is_supported())
+            except Exception:
+                self._gate_supported = False
+
+        self.power_gate_card.setVisible(bool(self._gate_supported))
+        if not self._gate_supported:
+            return
+
+        self.gate_exp_badge.setText("Auto-discovered ACPI")
+        self.gate_exp_badge.set_tone("warning")
+        self.gate_exp_badge.setToolTip(
+            "Hardware rail gating is firmware-dependent (verified on Gigabyte AERO X16 1VH). "
+            "Optimus is the safe default; reboot recovers if wake ever fails."
+        )
+        self.gate_exp_badge.setVisible(True)
+        try:
+            cfg = load_config()
+            mode = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower()
+            if mode not in dgpu_gate.VALID_MODES:
+                mode = dgpu_gate.MODE_OPTIMUS
+        except Exception:
+            mode = dgpu_gate.MODE_OPTIMUS
+
+        if not self._gate_busy:
+            for key, btn in self._gate_buttons.items():
+                btn.blockSignals(True)
+                btn.setChecked(key == mode)
+                btn.blockSignals(False)
+
+        if self._gate_busy:
+            return
+
+        gpu = get_gpu_state()
+        gated = bool(gpu.gated_off or gpu.status == "gated_off")
+        wedged = False
+        if not gated:
+            try:
+                wedged = dgpu_gate.is_gpu_wedged()
+            except Exception:  # noqa: BLE001
+                wedged = False
+        policy = {}
+        try:
+            policy = dgpu_gate.read_policy_state()
+        except Exception:
+            policy = {}
+
+        try:
+            ac_online = bool(get_battery_manager().is_ac_online())
+        except Exception:  # noqa: BLE001
+            ac_online = True
+        eco_btn = self._gate_buttons.get(dgpu_gate.MODE_ECO)
+        if isinstance(eco_btn, M3SegmentButton):
+            eco_btn.setText("dGPU Off · Battery Only (~0 W)")
+            eco_btn.setLocked(
+                ac_online,
+                tooltip=(
+                    "Battery only — use Automation → Auto-gate on battery"
+                    if ac_online
+                    else "Prompt & close GPU apps if needed, then cut power rail until switched back"
+                ),
+            )
+        elif eco_btn is not None:
+            eco_btn.setEnabled(not ac_online)
+            eco_btn.setCursor(
+                Qt.CursorShape.ForbiddenCursor if ac_online else Qt.CursorShape.PointingHandCursor
+            )
+            eco_btn.setText("dGPU Off · Battery Only (~0 W)")
+            eco_btn.setToolTip(
+                "Battery only — use Automation → Auto-gate on battery"
+                if ac_online
+                else "Prompt & close GPU apps if needed, then cut power rail until switched back"
+            )
+        pwr_txt = "AC" if ac_online else "Battery"
+        if gated:
+            self.gate_rail_pill.set_tone("gated")
+            self.gate_rail_pill.setText(f"Rail: OFF (~0 W) · {pwr_txt}")
+        else:
+            self.gate_rail_pill.set_tone("neutral")
+            self.gate_rail_pill.setText(f"Rail: ON · {pwr_txt}")
+
+        try:
+            cfg_res = dgpu_gate.get_gate_config()
+            eval_be = dgpu_gate.acpi_eval_backend()
+            if cfg_res is not None:
+                gc, _m = cfg_res
+                self.gate_info_lbl.setText(
+                    f"Target: {gc.path}.{gc.method} (via {eval_be})  ·  "
+                    "Optimus: runtime D3cold  ·  ECO: rail off  ·  Auto: prompt on unplug, restore on AC"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        if override_result is not None:
+            _m, res = override_result
+            if not res.get("ok"):
+                color = THEME.warning if res.get("reason") == "gpu_active" else THEME.error
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {color}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
+                self.gate_status_lbl.setText(str(res.get("error") or "Mode transition failed."))
+                if hasattr(self, "gate_force_close_btn"):
+                    self.gate_force_close_btn.setVisible(
+                        res.get("reason") == "gpu_active" and not gated and mode in ("eco", "auto")
+                    )
+                return
+
+        if hasattr(self, "gate_force_close_btn"):
+            show_force = (
+                not gated
+                and mode in ("eco", "auto")
+                and bool(policy.get("pending_off"))
+                and policy.get("last_reason") in ("gpu_active", "awaiting_confirmation")
+            )
+            self.gate_force_close_btn.setVisible(show_force)
+
+        if gated:
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_caption}px; font-weight: 600; background: transparent;"
+            )
+            self.gate_status_lbl.setText("Off (gated) — dGPU power rail cut (~0 W).")
+        elif wedged:
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_caption}px; font-weight: 700; background: transparent;"
+            )
+            self.gate_status_lbl.setText(
+                "GPU needs a reboot — NVIDIA driver reset required; dGPU power gating paused."
+            )
+        elif policy.get("pending_off") and mode in ("eco", "auto"):
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+            msg = policy.get("last_error") or "Waiting for dGPU to suspend before cutting power."
+            self.gate_status_lbl.setText(f"Pending ({mode}): {msg}")
+        elif mode == "optimus":
+            if self._woke_from_auto:
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
+                self.gate_status_lbl.setText(
+                    "dGPU woken on battery (Battery Auto-Gate turned off)"
+                )
+            else:
+                self.gate_status_lbl.setStyleSheet(
+                    f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+                )
+                self.gate_status_lbl.setText("Optimus active — kernel runtime PM manages D3cold.")
+        elif mode == "auto":
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+            self.gate_status_lbl.setText("Auto active — AC connected; will prompt to power off on battery.")
+        else:
+            self.gate_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+            self.gate_status_lbl.setText("ECO active.")
 
     # ── refresh ──
-    def _refresh(self) -> None:
+    def _refresh(self, recheck_gate: bool = False) -> None:
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        if hasattr(self, "auto_gate_link_pill"):
+            auto_on = str(cfg.get("dgpu_power_mode", dgpu_gate.MODE_OPTIMUS)).lower() == dgpu_gate.MODE_AUTO
+            self.auto_gate_link_pill.setText(f"Battery Auto-Gate: {'ON' if auto_on else 'OFF'} ↗")
+        if hasattr(self, "boot_apply_link_pill"):
+            boot_on = bool(cfg.get("dgpu_undervolt_auto", True))
+            self.boot_apply_link_pill.setText(f"Boot Apply: {'ON' if boot_on else 'OFF'} ↗")
+        self._update_vf_curve()
         gpu = get_gpu_state()
+        self._sync_power_gate_card(recheck_supported=recheck_gate)
+        gated = bool(gpu.gated_off or gpu.status == "gated_off")
+        wedged = False
+        if not gated:
+            try:
+                wedged = dgpu_gate.is_gpu_wedged()
+            except Exception:  # noqa: BLE001
+                wedged = False
         # Free sysfs read; every NVML decision on this page keys off it.
-        self._gpu_awake = bool(gpu.present and gpu.status == "active")
+        self._gpu_awake = bool(gpu.present and not gated and gpu.status == "active")
+        self._sync_usbc_budget_card(gpu=gpu)
         if not gpu.present:
             self.gpu_state_lbl.setText("Not present (iGPU only)")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_muted}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
+            self.gpu_meta_lbl.setVisible(False)
             self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+        elif gated:
+            self.gpu_state_lbl.setText("Off (gated)")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
+            vendor_name = (gpu.vendor or "NVIDIA").upper()
+            bdf = ""
+            try:
+                bdf = str(dgpu_gate.read_gate_state().get("bdf") or "")
+            except Exception:
+                bdf = ""
+            meta = f"{vendor_name} · {bdf} removed (~0 W)" if bdf else f"{vendor_name} · PCI removed (~0 W)"
+            self.gpu_meta_lbl.setText(meta)
+            self.gpu_meta_lbl.setVisible(True)
+            self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
+        elif wedged:
+            self.gpu_state_lbl.setText("Needs reboot (wedged)")
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
+            vendor_name = (gpu.vendor or "NVIDIA").upper()
+            bdf = str(self._hw.get("device") or "")
+            meta = (
+                f"{vendor_name} · {bdf} — driver reset required"
+                if bdf
+                else f"{vendor_name} — driver reset required"
+            )
+            self.gpu_meta_lbl.setText(meta)
+            self.gpu_meta_lbl.setVisible(True)
+            self.gpu_holders_lbl.setText("")
+            self.gpu_holders_lbl.setVisible(False)
         else:
             self.gpu_state_lbl.setText(gpu_status_text(gpu))
+            if gpu.status == "suspended":
+                color = THEME.success
+            elif gpu.status == "active":
+                color = THEME.warning
+            else:
+                color = THEME.on_surface
+            self.gpu_state_lbl.setStyleSheet(
+                f"color: {color}; font-size: {THEME.text_card_title}px; font-weight: 700; background: transparent;"
+            )
+            vendor_name = (gpu.vendor or "Discrete").upper()
+            bdf = str(self._hw.get("device") or "")
+            self.gpu_meta_lbl.setText(f"{vendor_name} · {bdf}" if bdf else f"{vendor_name} GPU")
+            self.gpu_meta_lbl.setVisible(True)
             self._refresh_holders(gpu)
 
         supported = False
-        # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
-        probed = self._probed
-        try:
-            probed = dgpu_tune.probe_if_awake() or probed
-        except Exception:
-            pass
-        if probed:
-            self._probed = probed
-
-        # When the probe cache is cold (first open while dGPU is asleep), fall
-        # back to the watcher's state file which already knows if tuning is
-        # supported. This lets the UI show and edit the configured values without
-        # touching NVML (which would wake the dGPU).
-        if not probed:
-            hw_supported = bool(self._hw.get("supported"))
-            hw_device = self._hw.get("device", "NVIDIA GPU")
-            supported = hw_supported and gpu.vendor == "nvidia"
-            probed_for_display = {"supported": hw_supported, "device": hw_device}
-        else:
-            supported = bool(probed.get("supported"))
-            probed_for_display = probed
-
-        if gpu.vendor != "nvidia":
-            self.uv_support_lbl.setText("Tuning is only available for NVIDIA dGPUs.")
-            supported = False
-        elif supported:
-            device_name = probed_for_display.get("device") or "NVIDIA GPU"
-            asleep_suffix = " — asleep (D3cold)" if not self._gpu_awake else ""
-            self.uv_support_lbl.setText(f"Supported on {device_name}.{asleep_suffix}")
-        else:
-            self.uv_support_lbl.setText(
-                "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
+        show_saved = False
+        if gated:
+            probed_for_display = self._probed or self._hw or {}
+            show_saved = (gpu.vendor in (None, "nvidia"))
+            self.uv_support_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_overline}px; font-weight: 500; background: transparent;"
             )
-
-        self.uv_slider.setEnabled(supported)
-        self.uv_reset_btn.setEnabled(supported)
-        self.max_slider.setEnabled(supported)
-        self.max_reset_btn.setEnabled(supported)
-
-        if supported:
-            self._sync_uv_controls()
-            self._sync_max_controls()
-            self._sync_mem_controls(probed_for_display)
+            self.uv_support_lbl.setText(
+                "dGPU is powered off (gated) — your saved tuning profile is shown below and will "
+                "automatically re-apply when the dGPU powers back on."
+            )
         else:
+            self.uv_support_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_overline}px; background: transparent;"
+            )
+            # Cached-or-nothing probe: never spawns a helper while the dGPU sleeps.
+            probed = self._probed
+            try:
+                probed = dgpu_tune.probe_if_awake() or probed
+            except Exception:
+                pass
+            if probed:
+                self._probed = probed
+
+            # When the probe cache is cold (first open while dGPU is asleep), fall
+            # back to the watcher's state file which already knows if tuning is
+            # supported. This lets the UI show and edit the configured values without
+            # touching NVML (which would wake the dGPU).
+            if not probed:
+                hw_supported = bool(self._hw.get("supported"))
+                hw_device = self._hw.get("device", "NVIDIA GPU")
+                supported = hw_supported and gpu.vendor == "nvidia"
+                probed_for_display = {"supported": hw_supported, "device": hw_device}
+            else:
+                supported = bool(probed.get("supported"))
+                probed_for_display = probed
+
+            if gpu.vendor != "nvidia":
+                self.uv_support_lbl.setText("Tuning is only available for NVIDIA dGPUs.")
+                supported = False
+            elif supported:
+                device_name = probed_for_display.get("device") or "NVIDIA GPU"
+                asleep_suffix = " · asleep (D3cold)" if not self._gpu_awake else ""
+                self.uv_support_lbl.setText(f"Supported on {device_name}{asleep_suffix}")
+            else:
+                self.uv_support_lbl.setText(
+                    "Not supported by this GPU/driver: " + str(probed_for_display.get("error") or "unavailable")
+                )
+            show_saved = supported
+
+        controls_enabled = supported and not gated and not wedged
+        self._is_gated = gated
+        self._controls_enabled = controls_enabled
+        self.uv_slider.setEnabled(controls_enabled)
+        self.max_slider.setEnabled(controls_enabled)
+
+        if show_saved:
+            self._sync_uv_controls(gated=gated)
+            self._sync_max_controls(gated=gated)
+            self._sync_mem_controls(probed_for_display, gated=gated)
+        else:
+            self._mem_controls_enabled = False
+            self.mem_slider.setEnabled(False)
             self.uv_status_lbl.setText("")
             self.max_status_lbl.setText("")
             self.mem_status_lbl.setText("")
-        self.apply_btn.setEnabled(supported)
-        self._update_apply_hint()
+        self._sync_reset_buttons()
+        self._update_apply_hint(gated=gated)
 
-    def _sync_uv_controls(self) -> None:
+    def _sync_uv_controls(self, gated: bool = False) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_undervolt_enabled", False))
         offset = int(cfg.get("dgpu_undervolt_offset_mhz", 0) or 0)
@@ -630,8 +1906,16 @@ class GpuPage(QWidget):
 
         st = self._hw or {}
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
-        if enabled and offset > 0 and hw_off == offset:
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
+        if gated:
+            if enabled and offset > 0:
+                if auto:
+                    state = f"Saved: +{offset} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: +{offset} MHz (auto-apply off)"
+            else:
+                state = "Off (stock)"
+        elif enabled and offset > 0 and hw_off == offset:
             state = f"Applied: +{offset} MHz"
         elif enabled and offset > 0 and not self._gpu_awake:
             # The hardware reads 0 while the dGPU is asleep (D3cold wiped it), so
@@ -650,19 +1934,19 @@ class GpuPage(QWidget):
             state = "Off (stock)"
         self.uv_status_lbl.setText(state)
 
-    def _sync_max_controls(self) -> None:
+    def _sync_max_controls(self, gated: bool = False) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_max_clock_enabled", False))
         wanted = int(cfg.get("dgpu_max_clock_mhz", 0) or 0)
         st = self._hw or {}
         applied_max = st.get("applied_max") or 0
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
 
         if enabled and wanted > 0:
-            # Widen the low end if a smaller cap was set out-of-band (e.g. CLI).
+            # Widen the low end or upper end if a saved cap sits outside the probe range.
             eff_min = max(300, min(self._normal_min, wanted))
-            eff_max = self._normal_max
+            eff_max = max(self._normal_max, wanted)
             pos = max(eff_min, min(eff_max, wanted))
         else:
             eff_min = self._normal_min
@@ -677,9 +1961,20 @@ class GpuPage(QWidget):
                 self.max_slider.setValue(pos)
                 self.max_slider.blockSignals(False)
                 self._max_cfg_key = (enabled, wanted)
-            self._update_max_readout(self.max_slider.value())
+            if enabled and wanted > 0 and self._observed_ceiling <= wanted:
+                self.max_val.setText(f"Cap {wanted} MHz")
+            else:
+                self._update_max_readout(self.max_slider.value())
 
-        if enabled and wanted > 0 and applied_max == wanted:
+        if gated:
+            if enabled and wanted > 0:
+                if auto:
+                    state = f"Saved: cap {wanted} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: cap {wanted} MHz (auto-apply off)"
+            else:
+                state = "Off (unlocked)"
+        elif enabled and wanted > 0 and applied_max == wanted:
             state = f"Applied: cap {wanted} MHz"
         elif enabled and wanted > 0 and not self._gpu_awake:
             state = f"Configured: cap {wanted} MHz — applies when the dGPU wakes"
@@ -696,14 +1991,18 @@ class GpuPage(QWidget):
             state = "Off (unlocked)"
         self.max_status_lbl.setText(state)
 
-    def _sync_mem_controls(self, probed_for_display: Optional[dict] = None) -> None:
+    def _sync_mem_controls(
+        self,
+        probed_for_display: Optional[dict] = None,
+        gated: bool = False,
+    ) -> None:
         cfg = load_config()
         enabled = bool(cfg.get("dgpu_mem_offset_enabled", False))
         wanted = int(cfg.get("dgpu_mem_offset_mhz", 0) or 0)
         st = self._hw or {}
         applied = st.get("applied_mem") or 0
         idle_cleared = bool(st.get("idle_cleared"))
-        auto = st.get("auto", True)
+        auto = bool(cfg.get("dgpu_undervolt_auto", st.get("auto", True)))
         # Read the helper version from the probe cache: asking for it must never
         # open NVML on a card the kernel has powered down. An unknown version is
         # not treated as stale — we simply have nothing to say.
@@ -718,12 +2017,16 @@ class GpuPage(QWidget):
         # back to the watcher state file which carries mem_offset_api from the
         # last time the GPU was awake.
         effective_probed = probed_for_display if probed_for_display is not None else self._probed
-        offset_api = bool(effective_probed.get("mem_offset_api"))
+        offset_api = (
+            bool(effective_probed.get("mem_offset_api"))
+            or bool(st.get("mem_offset_api"))
+        )
         # If neither probe nor state file have it yet, assume supported when the
-        # watcher state explicitly says the GPU is supported (avoids hiding the
-        # mem section on every cold open while asleep).
-        if not offset_api and bool(st.get("supported")) and not self._gpu_awake:
-            # Optimistic: we've seen this GPU supported before; re-check when awake.
+        # watcher state explicitly says the GPU is supported (or when gated off with saved config).
+        if not offset_api and (
+            (bool(st.get("supported")) and (gated or not self._gpu_awake))
+            or (gated and enabled and wanted != 0)
+        ):
             offset_api = True
 
         mem_supported = offset_api and not stale_helper
@@ -740,8 +2043,8 @@ class GpuPage(QWidget):
                 f"{dgpu_tune.MEM_OFFSET_MAX_MHZ:+d} MHz "
                 "(+ overclocks, − underclocks, 0 = stock).")
 
-        self.mem_slider.setEnabled(mem_supported)
-        self.mem_reset_btn.setEnabled(mem_supported)
+        self._mem_controls_enabled = bool(mem_supported and not gated)
+        self.mem_slider.setEnabled(self._mem_controls_enabled)
 
         # Mirror the configured offset into the slider.
         target = wanted if enabled else 0
@@ -753,10 +2056,18 @@ class GpuPage(QWidget):
                 self._update_mem_readout()
             self._mem_offset_cfg_key = target
 
-        if not mem_supported:
+        if not mem_supported and not (gated and enabled and wanted != 0):
             self.mem_status_lbl.setText("")
             return
-        if enabled and wanted != 0 and applied == wanted:
+        if gated:
+            if enabled and wanted != 0:
+                if auto:
+                    state = f"Saved: {wanted:+d} MHz — auto-reapplies when dGPU powers on"
+                else:
+                    state = f"Saved: {wanted:+d} MHz (auto-apply off)"
+            else:
+                state = "Off (stock)"
+        elif enabled and wanted != 0 and applied == wanted:
             state = f"Applied: {wanted:+d} MHz"
         elif enabled and wanted != 0 and not self._gpu_awake:
             state = f"Configured: {wanted:+d} MHz — applies when the dGPU wakes"
