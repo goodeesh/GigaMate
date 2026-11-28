@@ -97,15 +97,31 @@ cleanup_sudo_user_legacy() {
         fi
     done
 
-    # Legacy desktop entries and icons in ~/.local/share/
+    # Legacy desktop entries and icons in ~/.local/share/ (guarded against user customizations/symlinks)
     shopt -s nullglob
     for desktop in "$user_home"/.local/share/applications/gigamate*.desktop; do
-        rm -f "$desktop" || true
+        if [[ -f "$desktop" && ! -L "$desktop" ]]; then
+            local base=""
+            base="$(basename "$desktop")"
+            local pkg_desktop="/usr/share/applications/$base"
+            if { [[ -f "$pkg_desktop" ]] && cmp -s "$desktop" "$pkg_desktop" 2>/dev/null; } \
+               || { grep -q '^StartupWMClass=gigamate-center' "$desktop" 2>/dev/null \
+                    && grep -q '\.local/bin/gigamate' "$desktop" 2>/dev/null; }; then
+                rm -f "$desktop" || true
+            fi
+        fi
     done
     for icon in \
         "$user_home"/.local/share/icons/hicolor/scalable/apps/gigamate*.svg \
         "$user_home"/.local/share/icons/hicolor/scalable/apps/checkbox-checked.svg; do
-        rm -f "$icon" || true
+        if [[ -f "$icon" && ! -L "$icon" ]]; then
+            local base=""
+            base="$(basename "$icon")"
+            local pkg_icon="/usr/share/icons/hicolor/scalable/apps/$base"
+            if [[ -f "$pkg_icon" ]] && cmp -s "$icon" "$pkg_icon" 2>/dev/null; then
+                rm -f "$icon" || true
+            fi
+        fi
     done
     shopt -u nullglob
 
@@ -117,7 +133,7 @@ cleanup_sudo_user_legacy() {
             "XDG_RUNTIME_DIR='/run/user/$uid' DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/$uid/bus' systemctl --user daemon-reload" \
             >/dev/null 2>&1 || true
         su -s /bin/sh "$user" -c \
-            "XDG_RUNTIME_DIR='/run/user/$uid' DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/$uid/bus' systemctl --user try-restart gigamate.service" \
+            "XDG_RUNTIME_DIR='/run/user/$uid' DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/$uid/bus' systemctl --user try-restart gigamate.service gigamate-dgpu.service" \
             >/dev/null 2>&1 || true
     fi
 }

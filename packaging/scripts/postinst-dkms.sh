@@ -16,6 +16,18 @@ if [[ -z "$ver" ]]; then
 fi
 
 if command -v dkms >/dev/null 2>&1; then
+    # Clean up any orphaned older DKMS versions (e.g. RPM upgrade where %post runs before old %preun)
+    shopt -s nullglob
+    for dkms_entry in /var/lib/dkms/gigamate_acpi/*; do
+        [[ -d "$dkms_entry" && ! -L "$dkms_entry" ]] || continue
+        old_ver="$(basename "$dkms_entry")"
+        case "$old_ver" in
+            kernel-*|"$ver") continue ;;
+        esac
+        dkms remove "gigamate_acpi/${old_ver}" --all >/dev/null 2>&1 || true
+    done
+    shopt -u nullglob
+
     # Ignore already-added error
     dkms add -m gigamate_acpi -v "$ver" >/dev/null 2>&1 || true
 

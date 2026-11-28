@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -199,3 +200,105 @@ def test_shell_scripts_syntax_and_executable() -> None:
             check=False,
         )
         assert res.returncode == 0, f"bash -n failed for {script}: {res.stderr}"
+
+
+def _make_minimal_bin(tmp_path: Path) -> Path:
+    """Create a minimal PATH containing only basic shell/coreutils (no systemd/udev/dkms)."""
+    bin_dir = tmp_path / "minbin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("env", "bash", "sh", "find", "sed", "sort", "tail", "basename"):
+        src = shutil.which(tool)
+        if src:
+            dst = bin_dir / tool
+            if not dst.exists():
+                dst.symlink_to(src)
+    return bin_dir
+
+
+def _make_recording_stub(bin_dir: Path, name: str, log_file: Path) -> None:
+    stub = bin_dir / name
+    stub.write_text(
+        f"#!/bin/sh\necho \"{name} $*\" >> \"{log_file}\"\nexit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    ["postrm-app.sh", "postinst-dkms.sh", "prerm-dkms.sh"],
+)
+def test_lifecycle_scripts_container_safe_minimal_path(
+    tmp_path: Path, script_name: str
+) -> None:
+    min_bin = _make_minimal_bin(tmp_path)
+    res = subprocess.run(
+        [str(SCRIPTS_DIR / script_name)],
+        env={"PATH": str(min_bin)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"{script_name} failed under minimal PATH: {res.stderr}"
+
+
+@pytest.mark.parametrize(
+    ("action", "expect_disable"),
+    [
+        ("remove", True),
+        ("purge", True),
+        ("0", True),
+        ("upgrade", False),
+        ("1", False),
+    ],
+)
+def test_postrm_app_action_branching(
+    tmp_path: Path, action: str, expect_disable: bool
+) -> None:
+    min_bin = _make_minimal_bin(tmp_path)
+    log_file = tmp_path / "calls.log"
+    _make_recording_stub(min_bin, "systemctl", log_file)
+    _make_recording_stub(min_bin, "udevadm", log_file)
+
+    res = subprocess.run(
+        [str(SCRIPTS_DIR / "postrm-app.sh"), action],
+        env={"PATH": str(min_bin)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    calls = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+    disable_line = "systemctl --global disable gigamate.service gigamate-dgpu.service"
+    assert (disable_line in calls) is expect_disable
+    assert "udevadm control --reload-rules" in calls
+
+
+@pytest.mark.parametrize(
+    ("action", "expect_unload"),
+    [
+        ("remove", True),
+        ("upgrade", True),
+        ("deconfigure", True),
+        ("0", True),
+        ("1", False),
+    ],
+)
+def test_prerm_dkms_action_branching(
+    tmp_path: Path, action: str, expect_unload: bool
+) -> None:
+    min_bin = _make_minimal_bin(tmp_path)
+    log_file = tmp_path / "calls.log"
+    _make_recording_stub(min_bin, "modprobe", log_file)
+
+    res = subprocess.run(
+        [str(SCRIPTS_DIR / "prerm-dkms.sh"), action],
+        env={"PATH": str(min_bin)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    calls = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+    assert ("modprobe -r gigamate_acpi" in calls) is expect_unload
+
