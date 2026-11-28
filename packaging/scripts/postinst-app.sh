@@ -69,10 +69,12 @@ cleanup_sudo_user_legacy() {
     local bin_dir="$user_home/.local/bin"
     for cmd in gigamate gigamate-tray gigamate-center gigamate-dgpu-watch; do
         local script="$bin_dir/$cmd"
-        if [[ -f "$script" && ! -L "$script" ]]; then
-            if head -n 1 "$script" 2>/dev/null | grep -qE '^#!.*python' \
-               && grep -qE 'from[[:space:]]+gigamate\.|import[[:space:]]+gigamate|load_entry_point\(.*gigamate|gigamate\.(cli|tray|ui|dgpu_tune)' "$script" 2>/dev/null; then
-                rm -f "$script" || true
+        if [[ -f "$script" ]]; then
+            if [[ ! -L "$script" ]] || [[ "$(readlink -f "$script" 2>/dev/null || true)" == */pipx/venvs/gigamate/bin/* ]]; then
+                if head -n 1 "$script" 2>/dev/null | grep -qE '^#!.*python' \
+                   && grep -qE 'from[[:space:]]+gigamate\.|import[[:space:]]+gigamate|load_entry_point\(.*gigamate|gigamate\.(cli|tray|ui|dgpu_tune)' "$script" 2>/dev/null; then
+                    rm -f "$script" || true
+                fi
             fi
         fi
     done

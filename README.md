@@ -143,7 +143,7 @@ sudo zypper refresh && sudo zypper install gigamate
 ```
 
 > [!TIP]
-> **Migrating from `install.sh`?** Just install the native `gigamate` package above. The package post-install hook automatically cleans up legacy `install.sh` files (`~/.local/bin/gigamate*`, user systemd units, udev/polkit rules, and old DKMS entries) while **preserving `~/.config/gigamate/`** intact.
+> **Migrating from `install.sh`?** Just install the native `gigamate` package above. The package post-install hook automatically cleans up legacy `install.sh` files (`~/.local/bin/gigamate*` including `pipx` symlinks, user systemd units, udev/polkit rules, and old DKMS entries) while **preserving `~/.config/gigamate/`** intact. On Arch/CachyOS, pass `--overwrite '/usr/lib/gigamate/*,/usr/share/polkit-1/actions/org.gigamate.*,/usr/src/gigamate_acpi-*/*'` to `pacman` on the first migration so it cleanly takes ownership of the files previously placed by `install.sh`.
 
 ### Fallback / Other Distros (`install.sh`)
 
