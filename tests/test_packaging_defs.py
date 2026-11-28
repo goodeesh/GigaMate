@@ -569,3 +569,12 @@ def test_release_workflow_structure_and_gating() -> None:
     # Preserve install.sh fallback checksum assets
     assert "install.sh.sha256" in raw
     assert "gigamate.tar.gz.sha256" in raw
+
+    # Regression checks: non-interactive GPG import in release.yml and batch gpg.conf + rpmsign in publish-repos.sh
+    assert "--pinentry-mode loopback" in raw
+    assert "--passphrase-file" in raw
+    assert "--import" in raw
+
+    publish_script = PUBLISH_REPOS.read_text(encoding="utf-8")
+    assert 'printf "batch\\npinentry-mode loopback\\n"' in publish_script
+    assert "Error: rpmsign is required" in publish_script

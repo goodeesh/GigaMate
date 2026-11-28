@@ -333,7 +333,19 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          PASS_FILE=""
+          cleanup() {
+            [[ -n "$PASS_FILE" ]] && rm -f "$PASS_FILE" || true
+          }
+          trap cleanup EXIT
+          if [[ -n "$GPG_PASSPHRASE" ]]; then
+            PASS_FILE="$(mktemp)"
+            chmod 0600 "$PASS_FILE"
+            printf '%s' "$GPG_PASSPHRASE" > "$PASS_FILE"
+            printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --yes --pinentry-mode loopback --passphrase-file "$PASS_FILE" --import
+          else
+            printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --yes --pinentry-mode loopback --import
+          fi
           GPG_FPR="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')"
           if [[ -z "$GPG_FPR" ]]; then
             echo "Error: failed to determine imported GPG key fingerprint" >&2

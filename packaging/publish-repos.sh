@@ -220,6 +220,10 @@ if ! command -v createrepo_c >/dev/null 2>&1; then
     echo "Error: createrepo_c is required to build RPM repositories" >&2
     exit 1
 fi
+if ! command -v rpmsign >/dev/null 2>&1; then
+    echo "Error: rpmsign is required to sign RPM packages" >&2
+    exit 1
+fi
 
 for distro in fedora opensuse; do
     echo "==> Building RPM repository (${distro})..."
@@ -235,17 +239,15 @@ for distro in fedora opensuse; do
     fi
     cp -f "${rpm_files[@]}" "$RPM_DIR/"
 
-    if command -v rpmsign >/dev/null 2>&1; then
-        if [[ -n "$PASS_FILE" ]]; then
-            gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-file ${PASS_FILE} --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
-        else
-            gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
-        fi
-        rpmsign \
-            -D "_gpg_name ${GPG_KEY}" \
-            -D "__gpg_sign_cmd ${gpg_sign_macro}" \
-            --addsign "$RPM_DIR"/*.rpm
+    if [[ -n "$PASS_FILE" ]]; then
+        gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-file ${PASS_FILE} --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
+    else
+        gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
     fi
+    rpmsign \
+        -D "_gpg_name ${GPG_KEY}" \
+        -D "__gpg_sign_cmd ${gpg_sign_macro}" \
+        --addsign "$RPM_DIR"/*.rpm
 
     createrepo_c "$RPM_DIR"
     gpg_sign --detach-sign --armor \
@@ -273,8 +275,36 @@ for pkg in "$ARCH_DIR"/*.pkg.tar.zst; do
     gpg_sign --detach-sign --output "${pkg}.sig" "$pkg"
 done
 
+ARCH_GPG_DIR="${TMP_DIR}/arch-gpg"
+(
+    umask 077
+    mkdir -p "$ARCH_GPG_DIR"
+    if [[ -n "$PASS_FILE" ]]; then
+        gpg --batch --yes --pinentry-mode loopback --passphrase-file "$PASS_FILE" \
+            --armor --export-secret-keys "$GPG_KEY" > "${ARCH_GPG_DIR}/sec.asc"
+        cp "$PASS_FILE" "${ARCH_GPG_DIR}/pass"
+    else
+        gpg --batch --yes --pinentry-mode loopback \
+            --armor --export-secret-keys "$GPG_KEY" > "${ARCH_GPG_DIR}/sec.asc"
+    fi
+)
+
 if command -v repo-add >/dev/null 2>&1; then
-    repo-add --sign --key "$GPG_KEY" "${ARCH_DIR}/gigamate.db.tar.gz" "${ARCH_DIR}"/*.pkg.tar.zst
+    HOST_GNUPGHOME="${TMP_DIR}/host-gnupg"
+    (
+        umask 077
+        mkdir -p "$HOST_GNUPGHOME"
+        export GNUPGHOME="$HOST_GNUPGHOME"
+        printf "allow-loopback-pinentry\n" > "${GNUPGHOME}/gpg-agent.conf"
+        printf "batch\npinentry-mode loopback\n" > "${GNUPGHOME}/gpg.conf"
+        if [[ -f "${ARCH_GPG_DIR}/pass" ]]; then
+            gpg --batch --yes --pinentry-mode loopback --passphrase-file "${ARCH_GPG_DIR}/pass" --import "${ARCH_GPG_DIR}/sec.asc"
+            printf "passphrase-file %s\n" "${ARCH_GPG_DIR}/pass" >> "${GNUPGHOME}/gpg.conf"
+        else
+            gpg --batch --yes --pinentry-mode loopback --import "${ARCH_GPG_DIR}/sec.asc"
+        fi
+        repo-add --sign --key "$GPG_KEY" "${ARCH_DIR}/gigamate.db.tar.gz" "${ARCH_DIR}"/*.pkg.tar.zst
+    )
 else
     CONTAINER_RT=""
     if command -v docker >/dev/null 2>&1; then
@@ -286,20 +316,6 @@ else
         exit 1
     fi
 
-    ARCH_GPG_DIR="${TMP_DIR}/arch-gpg"
-    (
-        umask 077
-        mkdir -p "$ARCH_GPG_DIR"
-        if [[ -n "$PASS_FILE" ]]; then
-            gpg --batch --yes --pinentry-mode loopback --passphrase-file "$PASS_FILE" \
-                --armor --export-secret-keys "$GPG_KEY" > "${ARCH_GPG_DIR}/sec.asc"
-            cp "$PASS_FILE" "${ARCH_GPG_DIR}/pass"
-        else
-            gpg --batch --yes --pinentry-mode loopback \
-                --armor --export-secret-keys "$GPG_KEY" > "${ARCH_GPG_DIR}/sec.asc"
-        fi
-    )
-
     "$CONTAINER_RT" run --rm \
         -v "${ARCH_DIR}:/arch" \
         -v "${ARCH_GPG_DIR}:/gpg:ro" \
@@ -309,7 +325,7 @@ else
             export GNUPGHOME="/tmp/gnupg"
             mkdir -p -m 700 "$GNUPGHOME"
             printf "allow-loopback-pinentry\n" > "$GNUPGHOME/gpg-agent.conf"
-            printf "pinentry-mode loopback\n" > "$GNUPGHOME/gpg.conf"
+            printf "batch\npinentry-mode loopback\n" > "$GNUPGHOME/gpg.conf"
             if [[ -f /gpg/pass ]]; then
                 gpg --batch --yes --pinentry-mode loopback --passphrase-file /gpg/pass --import /gpg/sec.asc
                 printf "passphrase-file /gpg/pass\n" >> "$GNUPGHOME/gpg.conf"
