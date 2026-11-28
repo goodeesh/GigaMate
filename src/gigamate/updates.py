@@ -334,6 +334,107 @@ def admin_status(run: Callable = subprocess.run) -> str:
 
 
 UPDATE_LOG_FILE = CONFIG_DIR / "update.log"
+INSTALL_METHOD_FILE = Path("/usr/lib/gigamate/install-method")
+_PACKAGE_INSTALL_METHODS = frozenset({"apt", "dnf", "zypper", "pacman", "aur"})
+
+
+def detect_install_method(
+        marker_path: Path = INSTALL_METHOD_FILE,
+        which: Callable[[str], Optional[str]] = shutil.which,
+        run: Callable = subprocess.run) -> str:
+    """Detect how GigaMate was installed.
+
+    Returns one of ``"apt"``, ``"dnf"``, ``"zypper"``, ``"pacman"``, ``"aur"``,
+    or ``"script"``. Checks ``marker_path`` first, then falls back to probing
+    the system package manager owning the ``gigamate`` binary. Never raises.
+    """
+    try:
+        if marker_path.exists():
+            val = marker_path.read_text(encoding="utf-8", errors="replace").strip().lower()
+            if val in _PACKAGE_INSTALL_METHODS:
+                return val
+    except Exception:
+        pass
+
+    try:
+        exe = which("gigamate")
+    except Exception:
+        exe = None
+    if not exe:
+        return "script"
+
+    def _owns(cmd: list) -> bool:
+        try:
+            proc = run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            return getattr(proc, "returncode", 1) == 0
+        except Exception:
+            return False
+
+    try:
+        if which("pacman") and _owns(["pacman", "-Qo", exe]):
+            return "pacman"
+        if which("dpkg") and _owns(["dpkg", "-S", exe]):
+            return "apt"
+        if which("rpm") and _owns(["rpm", "-qf", exe]):
+            if which("zypper") and not which("dnf"):
+                return "zypper"
+            return "dnf"
+    except Exception:
+        pass
+
+    return "script"
+
+
+def is_package_managed(method: Optional[str] = None) -> bool:
+    """True when GigaMate is managed by a native Linux package manager."""
+    if method is None:
+        method = detect_install_method()
+    return method in _PACKAGE_INSTALL_METHODS
+
+
+def package_upgrade_command(
+        method: str,
+        which: Callable[[str], Optional[str]] = shutil.which) -> Optional[str]:
+    """Return the package-manager upgrade command for ``method``, or None."""
+    if method == "apt":
+        return "sudo apt update && sudo apt upgrade gigamate gigamate-dkms"
+    if method == "dnf":
+        return "sudo dnf upgrade gigamate gigamate-dkms"
+    if method == "zypper":
+        return "sudo zypper update gigamate gigamate-dkms"
+    if method == "pacman":
+        return "sudo pacman -Syu gigamate gigamate-dkms"
+    if method == "aur":
+        if which("paru"):
+            return "paru -Syu gigamate gigamate-dkms"
+        if which("yay"):
+            return "yay -Syu gigamate gigamate-dkms"
+        return "paru -Syu gigamate gigamate-dkms"
+    return None
+
+
+def build_package_terminal_update_command(
+        method: str,
+        desktop: str = "",
+        which: Callable[[str], Optional[str]] = shutil.which,
+        detect: Optional[Callable[..., Optional[Tuple[str, str]]]] = None,
+        env: Optional[Mapping[str, str]] = None) -> Optional[list]:
+    """Argv opening the user's terminal running the package-manager upgrade."""
+    cmd = package_upgrade_command(method, which=which)
+    if not cmd:
+        return None
+    return _open_terminal_with(
+        f"{cmd}; exec bash",
+        desktop=desktop,
+        which=which,
+        detect=detect,
+        env=env,
+    )
 
 
 def install_script_url(tag: Optional[str] = None) -> str:

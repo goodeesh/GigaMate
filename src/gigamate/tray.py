@@ -305,6 +305,51 @@ class GigaMateTrayApp(QObject):
         self._populate_menu()
 
     def _on_update_clicked(self) -> None:
+        method = update_checker.detect_install_method()
+        if update_checker.is_package_managed(method):
+            cmd = update_checker.package_upgrade_command(method) or ""
+            current = update_checker.get_installed_version()
+            latest = self.daemon.latest_version or "latest"
+            resp = QMessageBox.question(
+                None,
+                f"Update available ({current} → {latest})",
+                f"GigaMate is installed and managed by {method}.\n\n"
+                f"Upgrade command:\n  {cmd}\n\n"
+                "Open a terminal to run this upgrade now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                argv = update_checker.build_package_terminal_update_command(
+                    method,
+                    desktop=os.environ.get("XDG_CURRENT_DESKTOP", ""),
+                )
+                if argv is None:
+                    QMessageBox.warning(
+                        None,
+                        "Could not open terminal",
+                        "Could not locate a terminal emulator.\n\n"
+                        f"Run this command in a terminal to update:\n  {cmd}",
+                    )
+                    return
+                try:
+                    subprocess.Popen(argv, start_new_session=True)
+                except Exception:
+                    QMessageBox.warning(
+                        None,
+                        "Could not open terminal",
+                        "Failed to launch the terminal emulator.\n\n"
+                        f"Run this command in a terminal to update:\n  {cmd}",
+                    )
+                    return
+                QMessageBox.information(
+                    None,
+                    "Updating in terminal",
+                    f"Opened a terminal running:\n  {cmd}\n\n"
+                    "Enter your password there if asked.",
+                )
+            return
+
         try:
             admin = update_checker.admin_status()
         except Exception:

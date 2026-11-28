@@ -1613,6 +1613,13 @@ def cmd_update(args) -> None:
         print(f"GigaMate {current} is up to date (latest {latest}).")
         return
     print(f"Update available: {current} → {latest}")
+    method = update_checker.detect_install_method()
+    if update_checker.is_package_managed(method):
+        print(
+            f"GigaMate is installed via {method}. Update using your package manager:\n"
+            f"  {update_checker.package_upgrade_command(method)}"
+        )
+        return
     if not assume_yes:
         ans = input("Update now? [Y/n] ").strip().lower()
         if ans not in ("", "y", "yes"):

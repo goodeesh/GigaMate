@@ -498,3 +498,294 @@ def test_update_state_merge_preserves_dismissal(tmp_path):
     assert merged["dismissed_version"] == "v1.0.0"
     assert merged["latest_known"] == "v2.0.0"
     assert updates.load_state(state_file)["dismissed_version"] == "v1.0.0"
+
+
+class TestDetectInstallMethod:
+    def _proc(self, rc: int):
+        class P:
+            returncode = rc
+        return P()
+
+    def test_install_method_file_constant(self):
+        from pathlib import Path
+        assert updates.INSTALL_METHOD_FILE == Path("/usr/lib/gigamate/install-method")
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("apt", "apt"),
+        ("  APT\n", "apt"),
+        ("dnf\n", "dnf"),
+        ("zypper", "zypper"),
+        ("pacman", "pacman"),
+        ("AUR\n", "aur"),
+    ])
+    def test_marker_file_supported_methods(self, tmp_path, raw, expected):
+        marker = tmp_path / "install-method"
+        marker.write_text(raw, encoding="utf-8")
+        assert updates.detect_install_method(
+            marker_path=marker,
+            which=lambda _: None,
+        ) == expected
+
+    def test_marker_file_unknown_falls_back_to_script(self, tmp_path):
+        marker = tmp_path / "install-method"
+        marker.write_text("script\n", encoding="utf-8")
+        assert updates.detect_install_method(
+            marker_path=marker,
+            which=lambda _: None,
+        ) == "script"
+
+    def test_fallback_pacman_probe(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {"gigamate": "/usr/bin/gigamate", "pacman": "/usr/bin/pacman"}
+        seen = []
+
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            return self._proc(0 if argv[:2] == ["pacman", "-Qo"] else 1)
+
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=fake_run,
+        )
+        assert got == "pacman"
+        assert ["pacman", "-Qo", "/usr/bin/gigamate"] in seen
+
+    def test_fallback_dpkg_probe(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {"gigamate": "/usr/bin/gigamate", "dpkg": "/usr/bin/dpkg"}
+
+        def fake_run(argv, **kwargs):
+            return self._proc(0 if argv[:2] == ["dpkg", "-S"] else 1)
+
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=fake_run,
+        )
+        assert got == "apt"
+
+    def test_fallback_rpm_dnf_probe(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {
+            "gigamate": "/usr/bin/gigamate",
+            "rpm": "/usr/bin/rpm",
+            "dnf": "/usr/bin/dnf",
+        }
+
+        def fake_run(argv, **kwargs):
+            return self._proc(0 if argv[:2] == ["rpm", "-qf"] else 1)
+
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=fake_run,
+        )
+        assert got == "dnf"
+
+    def test_fallback_rpm_zypper_probe(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {
+            "gigamate": "/usr/bin/gigamate",
+            "rpm": "/usr/bin/rpm",
+            "zypper": "/usr/bin/zypper",
+        }
+
+        def fake_run(argv, **kwargs):
+            return self._proc(0 if argv[:2] == ["rpm", "-qf"] else 1)
+
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=fake_run,
+        )
+        assert got == "zypper"
+
+    def test_fallback_rpm_both_zypper_and_dnf_returns_dnf(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {
+            "gigamate": "/usr/bin/gigamate",
+            "rpm": "/usr/bin/rpm",
+            "zypper": "/usr/bin/zypper",
+            "dnf": "/usr/bin/dnf",
+        }
+
+        def fake_run(argv, **kwargs):
+            return self._proc(0 if argv[:2] == ["rpm", "-qf"] else 1)
+
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=fake_run,
+        )
+        assert got == "dnf"
+
+    def test_fallback_no_gigamate_binary_returns_script(self, tmp_path):
+        marker = tmp_path / "missing"
+        assert updates.detect_install_method(
+            marker_path=marker,
+            which=lambda _: None,
+        ) == "script"
+
+    def test_fallback_probes_fail_returns_script(self, tmp_path):
+        marker = tmp_path / "missing"
+        bins = {
+            "gigamate": "/usr/local/bin/gigamate",
+            "pacman": "/usr/bin/pacman",
+            "dpkg": "/usr/bin/dpkg",
+            "rpm": "/usr/bin/rpm",
+        }
+        got = updates.detect_install_method(
+            marker_path=marker,
+            which=bins.get,
+            run=lambda *a, **k: self._proc(1),
+        )
+        assert got == "script"
+
+    def test_never_raises_on_errors(self, tmp_path):
+        marker = tmp_path / "missing"
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+
+        assert updates.detect_install_method(
+            marker_path=marker,
+            which=boom,
+            run=boom,
+        ) == "script"
+
+
+class TestIsPackageManaged:
+    @pytest.mark.parametrize("method,expected", [
+        ("apt", True),
+        ("dnf", True),
+        ("zypper", True),
+        ("pacman", True),
+        ("aur", True),
+        ("script", False),
+        ("", False),
+        ("unknown", False),
+    ])
+    def test_explicit_methods(self, method, expected):
+        assert updates.is_package_managed(method) is expected
+
+    def test_defaults_to_detect_install_method(self, monkeypatch):
+        monkeypatch.setattr(updates, "detect_install_method", lambda: "apt")
+        assert updates.is_package_managed() is True
+        monkeypatch.setattr(updates, "detect_install_method", lambda: "script")
+        assert updates.is_package_managed() is False
+
+
+class TestPackageUpgradeCommand:
+    def test_apt(self):
+        assert updates.package_upgrade_command("apt") == (
+            "sudo apt update && sudo apt upgrade gigamate gigamate-dkms"
+        )
+
+    def test_dnf(self):
+        assert updates.package_upgrade_command("dnf") == (
+            "sudo dnf upgrade gigamate gigamate-dkms"
+        )
+
+    def test_zypper(self):
+        assert updates.package_upgrade_command("zypper") == (
+            "sudo zypper update gigamate gigamate-dkms"
+        )
+
+    def test_pacman(self):
+        assert updates.package_upgrade_command("pacman") == (
+            "sudo pacman -Syu gigamate gigamate-dkms"
+        )
+
+    def test_aur_prefers_paru(self):
+        bins = {"paru": "/usr/bin/paru", "yay": "/usr/bin/yay"}
+        assert updates.package_upgrade_command("aur", which=bins.get) == (
+            "paru -Syu gigamate gigamate-dkms"
+        )
+
+    def test_aur_falls_back_to_yay(self):
+        bins = {"yay": "/usr/bin/yay"}
+        assert updates.package_upgrade_command("aur", which=bins.get) == (
+            "yay -Syu gigamate gigamate-dkms"
+        )
+
+    def test_aur_defaults_to_paru_when_neither_found(self):
+        assert updates.package_upgrade_command("aur", which=lambda _: None) == (
+            "paru -Syu gigamate gigamate-dkms"
+        )
+
+    def test_script_and_unknown_return_none(self):
+        assert updates.package_upgrade_command("script") is None
+        assert updates.package_upgrade_command("unknown") is None
+        assert updates.package_upgrade_command("") is None
+
+
+class TestBuildPackageTerminalUpdateCommand:
+    def test_builds_terminal_argv(self):
+        argv = updates.build_package_terminal_update_command(
+            "apt",
+            which=lambda n: "/usr/bin/kitty" if n == "kitty" else None,
+            detect=lambda: ("/usr/bin/kitty", "-e"),
+        )
+        assert argv is not None
+        assert argv[0] == "/usr/bin/kitty"
+        assert argv[-1] == (
+            "sudo apt update && sudo apt upgrade gigamate gigamate-dkms; exec bash"
+        )
+
+    def test_returns_none_for_script(self):
+        assert updates.build_package_terminal_update_command(
+            "script",
+            which=lambda n: "/usr/bin/kitty",
+            detect=lambda: ("/usr/bin/kitty", "-e"),
+        ) is None
+
+    def test_returns_none_when_no_terminal(self):
+        assert updates.build_package_terminal_update_command(
+            "dnf",
+            which=lambda _: None,
+            detect=lambda: None,
+        ) is None
+
+    def test_aur_passes_which_for_yay_fallback(self):
+        bins = {"yay": "/usr/bin/yay", "xterm": "/usr/bin/xterm"}
+        argv = updates.build_package_terminal_update_command(
+            "aur",
+            which=bins.get,
+            detect=lambda: None,
+        )
+        assert argv is not None
+        assert argv[0] == "/usr/bin/xterm"
+        assert "yay -Syu gigamate gigamate-dkms; exec bash" == argv[-1]
+
+
+class TestCliPackageManagedUpdate:
+    def test_cmd_update_package_managed_prints_command_and_exits_cleanly(
+        self, monkeypatch, capsys
+    ):
+        from types import SimpleNamespace
+        from gigamate import cli
+
+        monkeypatch.setattr(
+            updates,
+            "check_for_updates",
+            lambda force=True: {
+                "current": "5.0.0",
+                "latest": "v5.1.0",
+                "update_available": True,
+                "checked_now": True,
+                "reachable": True,
+            },
+        )
+        monkeypatch.setattr(updates, "detect_install_method", lambda: "apt")
+
+        def boom(*a, **k):
+            raise AssertionError("install.sh path must not be called")
+
+        monkeypatch.setattr(updates, "admin_status", boom)
+        monkeypatch.setattr(updates, "build_update_command", boom)
+
+        cli.cmd_update(SimpleNamespace(check=False, yes=True))
+        out = capsys.readouterr().out
+        assert "GigaMate is installed via apt. Update using your package manager:" in out
+        assert "sudo apt update && sudo apt upgrade gigamate gigamate-dkms" in out
