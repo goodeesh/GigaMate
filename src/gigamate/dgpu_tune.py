@@ -961,12 +961,16 @@ def has_discrete_gpu(
                 cls.startswith("0x0300") or cls.startswith("0x0302")
             ):
                 return True
-            if (
-                vendor == "0x1002"
-                and cls.startswith("0x0302")
-                and not (dev / "uma").exists()
-            ):
-                return True
+            if vendor == "0x1002" and not (dev / "uma").exists():
+                if cls.startswith("0x0302"):
+                    return True
+                if cls.startswith("0x0300"):
+                    try:
+                        boot_vga = (dev / "boot_vga").read_text().strip()
+                    except OSError:
+                        boot_vga = ""
+                    if boot_vga == "0":
+                        return True
         except OSError:
             continue
     return False

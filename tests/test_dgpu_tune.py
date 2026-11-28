@@ -910,6 +910,19 @@ def test_has_discrete_gpu_detection(tmp_path):
     (amd_d / "uma").write_text("1\n")
     assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_dgpu, gate_state_path=gate) is False
 
+    # Discrete AMD VGA controller (0x1002 + 0x0300, no uma, boot_vga == 0) -> True
+    pci_amd_vga = tmp_path / "pci_amd_vga"
+    amd_vga = pci_amd_vga / "0000:03:00.0"
+    amd_vga.mkdir(parents=True)
+    (amd_vga / "vendor").write_text("0x1002\n")
+    (amd_vga / "class").write_text("0x030000\n")
+    (amd_vga / "boot_vga").write_text("0\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_vga, gate_state_path=gate) is True
+
+    # Primary/integrated AMD VGA controller (0x1002 + 0x0300, boot_vga == 1) -> False
+    (amd_vga / "boot_vga").write_text("1\n")
+    assert dgpu_tune.has_discrete_gpu(pci_root=pci_amd_vga, gate_state_path=gate) is False
+
     # Gated-off dGPU (no PCI device visible, gate state file exists) -> True
     gate.write_text('{"gated": true}\n')
     assert dgpu_tune.has_discrete_gpu(pci_root=pci_intel, gate_state_path=gate) is True
