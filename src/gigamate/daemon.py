@@ -37,6 +37,7 @@ from .config import (
     enabled_acpi_profiles,
     is_rgb_enabled,
     load as load_config,
+    next_backlight_pct,
     pct_to_legacy_brightness,
     update_config,
 )
@@ -51,7 +52,7 @@ from .idle import (
     clamp_timeout,
     fallback_idle_ms,
 )
-from .osd import show_profile_osd
+from .osd import show_backlight_osd, show_profile_osd
 from .paths import get_runtime_ipc_paths
 from .power_limits import discover_acpi_profiles
 from .protocol import (
@@ -430,6 +431,8 @@ class GigaMateDaemon:
             self.cycle_profile_hotkey()
         elif action == "open_center":
             self.open_center()
+        elif action == "backlight_cycle":
+            self.cycle_backlight_hotkey()
         else:
             logger.warning("Unknown hotkey action: %s", action)
 
@@ -554,6 +557,16 @@ class GigaMateDaemon:
             return True
         except Exception:
             return False
+
+    def cycle_backlight_hotkey(self) -> int:
+        """Cycle keyboard backlight brightness (Off -> 15% -> 50% -> 100% -> Off) and show OSD."""
+        cfg = load_config()
+        self._config = cfg
+        next_pct = next_backlight_pct(cfg)
+        self.set_backlight_pct(next_pct)
+        show_backlight_osd(next_pct)
+        self._notify_ui()
+        return next_pct
 
     # ────────────────────────────────────────────
     # Keyboard idle auto-off & sleep/resume hooks

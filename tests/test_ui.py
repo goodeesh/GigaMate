@@ -1609,11 +1609,12 @@ def test_tray_resolve_hotkey_specs_precedence():
     by_action = {s.action: s for s in d._resolve_hotkey_specs()}
     assert by_action["open_center"].payload == bytes.fromhex("000091")
     assert by_action["mode_switch"].payload == bytes.fromhex("000084")
+    assert by_action["backlight_cycle"].payload == bytes.fromhex("01")
 
     # No overrides: falls back to built-in default hotkeys.
     d._detected_vid, d._detected_pid = 0x9999, 0x1234
     d._config = {}
-    assert len(d._resolve_hotkey_specs()) == 2
+    assert len(d._resolve_hotkey_specs()) == 3
 
 
 class _FakeCenterSocket:

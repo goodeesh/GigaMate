@@ -249,6 +249,18 @@ def is_rgb_enabled(cfg: dict) -> bool:
     return True
 
 
+BACKLIGHT_CYCLE_STEPS = (0, 15, 50, 100)
+
+
+def next_backlight_pct(cfg: dict, steps=BACKLIGHT_CYCLE_STEPS) -> int:
+    """Return the next brightness percentage in the backlight cycle."""
+    current = 0 if not is_rgb_enabled(cfg) else effective_brightness_pct(cfg)
+    for step in steps:
+        if step > current:
+            return int(step)
+    return int(steps[0])
+
+
 def effective_rgb_hex(cfg: dict) -> str:
     """Return normalized '#rrggbb' from cfg['rgb_hex'], or fallback to PALETTE_HEX."""
     norm = _sanitize_rgb_hex(cfg.get("rgb_hex"))

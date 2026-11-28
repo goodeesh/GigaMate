@@ -40,7 +40,7 @@ APP_ICON_PATHS = ICON_PATHS
 
 BACKLIGHT_STEPS: Tuple[Tuple[str, int], ...] = (
     ("Off", 0),
-    ("5%", 5),
+    ("15%", 15),
     ("50%", 50),
     ("100%", 100),
 )

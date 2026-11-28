@@ -31,6 +31,7 @@ from ... import __version__, dgpu_gate, doctor, hardware, updates
 from ...capabilities import detect_system_capabilities, invalidate_capabilities
 from ...config import load as load_config, update_config
 from ...hotkeys import (
+    ACTION_BACKLIGHT_CYCLE,
     ACTION_MODE_SWITCH,
     ACTION_OPEN_CENTER,
     capture_hardware_hotkey,
@@ -60,6 +61,7 @@ _PROFILE_NAMES = (
 _SHORTCUT_ACTIONS = (
     (ACTION_OPEN_CENTER, "Open GigaMate Center", "Meta+G"),
     (ACTION_MODE_SWITCH, "Cycle Power Profile", "Meta+Shift+M"),
+    (ACTION_BACKLIGHT_CYCLE, "Cycle Keyboard Brightness", "Meta+Shift+B"),
 )
 
 

@@ -22,6 +22,7 @@ class TestHotkeysList:
         out = capsys.readouterr().out
         assert "mode_switch" in out
         assert "open_center" in out
+        assert "backlight_cycle" in out
         assert "interface 2" in out
         assert "00 00 84" in out
 
@@ -80,3 +81,49 @@ class TestHotkeysWatch:
         assert "report_id=0x04" in out
         assert "00 00 91" in out
         assert "open_center" in out
+
+
+class TestRgbBrightnessCycleCli:
+    def test_brightness_cycle_steps_and_persists(self, capsys):
+        from gigamate.cli import cmd_rgb_brightness_cycle
+
+        saved = {}
+
+        def fake_update(mut):
+            saved.update(mut({"rgb_enabled": True, "brightness_pct": 15, "rgb_hex": "#ffffff"}))
+            return saved
+
+        with patch("gigamate.cli.get_keyboard", return_value=object()), \
+             patch("gigamate.cli.load_config", return_value={"rgb_enabled": True, "brightness_pct": 15, "rgb_hex": "#ffffff"}), \
+             patch("gigamate.cli.set_rgb", return_value=True) as mock_rgb, \
+             patch("gigamate.cli.update_config", side_effect=fake_update), \
+             patch("gigamate.cli.show_backlight_osd") as mock_osd:
+            cmd_rgb_brightness_cycle(_args())
+
+        mock_rgb.assert_called_once()
+        assert mock_rgb.call_args.args[2] == 50
+        assert saved["rgb_enabled"] is True
+        assert saved["brightness_pct"] == 50
+        mock_osd.assert_called_once_with(50)
+        assert "50%" in capsys.readouterr().out
+
+    def test_brightness_cycle_wraps_to_off(self, capsys):
+        from gigamate.cli import cmd_rgb_brightness_cycle
+
+        saved = {}
+
+        def fake_update(mut):
+            saved.update(mut({"rgb_enabled": True, "brightness_pct": 100, "rgb_hex": "#ffffff"}))
+            return saved
+
+        with patch("gigamate.cli.get_keyboard", return_value=object()), \
+             patch("gigamate.cli.load_config", return_value={"rgb_enabled": True, "brightness_pct": 100, "rgb_hex": "#ffffff"}), \
+             patch("gigamate.cli.set_off", return_value=True) as mock_off, \
+             patch("gigamate.cli.update_config", side_effect=fake_update), \
+             patch("gigamate.cli.show_backlight_osd") as mock_osd:
+            cmd_rgb_brightness_cycle(_args())
+
+        mock_off.assert_called_once()
+        assert saved["rgb_enabled"] is False
+        mock_osd.assert_called_once_with(0)
+        assert "Off" in capsys.readouterr().out

@@ -33,7 +33,8 @@ except Exception:
 # schema in docs/PROFILE_SCHEMA.md.
 ACTION_MODE_SWITCH = "mode_switch"
 ACTION_OPEN_CENTER = "open_center"
-KNOWN_ACTIONS = (ACTION_MODE_SWITCH, ACTION_OPEN_CENTER)
+ACTION_BACKLIGHT_CYCLE = "backlight_cycle"
+KNOWN_ACTIONS = (ACTION_MODE_SWITCH, ACTION_OPEN_CENTER, ACTION_BACKLIGHT_CYCLE)
 
 
 @dataclass(frozen=True)
@@ -391,6 +392,12 @@ DEFAULT_GIGABYTE_HOTKEYS: Dict[str, dict] = {
         "payload": "000091",
         "key_name": "GigaMate",
     },
+    "backlight_cycle": {
+        "interface": 2,
+        "report_id": 4,
+        "payload": "01",
+        "key_name": "Keyboard Backlight",
+    },
 }
 
 
@@ -445,10 +452,23 @@ def capture_hardware_hotkey(
                     continue
                 if len(data) >= 2 and any(b != 0 for b in data[1:]):
                     iface = fds[fd]
+                    payload_bytes = bytes(data[1:])
+                    # Gigabyte MCU cycles 04 01 {00,18,20,32} 00 on Fn+Space;
+                    # normalize to prefix "01" so every press matches.
+                    if (
+                        iface == 2
+                        and data[0] == 4
+                        and len(payload_bytes) == 3
+                        and payload_bytes[0] == 0x01
+                        and payload_bytes[2] == 0x00
+                    ):
+                        payload_hex = "01"
+                    else:
+                        payload_hex = payload_bytes.hex()
                     return {
                         "interface": iface,
                         "report_id": data[0],
-                        "payload": data[1:].hex(),
+                        "payload": payload_hex,
                         "key_name": f"HID iface {iface} (0x{data[0]:02X})",
                     }
     finally:
@@ -464,6 +484,7 @@ def desktop_shortcut_command(action: str) -> str:
     commands = {
         ACTION_OPEN_CENTER: "gigamate center",
         ACTION_MODE_SWITCH: "gigamate profile next",
+        ACTION_BACKLIGHT_CYCLE: "gigamate rgb brightness-cycle",
     }
     if action not in commands:
         raise ValueError(f"Unknown hotkey action: {action!r}")

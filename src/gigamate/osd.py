@@ -123,3 +123,84 @@ def show_profile_osd(name: str, desc: str = "", icon: str = "preferences-system-
             return True
 
     return False
+
+
+def _show_kde_text_osd(text: str, icon: str) -> bool:
+    if not _HAS_GIO:
+        return False
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        proxy = Gio.DBusProxy.new_sync(
+            bus,
+            Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+            None,
+            "org.kde.plasmashell",
+            "/org/kde/osdService",
+            "org.kde.osdService",
+            None,
+        )
+        proxy.call_sync(
+            "showText",
+            GLib.Variant("(ss)", (icon, text)),
+            Gio.DBusCallFlags.NONE,
+            250,
+            None,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _show_freedesktop_text_osd(title: str, body: str, icon: str, sync_key: str) -> bool:
+    if not _HAS_GIO:
+        return False
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        proxy = Gio.DBusProxy.new_sync(
+            bus,
+            Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+            None,
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            None,
+        )
+        hints = {
+            "x-canonical-private-synchronous": GLib.Variant("s", sync_key),
+            "transient": GLib.Variant("b", True),
+            "urgency": GLib.Variant("y", 1),
+        }
+        proxy.call_sync(
+            "Notify",
+            GLib.Variant(
+                "(susssasa{sv}i)",
+                ("GigaMate", 0, icon, title, body, [], hints, 1500),
+            ),
+            Gio.DBusCallFlags.NONE,
+            250,
+            None,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def show_backlight_osd(pct: int, icon: str = "input-keyboard-brightness") -> bool:
+    """Show an on-screen display overlay for keyboard backlight brightness."""
+    pct = max(0, min(100, int(pct)))
+    label = "Off" if pct == 0 else f"{pct}%"
+    text = f"Keyboard Backlight: {label}"
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+
+    if "kde" in desktop or "plasma" in desktop:
+        if _show_kde_text_osd(text, icon):
+            return True
+        if _show_freedesktop_text_osd("Keyboard Backlight", label, icon, "gigamate-backlight-osd"):
+            return True
+    else:
+        if _show_freedesktop_text_osd("Keyboard Backlight", label, icon, "gigamate-backlight-osd"):
+            return True
+        if _show_kde_text_osd(text, icon):
+            return True
+
+    return False

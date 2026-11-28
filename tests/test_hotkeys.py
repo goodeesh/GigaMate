@@ -296,6 +296,65 @@ class TestBatch3Hotkeys:
     def test_desktop_shortcut_command(self):
         assert hotkeys.desktop_shortcut_command("open_center") == "gigamate center"
         assert hotkeys.desktop_shortcut_command("mode_switch") == "gigamate profile next"
+        assert (
+            hotkeys.desktop_shortcut_command("backlight_cycle")
+            == "gigamate rgb brightness-cycle"
+        )
+
+    def test_default_backlight_cycle_matches_all_mcu_steps(self):
+        specs = hotkeys.resolve_hotkey_specs(custom_hotkeys={})
+        for report in (
+            b"\x04\x01\x00\x00",
+            b"\x04\x01\x18\x00",
+            b"\x04\x01\x20\x00",
+            b"\x04\x01\x32\x00",
+        ):
+            assert hotkeys.match_action(specs, report, interface=2) == "backlight_cycle"
+        assert hotkeys.match_action(specs, b"\x04\x00\x00\x84", interface=2) == "mode_switch"
+        assert hotkeys.match_action(specs, b"\x04\x00\x00\x91", interface=2) == "open_center"
+        assert hotkeys.match_action(specs, b"\x04\x00\x00\x95", interface=2) is None
+
+    def test_capture_hardware_hotkey_normalizes_gigabyte_backlight_report(self):
+        with patch("gigamate.hotkeys.list_hotkey_hidraw", return_value=[(2, "/dev/hidraw2")]), \
+             patch("gigamate.hotkeys.os.open", return_value=42), \
+             patch("gigamate.hotkeys.select.select", return_value=([42], [], [])), \
+             patch("gigamate.hotkeys.os.read", return_value=b"\x04\x01\x18\x00"), \
+             patch("gigamate.hotkeys.os.close"):
+            result = hotkeys.capture_hardware_hotkey(timeout_sec=1.0)
+        assert result == {
+            "interface": 2,
+            "report_id": 4,
+            "payload": "01",
+            "key_name": "HID iface 2 (0x04)",
+        }
+
+    def test_next_backlight_pct_cycle(self):
+        from gigamate.config import next_backlight_pct
+
+        assert next_backlight_pct({"rgb_enabled": False, "brightness_pct": 100}) == 15
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 0}) == 15
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 5}) == 15
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 15}) == 50
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 30}) == 50
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 50}) == 100
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 75}) == 100
+        assert next_backlight_pct({"rgb_enabled": True, "brightness_pct": 100}) == 0
+
+    def test_daemon_backlight_cycle_hotkey(self):
+        from gigamate.daemon import GigaMateDaemon
+
+        daemon = GigaMateDaemon.__new__(GigaMateDaemon)
+        daemon._config = {}
+        daemon.set_backlight_pct = MagicMock(return_value=True)
+        daemon._notify_ui = MagicMock()
+
+        with patch("gigamate.daemon.load_config", return_value={"rgb_enabled": True, "brightness_pct": 15}), \
+             patch("gigamate.daemon.show_backlight_osd") as mock_osd:
+            daemon._on_hotkey_action("backlight_cycle")
+
+        daemon.set_backlight_pct.assert_called_once_with(50)
+        mock_osd.assert_called_once_with(50)
+        daemon._notify_ui.assert_called_once()
 
     def test_register_desktop_shortcut_fallback(self, monkeypatch):
         monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")

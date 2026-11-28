@@ -50,6 +50,8 @@ from .config import (
     effective_rgb_hex,
     effective_brightness_pct,
     enabled_acpi_profiles,
+    next_backlight_pct,
+    pct_to_legacy_brightness,
 )
 from .acpi import (
     AcpiController,
@@ -59,7 +61,7 @@ from .acpi import (
     probe_acpi_capabilities,
     AcpiCapabilities,
 )
-from .osd import show_profile_osd
+from .osd import show_backlight_osd, show_profile_osd
 from .system_power import sync_system_power
 from .gpu import get_gpu_state, gpu_status_text
 from .paths import CONFIG_DIR
@@ -192,6 +194,52 @@ def cmd_rgb_off(args) -> None:
     except Exception:
         pass
     print("Keyboard backlight turned off.")
+
+
+def cmd_rgb_brightness_cycle(args) -> None:
+    """Cycle keyboard backlight brightness (Off -> 15% -> 50% -> 100% -> Off)."""
+    dev = get_keyboard(args.vid, args.pid)
+    if dev is None:
+        print("Keyboard not found")
+        if detect_keyboards() and not hardware_supports_lamparray(args.vid, args.pid):
+            print("Note: Non-LampArray pre-2025 keyboards require GigaMate v4.5.x.")
+        sys.exit(1)
+
+    cfg = load_config()
+    next_pct = next_backlight_pct(cfg)
+    if next_pct == 0:
+        ok = set_off(dev)
+    else:
+        ok = set_rgb(dev, effective_rgb_hex(cfg), next_pct)
+    if not ok:
+        print("Failed to send command", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        update_config(
+            lambda c: {
+                **c,
+                "rgb_enabled": next_pct > 0,
+                **(
+                    {
+                        "brightness_pct": next_pct,
+                        "brightness": pct_to_legacy_brightness(next_pct),
+                    }
+                    if next_pct > 0
+                    else {"brightness": 0}
+                ),
+            }
+        )
+    except Exception:
+        pass
+
+    try:
+        show_backlight_osd(next_pct)
+    except Exception:
+        pass
+
+    label = "Off" if next_pct == 0 else f"{next_pct}%"
+    print(f"Keyboard backlight: {label}")
 
 
 def cmd_rgb_detect(args) -> None:
@@ -1882,6 +1930,14 @@ def _subcommand_main() -> None:
     cycle_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
     cycle_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
 
+    # rgb brightness-cycle
+    bc_parser = rgb_sub.add_parser(
+        "brightness-cycle",
+        help="Cycle backlight brightness (Off -> 15%% -> 50%% -> 100%%)",
+    )
+    bc_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
+    bc_parser.add_argument("--pid", type=lambda x: int(x, 16), default=None)
+
     # rgb reset
     reset_parser = rgb_sub.add_parser("reset", help="Re-attach keyboard drivers")
     reset_parser.add_argument("--vid", type=lambda x: int(x, 16), default=None)
@@ -2108,12 +2164,14 @@ def _dispatch_rgb(args) -> None:
         cmd_rgb_detect(args)
     elif action == "cycle":
         cmd_rgb_cycle(args)
+    elif action == "brightness-cycle":
+        cmd_rgb_brightness_cycle(args)
     elif action == "reset":
         cmd_rgb_reset(args)
     elif action == "idle":
         cmd_rgb_idle(args)
     else:
-        print("RGB actions: static, off, detect, cycle, reset, idle")
+        print("RGB actions: static, off, detect, cycle, brightness-cycle, reset, idle")
         print("Example: gigamate rgb static purple")
         sys.exit(1)
 
