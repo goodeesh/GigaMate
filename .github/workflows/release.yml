@@ -83,35 +83,28 @@ jobs:
           set -euo pipefail
           mkdir -p dist/deb dist/fedora dist/opensuse dist/arch dist/aur
 
+          run_nfpm() {
+            local cfg="$1" packager="$2" target="$3" stage_dir="$4"
+            local rendered
+            rendered="$(mktemp /tmp/nfpm-XXXXXX.yaml)"
+            VERSION="$VERSION" STAGE_DIR="$stage_dir" python3 -c \
+              'import os, sys; sys.stdout.write(os.path.expandvars(open(sys.argv[1]).read()))' \
+              "$cfg" > "$rendered"
+            nfpm package --config "$rendered" --packager "$packager" --target "$target"
+            rm -f "$rendered"
+          }
+
           ./packaging/stage.sh "$VERSION" apt /tmp/stage-apt
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-apt nfpm package \
-            --config packaging/nfpm/gigamate-deb.yaml \
-            --packager deb \
-            --target dist/deb/
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-apt nfpm package \
-            --config packaging/nfpm/gigamate-dkms-deb.yaml \
-            --packager deb \
-            --target dist/deb/
+          run_nfpm packaging/nfpm/gigamate-deb.yaml deb dist/deb/ /tmp/stage-apt
+          run_nfpm packaging/nfpm/gigamate-dkms-deb.yaml deb dist/deb/ /tmp/stage-apt
 
           ./packaging/stage.sh "$VERSION" dnf /tmp/stage-dnf
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-dnf nfpm package \
-            --config packaging/nfpm/gigamate-fedora.yaml \
-            --packager rpm \
-            --target "dist/fedora/gigamate-${VERSION}-1.fedora.noarch.rpm"
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-dnf nfpm package \
-            --config packaging/nfpm/gigamate-dkms-fedora.yaml \
-            --packager rpm \
-            --target "dist/fedora/gigamate-dkms-${VERSION}-1.fedora.noarch.rpm"
+          run_nfpm packaging/nfpm/gigamate-fedora.yaml rpm "dist/fedora/gigamate-${VERSION}-1.fedora.noarch.rpm" /tmp/stage-dnf
+          run_nfpm packaging/nfpm/gigamate-dkms-fedora.yaml rpm "dist/fedora/gigamate-dkms-${VERSION}-1.fedora.noarch.rpm" /tmp/stage-dnf
 
           ./packaging/stage.sh "$VERSION" zypper /tmp/stage-zypper
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-zypper nfpm package \
-            --config packaging/nfpm/gigamate-opensuse.yaml \
-            --packager rpm \
-            --target "dist/opensuse/gigamate-${VERSION}-1.opensuse.noarch.rpm"
-          VERSION="$VERSION" STAGE_DIR=/tmp/stage-zypper nfpm package \
-            --config packaging/nfpm/gigamate-dkms-opensuse.yaml \
-            --packager rpm \
-            --target "dist/opensuse/gigamate-dkms-${VERSION}-1.opensuse.noarch.rpm"
+          run_nfpm packaging/nfpm/gigamate-opensuse.yaml rpm "dist/opensuse/gigamate-${VERSION}-1.opensuse.noarch.rpm" /tmp/stage-zypper
+          run_nfpm packaging/nfpm/gigamate-dkms-opensuse.yaml rpm "dist/opensuse/gigamate-dkms-${VERSION}-1.opensuse.noarch.rpm" /tmp/stage-zypper
 
       - name: Build install.sh and source tarball checksums
         id: tarball
