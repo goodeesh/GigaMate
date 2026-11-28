@@ -240,9 +240,9 @@ for distro in fedora opensuse; do
     cp -f "${rpm_files[@]}" "$RPM_DIR/"
 
     if [[ -n "$PASS_FILE" ]]; then
-        gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-file ${PASS_FILE} --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
+        gpg_sign_macro="%{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --passphrase-file ${PASS_FILE} --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
     else
-        gpg_sign_macro="%{__gpg} gpg --batch --no-verbose --no-armor --pinentry-mode loopback --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
+        gpg_sign_macro="%{__gpg} --batch --no-verbose --no-armor --pinentry-mode loopback --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} %{__plaintext_filename}"
     fi
     rpmsign \
         -D "_gpg_name ${GPG_KEY}" \
