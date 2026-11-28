@@ -1,0 +1,38 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: all
+Codename: stable
+Components: main
+Date: Sat, 28 Nov 2026 14:54:12 +0000
+Label: GigaMate
+Origin: GigaMate
+Suite: stable
+MD5Sum:
+ 0f625dba1dca9e376db0672c5f460b3e             1182 main/binary-all/Packages
+ a3c63af05d637b8e310d1a3f42feed0b              665 main/binary-all/Packages.gz
+SHA1:
+ b8773fdab08a6f2aba91543e1dd0871356164510             1182 main/binary-all/Packages
+ 63c0d37eb849ae60bac4554e258a71d4565e7b36              665 main/binary-all/Packages.gz
+SHA256:
+ d8a8ea474c87d40f1fbc7d3b7abc176640537307fcd93a898382eea9acd69325             1182 main/binary-all/Packages
+ bd9138af1461c9de1a735a24a36c9eaa5523343aebfafdbd51553257846f3f4b              665 main/binary-all/Packages.gz
+SHA512:
+ dbaf402ebfff7cd289f05c1e7c28462d49b93b9b4b5b686bb9512fc1e5fe73e2ea06cb4aa31eae36e457f15d616a42fce945a1a6214e0438ac296617901937d1             1182 main/binary-all/Packages
+ d48f804b1ceaff3782b16fdf3bcacaff3e13e6b8adce1f35aced9389398d2b58ee45bca5f73375c2ca30f2b00438eb07dfb187a6ac14bfa8902a45b4edfdd9ef              665 main/binary-all/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEyoioRnflMOYYk9aLM2LTsfOVkvQFAmsK6xUACgkQM2LTsfOV
+kvRBAA//SiYhGKkJWMdMI24eCZZfA6WAIuL3m8awXLj88QIM9pP9VuPhB51RHADa
+TnKQ/6ZU/2S8dGYkI4LSNmoYOtxk4g9UqeQDPRd53VyjK/iddAoMcFiXNIvJ6pEt
+q6+ncyNiQzOCOvCJ8EKnGc+CMHgssZtNpUEnAlW6/rLOC/P0rGl1PlwPS4T/n3L1
+5jPPRywQzIRzFPSY51Nhxr5LT/XRM5FKvhfs4pPMki5ju1eQRpRYUVgPnEWFgqnL
+9s/D5IRnP3Z2iFzQlbrJPvbEd0RRtlr+KgjHqcWEfUI9mX/0ER+xYto3nCS75Z7e
+njc7z/piBJ8TKwgztGmruOKVkTkn9uZ6Lm9Z034PdTZag8PuNNW5l+doPfZSKJeh
+O1vgstu9J9CHfBWVW+gog8NZYzxfAsCc+fm1HN2dFtG0iyPtgo0nmbQd6JHJrSC7
+O3b9Iez26lWUb83oxn6MSPecyTHdA8H3ff0gBhmodIIwm6+1dcHTK/xcwf/Eroor
+QDCDzF2SOyrJWJnG+RO4hMJDdMBGVW3+hnrd07HHqivNdivFTYBK4u4EQCZlklpD
+dY0oUOBO8I9/kwC789MNeQ98cwjBFDnvCXRSlOT7DeOR7nyz4FKbKjsivl4WCim9
+1THYuUNu+oN3K6mQYRlbd6Eds3rwEBok87WFw79TCSS3wqg5+TE=
+=cqgl
+-----END PGP SIGNATURE-----

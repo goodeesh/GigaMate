@@ -1,0 +1,34 @@
+Package: gigamate
+Version: 5.0.0
+Architecture: all
+Maintainer: adriansc <goodeesh@users.noreply.github.com>
+Installed-Size: 1182
+Depends: python3 (>= 3.10), python3-pyqt6, python3-evdev, polkitd | policykit-1, gigamate-dkms
+Filename: pool/main/gigamate_5.0.0_all.deb
+Size: 277904
+MD5sum: b1380d337c26b8e6d18137d2510f70a4
+SHA1: edd806b347a58841982e1047e11af4eccc2d578f
+SHA256: 23e313ca660d9d0b0e3d8da252e8b1869cd4d040bdfda4bf50d1e17a0a8bf896
+Section: utils
+Priority: optional
+Homepage: https://github.com/goodeesh/GigaMate
+Description: Gigabyte laptop management for Linux — keyboard RGB, fan monitoring, power profiles, and dGPU tuning
+License: MIT
+
+Package: gigamate-dkms
+Version: 5.0.0
+Architecture: all
+Maintainer: adriansc <goodeesh@users.noreply.github.com>
+Installed-Size: 34
+Depends: dkms, make, gcc | clang
+Filename: pool/main/gigamate-dkms_5.0.0_all.deb
+Size: 10168
+MD5sum: de1592d0abbef7f44bd951da150f1f23
+SHA1: b03cecb520f9c5a29d2960fdc5c5f23da860d10a
+SHA256: 6fc7f9809f2225ed12330323fd6b5ae64179275ec65aecfdd95c712f4de0dc11
+Section: kernel
+Priority: optional
+Homepage: https://github.com/goodeesh/GigaMate
+Description: GigaMate ACPI kernel driver (DKMS)
+License: MIT
+
