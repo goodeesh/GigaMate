@@ -460,6 +460,19 @@ _LEGACY_ICON_NAMES = (
     "gigamate-amd-update.svg",
     "checkbox-checked.svg",
 )
+_PIP_CONSOLE_SCRIPT_RE = re.compile(
+    r"\b(?:from|import)\s+gigamate\b|load_entry_point\(\s*['\"]gigamate\b"
+)
+
+
+def _is_legacy_pip_script(text: str) -> bool:
+    """True when ``text`` looks like a pip/setuptools gigamate console script."""
+    first_line = text.splitlines()[0] if text else ""
+    return (
+        first_line.startswith("#!")
+        and "python" in first_line.lower()
+        and bool(_PIP_CONSOLE_SCRIPT_RE.search(text))
+    )
 
 
 def migrate_legacy_user_install(
@@ -494,13 +507,14 @@ def migrate_legacy_user_install(
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            if "gigamate." in text:
+            if _is_legacy_pip_script(text):
                 path.unlink()
                 removed.append(str(path))
         except OSError:
             continue
 
     unit_dir = user_home / ".config" / "systemd" / "user"
+    wants_dir = unit_dir / "graphical-session.target.wants"
     for name in _LEGACY_UNIT_NAMES:
         path = unit_dir / name
         try:
@@ -508,9 +522,20 @@ def migrate_legacy_user_install(
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             if ".local/bin/gigamate" in text:
+                unit_resolved = path.resolve(strict=False)
                 path.unlink()
                 removed.append(str(path))
                 removed_unit = True
+                wants_link = wants_dir / name
+                try:
+                    if wants_link.is_symlink() and (
+                        wants_link.resolve(strict=False) == unit_resolved
+                        or not wants_link.exists()
+                    ):
+                        wants_link.unlink()
+                        removed.append(str(wants_link))
+                except OSError:
+                    pass
         except OSError:
             continue
 

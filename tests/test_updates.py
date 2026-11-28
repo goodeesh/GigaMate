@@ -1064,3 +1064,74 @@ class TestMigrateLegacyUserInstall:
         assert removed == [str(link)]
         assert not link.exists() and not link.is_symlink()
         assert target.exists()
+
+    def test_preserves_shell_wrapper_mentioning_gigamate_dot_log(self, tmp_path):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("apt\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        # Custom shell wrapper containing the substring "gigamate." (gigamate.log)
+        shell_wrapper = self._write(
+            home / ".local" / "bin" / "gigamate",
+            "#!/bin/sh\necho starting >> ~/gigamate.log\nexec /usr/bin/gigamate \"$@\"\n",
+        )
+        # Legacy setuptools load_entry_point script should still be removed
+        setuptools_script = self._write(
+            home / ".local" / "bin" / "gigamate-tray",
+            "#!/usr/bin/env python3\n"
+            "from pkg_resources import load_entry_point\n"
+            "load_entry_point('gigamate==1.0.0', 'console_scripts', 'gigamate-tray')()\n",
+        )
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=lambda *a, **k: None,
+            which=lambda _: None,
+        )
+
+        assert removed == [str(setuptools_script)]
+        assert shell_wrapper.exists()
+        assert not setuptools_script.exists()
+
+    def test_removes_dangling_wants_symlink_and_preserves_unrelated_wants(
+        self, tmp_path
+    ):
+        home = tmp_path / "home"
+        marker = tmp_path / "install-method"
+        marker.write_text("apt\n", encoding="utf-8")
+        state_file = home / ".config" / "gigamate" / "update_state.json"
+
+        unit_dir = home / ".config" / "systemd" / "user"
+        wants_dir = unit_dir / "graphical-session.target.wants"
+        wants_dir.mkdir(parents=True, exist_ok=True)
+
+        legacy_unit = self._write(
+            unit_dir / "gigamate.service",
+            "[Service]\nExecStart=%h/.local/bin/gigamate-tray\n",
+        )
+        legacy_wants = wants_dir / "gigamate.service"
+        legacy_wants.symlink_to(legacy_unit)
+
+        other_unit = self._write(
+            unit_dir / "other.service",
+            "[Service]\nExecStart=/usr/bin/other\n",
+        )
+        other_wants = wants_dir / "other.service"
+        other_wants.symlink_to(other_unit)
+
+        removed = updates.migrate_legacy_user_install(
+            home=home,
+            state_file=state_file,
+            marker_path=marker,
+            run=lambda *a, **k: None,
+            which=lambda _: None,
+        )
+
+        assert set(removed) == {str(legacy_unit), str(legacy_wants)}
+        assert not legacy_unit.exists()
+        assert not legacy_wants.exists() and not legacy_wants.is_symlink()
+        assert other_unit.exists()
+        assert other_wants.is_symlink() and other_wants.exists()
