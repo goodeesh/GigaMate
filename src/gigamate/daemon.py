@@ -70,11 +70,13 @@ from .system_power import (
     power_config_mtime_token,
 )
 from . import updates as update_checker
+from .usbc_power import UsbcPowerBudgetController
 
 logger = logging.getLogger(__name__)
 
 STATUS_POLL_INTERVAL_MS = 5000  # 5 seconds on AC
 STATUS_POLL_BATTERY_MS = 15000  # 15 seconds on battery
+STATUS_POLL_USBC_ACTIVE_MS = 2000  # 2 seconds while USB-C PD power budget is managing dGPU
 IDLE_FALLBACK_POLL_MS = 5000  # 5 seconds (only when evdev unavailable)
 UPDATE_CHECK_INTERVAL_MS = 24 * 3600 * 1000  # daily; one tiny HTTPS req/day
 _ACPI_RETRY_SEC = 5.0
@@ -154,6 +156,9 @@ class GigaMateDaemon:
         # Cached status text for instant menu builds
         self._last_status_text: str = "Status: reading..."
         self._stopped: bool = False
+        self._usbc_power = UsbcPowerBudgetController(
+            acpi_getter=lambda: self._acpi_controller,
+        )
 
     # ────────────────────────────────────────────
     # Lifecycle
@@ -201,6 +206,12 @@ class GigaMateDaemon:
                 pass
 
         self._stop_idle()
+        try:
+            self._usbc_power.shutdown(
+                self._config, active_profile=self._current_acpi_profile
+            )
+        except Exception:
+            pass
         try:
             get_sleep_handler().stop_listening()
         except Exception:
@@ -659,6 +670,12 @@ class GigaMateDaemon:
 
     def _on_suspend_hook(self) -> None:
         self._stop_idle()
+        try:
+            self._usbc_power.shutdown(
+                self._config, active_profile=self._current_acpi_profile
+            )
+        except Exception:
+            pass
 
     def _on_resume_hook(self) -> None:
         if self._idle_dimmed:
@@ -707,7 +724,12 @@ class GigaMateDaemon:
     # ────────────────────────────────────────────
 
     @staticmethod
-    def desired_poll_interval_ms(ac_online: Optional[bool]) -> int:
+    def desired_poll_interval_ms(
+        ac_online: Optional[bool],
+        usbc_fast_poll: bool = False,
+    ) -> int:
+        if usbc_fast_poll:
+            return STATUS_POLL_USBC_ACTIVE_MS
         if ac_online is False:
             return STATUS_POLL_BATTERY_MS
         return STATUS_POLL_INTERVAL_MS
@@ -810,6 +832,16 @@ class GigaMateDaemon:
         if run_automation:
             self._run_profile_automation(ac_online)
 
+        try:
+            self._usbc_power.tick(
+                self._config,
+                gpu=gpu,
+                active_profile=self._current_acpi_profile,
+                apply_hardware=run_automation,
+            )
+        except Exception:
+            pass
+
         if ac_online is not None:
             self._last_ac_online = ac_online
 
@@ -829,7 +861,9 @@ class GigaMateDaemon:
             status_text=status_text,
             icon_key=icon_key,
             ac_online=ac_online,
-            poll_interval_ms=self.desired_poll_interval_ms(ac_online),
+            poll_interval_ms=self.desired_poll_interval_ms(
+                ac_online, usbc_fast_poll=self._usbc_power.fast_poll_needed
+            ),
             acpi_available=acpi_ok,
             has_lamparray=bool(self._has_lamparray),
             active_profile=self._current_acpi_profile,

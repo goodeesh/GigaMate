@@ -49,3 +49,26 @@ def test_gigamate_acpi_builds_against_running_kernel(tmp_path):
         )
     assert res.returncode == 0, f"Kernel module build failed:\n{res.stderr}"
     assert (tmp_path / "gigamate_acpi.ko").is_file()
+
+
+def test_gigamate_acpi_exposes_usbc_power_budget_attributes_and_gating():
+    src = MODULE_SRC.read_text(encoding="utf-8")
+    for attr in (
+        "usbc_adapter",
+        "cpu_stapm_w",
+        "cpu_slow_ppt_w",
+        "cpu_fast_ppt_w",
+        "gpu_ctgp_offset_w",
+        "gpu_dynamic_boost",
+    ):
+        assert attr in src, f"Missing sysfs attribute {attr} in gigamate_acpi.c"
+    for sym in (
+        "acpi_wmbd_exec_locked",
+        "gigamate_wmbd_body_len",
+        "gigamate_wmbd_has_ecpt_mw_opcode",
+        "gigamate_wmbd_has_ctgp_offset",
+        "gigamate_wmbd_has_dyn_boost",
+    ):
+        assert sym in src, f"Missing helper {sym} in gigamate_acpi.c"
+    assert "gigamate_wmbd_body_len" in src
+    assert "'W', 'M', 'B', 'C'" in src

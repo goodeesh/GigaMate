@@ -560,3 +560,31 @@ def test_v453_config_upgrade_preserves_settings_and_rollback_keys(isolated_confi
         assert dropped not in raw_saved
     assert raw_saved["profile_id"] == [1044, 33029]
     assert raw_saved["rgb_legacy_mode"] is True
+
+
+def test_usbc_power_budget_config_defaults_and_coercion(isolated_config):
+    defaults = config_module.load()
+    assert defaults["usbc_power_budget_enabled"] is False
+    assert defaults["usbc_power_budget_disclaimer_accepted"] is False
+    assert defaults["usbc_gpu_budget_w"] == 55
+    assert defaults["usbc_buffer_pct"] == 25
+
+    config_module.save({
+        "usbc_power_budget_enabled": True,
+        "usbc_power_budget_disclaimer_accepted": True,
+        "usbc_gpu_budget_w": 60,
+        "usbc_buffer_pct": 18,
+    })
+    loaded = config_module.load()
+    assert loaded["usbc_power_budget_enabled"] is True
+    assert loaded["usbc_power_budget_disclaimer_accepted"] is True
+    assert loaded["usbc_gpu_budget_w"] == 60
+    assert loaded["usbc_buffer_pct"] == 18
+
+    for bad in (True, 10, 200, "bogus", None):
+        config_module.save({"usbc_gpu_budget_w": bad})
+        assert config_module.load()["usbc_gpu_budget_w"] == 55
+
+    for bad_buf in (True, 10, 30, "bogus", None):
+        config_module.save({"usbc_buffer_pct": bad_buf})
+        assert config_module.load()["usbc_buffer_pct"] == 25

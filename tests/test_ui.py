@@ -654,7 +654,7 @@ def test_gpu_sliders_do_not_eat_the_scroll_wheel(qapp):
 
     page = gp.GpuPage()
     page.uv_slider.setValue(120)
-    for slider in (page.uv_slider, page.max_slider, page.mem_slider):
+    for slider in (page.uv_slider, page.max_slider, page.mem_slider, page.usbc_split_slider, page.usbc_buffer_slider):
         before = slider.value()
         event = QWheelEvent(
             QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
@@ -2439,3 +2439,111 @@ def test_dgpu_gate_dialog_supports_boot_battery_trigger(qapp):
         assert "Battery" in dlg.title_lbl.text()
         assert dlg._is_auto_session() is True
         dlg.deleteLater()
+
+
+def test_gpu_page_usbc_budget_card_visibility_disclaimer_and_sleep_safety(qapp, tmp_path):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtWidgets import QMessageBox
+    from gigamate import config as config_mod
+    from gigamate.gpu import GpuState
+    from gigamate.power_limits import GpuPowerCaps
+    from gigamate.usbc_power import PowerSourceSnapshot
+    import gigamate.ui.pages.gpu_page as gp
+
+    asleep_nv = GpuState(present=True, vendor="nvidia", status="suspended", power_state="D3cold")
+    awake_nv = GpuState(present=True, vendor="nvidia", status="active", power_state="D0")
+    no_gpu = GpuState(present=False)
+    fake_src = PowerSourceSnapshot(
+        kind="usbc_pd", ac_online=True, usbc_online=True, is_pd=True,
+        detected_wattage_w=100, wattage_source="pd_current_inferred",
+        negotiated_current_a=5.0, negotiated_voltage_v=None, firmware_usbc_flag=True,
+        bat_present=True, bat_status="Charging", bat_capacity=80, bat_power_w=3.0,
+    )
+    caps = GpuPowerCaps(default_tgp_w=50, max_constraint_w=85)
+
+    acpi_sys = tmp_path / "gigamate_acpi"
+    acpi_sys.mkdir()
+    for name in ("cpu_stapm_w", "cpu_slow_ppt_w", "cpu_fast_ppt_w", "gpu_ctgp_offset_w", "gpu_dynamic_boost"):
+        (acpi_sys / name).write_text("1\n")
+
+    real_open = os.open
+    nv_opens = []
+
+    def tracking_open(path, *args, **kwargs):
+        if "/dev/nvidia" in str(path):
+            nv_opens.append(str(path))
+            raise AssertionError(f"Unexpected NVIDIA device open: {path}")
+        return real_open(path, *args, **kwargs)
+
+    page = gp.GpuPage()
+    try:
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=no_gpu)), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={}):
+            page.reload_from_config()
+            assert page.usbc_budget_card.isVisibleTo(page) is False
+
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=asleep_nv)), \
+             patch.object(gp, "GIGAMATE_ACPI_SYSFS", acpi_sys), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={}), \
+             patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml, \
+             patch("gigamate.usbc_power.os.open", side_effect=tracking_open):
+            page.reload_from_config()
+            assert page.usbc_budget_card.isVisibleTo(page) is True
+            assert "100 W USB-C PD" in page.usbc_charger_pill.text()
+            assert page.usbc_split_slider.minimum() == 50
+            assert page.usbc_split_slider.maximum() == 60
+            mock_nvml.assert_not_called()
+            assert nv_opens == []
+
+            # Disclaimer Cancel reverts switch and keeps opt-in False
+            with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Cancel):
+                page.usbc_switch.setChecked(True)
+            assert page.usbc_switch.isChecked() is False
+            assert config_mod.load()["usbc_power_budget_enabled"] is False
+
+            # Disclaimer Yes enables feature + saves disclaimer acceptance
+            with patch("PyQt6.QtWidgets.QMessageBox.warning", return_value=QMessageBox.StandardButton.Yes):
+                page.usbc_switch.setChecked(True)
+            cfg = config_mod.load()
+            assert cfg["usbc_power_budget_enabled"] is True
+            assert cfg["usbc_power_budget_disclaimer_accepted"] is True
+
+            # Slider persists committed GPU split + buffer %; wheel is ignored
+            page.usbc_split_slider.setValue(58)
+            page.usbc_buffer_slider.setValue(20)
+            assert "58 W GPU / 22 W CPU" in page.usbc_split_val.text()
+            assert "20% (20 W)" in page.usbc_buffer_val.text()
+            page._commit_usbc_split()
+            saved = config_mod.load()
+            assert saved["usbc_gpu_budget_w"] == 58
+            assert saved["usbc_buffer_pct"] == 20
+
+            ev = QWheelEvent(
+                QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.ScrollUpdate, False,
+            )
+            page.usbc_split_slider.wheelEvent(ev)
+            assert page.usbc_split_slider.value() == 58
+            assert not ev.isAccepted()
+
+        # Even while awake, _sync_usbc_budget_card never touches NVML or /dev/nvidiactl
+        with _StartPatch(_gpu_page_patches(gp, gpu_state=awake_nv)), \
+             patch.object(gp, "GIGAMATE_ACPI_SYSFS", acpi_sys), \
+             patch.object(gp.usbc_power, "detect_power_source", return_value=fake_src), \
+             patch.object(gp.usbc_power, "read_cached_gpu_caps_only", return_value=caps), \
+             patch.object(gp.usbc_power, "read_state_file", return_value={"active": True, "mode": "active", "applied_gpu_w": 58, "applied_cpu_w": 17, "aux_state": 0}), \
+             patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml_awake, \
+             patch("gigamate.usbc_power.os.open", side_effect=tracking_open):
+            page._sync_usbc_budget_card(gpu=awake_nv)
+            assert "Active" in page.usbc_state_pill.text()
+            mock_nvml_awake.assert_not_called()
+            assert nv_opens == []
+    finally:
+        page.close()
+        page.deleteLater()

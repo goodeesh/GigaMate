@@ -351,6 +351,65 @@ def run_doctor() -> int:
     except Exception:
         pass
 
+    try:
+        from . import usbc_power
+        from .acpi import AcpiController
+        from .config import load as load_config
+        from .gpu import get_gpu_state
+
+        cfg = load_config()
+        src = usbc_power.detect_power_source()
+        caps = usbc_power.read_cached_gpu_caps_only()
+        ctrl = AcpiController()
+        gpu = get_gpu_state()
+        has_cpu_ppt = ctrl.available and ctrl.has_cpu_ppt_control()
+        has_ctgp = ctrl.available and ctrl.has_gpu_ctgp_control()
+        has_db = ctrl.available and ctrl.has_gpu_dynamic_boost_control()
+        fw_usbc = ctrl.read_usbc_adapter() if ctrl.available else src.firmware_usbc_flag
+        env = usbc_power.compute_budget_envelope(
+            src.detected_wattage_w,
+            caps.default_tgp_w,
+            caps.max_constraint_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_db,
+            has_nvidia_gpu=bool(gpu.present and gpu.vendor == "nvidia"),
+            buffer_pct=int(cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT),
+        )
+        print("USB-C Power Budget")
+        w_str = f"{src.detected_wattage_w} W ({src.wattage_source})" if src.detected_wattage_w else "unknown"
+        curr_str = f", {src.negotiated_current_a:.2f} A" if src.negotiated_current_a is not None else ""
+        print(f"  power source {src.kind} (charger={w_str}{curr_str}, ac_online={src.ac_online})")
+        print(
+            f"  sysfs ctrls  cpu_ppt={'yes' if has_cpu_ppt else 'no'}, "
+            f"gpu_ctgp={'yes' if has_ctgp else 'no'}, "
+            f"dyn_boost={'yes' if has_db else 'no'}, "
+            f"usbc_adapter={fw_usbc}"
+        )
+        tgp_str = (
+            f"{caps.default_tgp_w} W" + (f" (max {caps.max_constraint_w} W)" if caps.max_constraint_w else "")
+            if caps.default_tgp_w is not None
+            else "uncached (not queried to keep sleeping dGPU off)"
+        )
+        print(f"  cached gpu   {tgp_str}")
+        buf_cfg = int(cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT)
+        opt_str = (
+            f"enabled (target {cfg.get('usbc_gpu_budget_w', 55)} W, buffer {buf_cfg}%)"
+            if cfg.get("usbc_power_budget_enabled")
+            else f"disabled (opt-in, buffer {buf_cfg}%)"
+        )
+        print(f"  opt-in       {opt_str}")
+        if env.supported:
+            print(
+                f"  envelope     {env.buffer_w} W buffer ({env.buffer_pct}%) + {env.silicon_budget_w} W silicon "
+                f"(GPU {env.gpu_min_w}..{env.gpu_max_w} W)"
+            )
+        elif src.kind == "usbc_pd":
+            print(f"  envelope     unsupported ({env.reason})")
+        print()
+    except Exception:
+        pass
+
     if failed_node is not None:
         print("Keyboard access failed:")
         for line in permission_lines(failed_node):

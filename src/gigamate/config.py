@@ -86,6 +86,11 @@ DEFAULT_CONFIG = {
     # Discrete GPU power-gate policy ("optimus" | "eco" | "auto").
     "dgpu_power_mode": "optimus",
     "dgpu_gate_disclaimer_accepted": False,
+    # Opt-in USB-C PD power budget (overrides NVIDIA 30 W Undersized cap on >=90 W USB-C PD).
+    "usbc_power_budget_enabled": False,
+    "usbc_power_budget_disclaimer_accepted": False,
+    "usbc_gpu_budget_w": 55,
+    "usbc_buffer_pct": 25,
     "sync_system_power": False,
     "ui_theme": "system",
     "last_brightness": 2,
@@ -467,6 +472,16 @@ def load():
             data["dgpu_mem_offset_mhz"] = _coerce_dgpu_mem_offset(data["dgpu_mem_offset_mhz"])
         if "dgpu_power_mode" in data:
             data["dgpu_power_mode"] = _coerce_dgpu_power_mode(data["dgpu_power_mode"])
+        if "usbc_power_budget_enabled" in data:
+            data["usbc_power_budget_enabled"] = bool(data["usbc_power_budget_enabled"])
+        if "usbc_power_budget_disclaimer_accepted" in data:
+            data["usbc_power_budget_disclaimer_accepted"] = bool(
+                data["usbc_power_budget_disclaimer_accepted"]
+            )
+        if "usbc_gpu_budget_w" in data:
+            data["usbc_gpu_budget_w"] = _coerce_usbc_gpu_budget_w(data["usbc_gpu_budget_w"])
+        if "usbc_buffer_pct" in data:
+            data["usbc_buffer_pct"] = _coerce_usbc_buffer_pct(data["usbc_buffer_pct"])
         if "acpi_profile" in data:
             try:
                 prof = int(data["acpi_profile"])
@@ -560,6 +575,28 @@ def _coerce_dgpu_power_mode(value) -> str:
         if v in ("optimus", "eco", "auto"):
             return v
     return DEFAULT_CONFIG["dgpu_power_mode"]
+
+
+def _coerce_usbc_gpu_budget_w(value) -> int:
+    """Return a valid 30..150 W USB-C GPU power budget target, else default."""
+    if isinstance(value, bool):
+        return DEFAULT_CONFIG["usbc_gpu_budget_w"]
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["usbc_gpu_budget_w"]
+    return v if 30 <= v <= 150 else DEFAULT_CONFIG["usbc_gpu_budget_w"]
+
+
+def _coerce_usbc_buffer_pct(value) -> int:
+    """Return a valid 15..25% USB-C safety buffer percentage, else default."""
+    if isinstance(value, bool):
+        return DEFAULT_CONFIG["usbc_buffer_pct"]
+    try:
+        v = int(value)
+    except (ValueError, TypeError):
+        return DEFAULT_CONFIG["usbc_buffer_pct"]
+    return v if 15 <= v <= 25 else DEFAULT_CONFIG["usbc_buffer_pct"]
 
 
 def _open_config_lock():
@@ -669,6 +706,15 @@ def _write_config(config):
             config.get("dgpu_power_mode", DEFAULT_CONFIG["dgpu_power_mode"])),
         "dgpu_gate_disclaimer_accepted": bool(config.get(
             "dgpu_gate_disclaimer_accepted", DEFAULT_CONFIG["dgpu_gate_disclaimer_accepted"])),
+        "usbc_power_budget_enabled": bool(config.get(
+            "usbc_power_budget_enabled", DEFAULT_CONFIG["usbc_power_budget_enabled"])),
+        "usbc_power_budget_disclaimer_accepted": bool(config.get(
+            "usbc_power_budget_disclaimer_accepted",
+            DEFAULT_CONFIG["usbc_power_budget_disclaimer_accepted"])),
+        "usbc_gpu_budget_w": _coerce_usbc_gpu_budget_w(
+            config.get("usbc_gpu_budget_w", DEFAULT_CONFIG["usbc_gpu_budget_w"])),
+        "usbc_buffer_pct": _coerce_usbc_buffer_pct(
+            config.get("usbc_buffer_pct", DEFAULT_CONFIG["usbc_buffer_pct"])),
         "sync_system_power": bool(config.get("sync_system_power", DEFAULT_CONFIG["sync_system_power"])),
         "ui_theme": _coerce_ui_theme(config.get("ui_theme", DEFAULT_CONFIG["ui_theme"])),
         "last_brightness": _migrate_brightness(config.get("last_brightness", DEFAULT_CONFIG["last_brightness"])),

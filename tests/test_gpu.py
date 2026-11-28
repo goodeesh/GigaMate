@@ -926,3 +926,81 @@ def test_cli_gpu_power_confirm_dialog_accepts_boot_battery_trigger(monkeypatch):
     assert exc.value.code == 0
     assert "--trigger" in captured["argv"]
     assert "boot_battery" in captured["argv"]
+
+
+def test_daemon_usbc_power_budget_integration(tmp_path, monkeypatch):
+    from gigamate import config as config_mod
+    from gigamate import daemon as daemon_module
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+    assert daemon_module.GigaMateDaemon.desired_poll_interval_ms(True, usbc_fast_poll=True) == 2000
+    assert daemon_module.GigaMateDaemon.desired_poll_interval_ms(False, usbc_fast_poll=False) == 15000
+
+    d = daemon_module.GigaMateDaemon()
+    called = {"ticks": 0, "shutdown": 0}
+    monkeypatch.setattr(d._usbc_power, "tick", lambda *a, **kw: (called.__setitem__("ticks", called["ticks"] + 1) or {}))
+    monkeypatch.setattr(d._usbc_power, "shutdown", lambda *a, **kw: called.__setitem__("shutdown", called["shutdown"] + 1))
+
+    with patch.object(d, "sync_from_external_config"), \
+         patch.object(d, "_ensure_acpi_controller"), \
+         patch.object(d, "_maybe_retry_keyboard"), \
+         patch.object(d, "_run_profile_automation"), \
+         patch("gigamate.daemon.get_gpu_state", return_value=GpuState(present=False)), \
+         patch("gigamate.daemon.get_battery_manager"):
+        d.poll_tick(run_automation=True)
+    assert called["ticks"] == 1
+    d.stop()
+    assert called["shutdown"] == 1
+
+
+def test_cli_gpu_usbc_budget_and_doctor(tmp_path, monkeypatch, capsys):
+    import sys
+    from gigamate import cli, config as config_mod, doctor, usbc_power
+
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+
+    for argv in (
+        ["gigamate", "gpu", "usbc-budget", "on"],
+        ["gigamate", "gpu", "usbc-budget", "set", "58"],
+        ["gigamate", "gpu", "usbc-budget", "buffer", "20"],
+        ["gigamate", "gpu", "usbc-budget", "off"],
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        cli.main()
+
+    cfg = config_mod.load()
+    assert cfg["usbc_power_budget_disclaimer_accepted"] is True
+    assert cfg["usbc_power_budget_enabled"] is False
+    assert cfg["usbc_gpu_budget_w"] == 58
+    assert cfg["usbc_buffer_pct"] == 20
+
+    fake_src = usbc_power.PowerSourceSnapshot(
+        kind="usbc_pd", ac_online=True, usbc_online=True, is_pd=True,
+        detected_wattage_w=100, wattage_source="pd_current_inferred",
+        negotiated_current_a=5.0, negotiated_voltage_v=None, firmware_usbc_flag=True,
+        bat_present=True, bat_status="Charging", bat_capacity=80, bat_power_w=2.0,
+    )
+    with patch("gigamate.usbc_power.detect_power_source", return_value=fake_src), \
+         patch("gigamate.usbc_power.read_cached_gpu_caps_only", return_value=usbc_power.GpuPowerCaps(default_tgp_w=50, max_constraint_w=85)), \
+         patch("gigamate.power_limits._query_nvml_power_caps") as mock_nvml:
+        monkeypatch.setattr(sys, "argv", ["gigamate", "gpu", "usbc-budget", "status"])
+        cli.main()
+        out = capsys.readouterr().out
+        assert "usbc_pd" in out and "100 W" in out
+        mock_nvml.assert_not_called()
+
+        with patch("gigamate.doctor.find_keyboard_hidraws", return_value=[]), \
+             patch("gigamate.doctor.session_details", return_value=({}, "active")), \
+             patch("gigamate.doctor.acpi_module_status") as mock_ms, \
+             patch("gigamate.dgpu_gate.get_status", return_value={}):
+            mock_ms.return_value.running_kernel = "test"
+            mock_ms.return_value.summary = "loaded"
+            mock_ms.return_value.hint = "ok"
+            rc = doctor.run_doctor()
+            assert rc == 0
+            doc_out = capsys.readouterr().out
+            assert "USB-C Power Budget" in doc_out
+            assert "100 W" in doc_out
+        mock_nvml.assert_not_called()

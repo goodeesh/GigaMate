@@ -345,6 +345,100 @@ class PowerEnvelopeBarWidget(QWidget):
         )
 
 
+class UsbcBudgetBarWidget(QWidget):
+    """Three-segment allocation bar for GPU / CPU / Safety Buffer on USB-C PD."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._gpu_w = 55
+        self._cpu_w = 20
+        self._buffer_w = 25
+        self._total_w = 100
+        self._accent = QColor(THEME.primary)
+        self._dimmed = True
+        self._trimmed = False
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(46)
+
+    def sizeHint(self) -> QSize:
+        return QSize(240, 46)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(140, 46)
+
+    def set_allocation(
+        self,
+        gpu_w: int,
+        cpu_w: int,
+        buffer_w: int,
+        total_w: int,
+        *,
+        accent_hex: str = THEME.primary,
+        dimmed: bool = False,
+        trimmed: bool = False,
+    ) -> None:
+        self._gpu_w = max(0, int(gpu_w))
+        self._cpu_w = max(0, int(cpu_w))
+        self._buffer_w = max(0, int(buffer_w))
+        self._total_w = max(0, int(total_w))
+        self._accent = QColor(accent_hex)
+        self._dimmed = bool(dimmed)
+        self._trimmed = bool(trimmed)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        bar_y = 6.0
+        bar_h = 12.0
+        track_rect = QRectF(0.0, bar_y, w, bar_h)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(THEME.surface_container_highest))
+        p.drawRoundedRect(track_rect, 6.0, 6.0)
+
+        denom = max(1, self._total_w, self._gpu_w + self._cpu_w + self._buffer_w)
+        alpha = 0.38 if self._dimmed else 1.0
+        gpu_px = min(w, w * (self._gpu_w / float(denom)))
+        cpu_px = min(max(0.0, w - gpu_px), w * (self._cpu_w / float(denom)))
+        buf_px = max(0.0, w - gpu_px - cpu_px)
+
+        if gpu_px > 0:
+            gpu_col = QColor(THEME.warning if self._trimmed else self._accent)
+            gpu_col.setAlphaF(alpha)
+            p.setBrush(gpu_col)
+            p.drawRoundedRect(QRectF(0.0, bar_y, gpu_px, bar_h), 4.0, 4.0)
+
+        if cpu_px > 0:
+            cpu_col = QColor(THEME.info)
+            cpu_col.setAlphaF(alpha)
+            p.setBrush(cpu_col)
+            p.drawRoundedRect(QRectF(gpu_px, bar_y, cpu_px, bar_h), 4.0, 4.0)
+
+        if buf_px > 0:
+            hatch = QColor(THEME.on_surface_muted)
+            p.setBrush(QBrush(hatch, Qt.BrushStyle.BDiagPattern))
+            p.setOpacity(0.18 if self._dimmed else 0.28)
+            p.drawRoundedRect(QRectF(gpu_px + cpu_px, bar_y, buf_px, bar_h), 4.0, 4.0)
+            p.setOpacity(1.0)
+
+        p.setPen(QColor(THEME.on_surface_variant))
+        font = QFont()
+        font.setPointSize(9)
+        p.setFont(font)
+        if self._total_w > 0:
+            legend = f"GPU {self._gpu_w} W  •  CPU {self._cpu_w} W  •  Buffer {self._buffer_w} W  ({self._total_w} W)"
+        else:
+            legend = "Waiting for USB-C PD contract / GPU caps"
+        p.drawText(
+            QRectF(0.0, bar_y + bar_h + 4.0, w, 18.0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            legend,
+        )
+
+
 class VfCurveWidget(QWidget):
     """Voltage/Frequency curve plot with Stock vs Tuned and Boost Cap clamp."""
 

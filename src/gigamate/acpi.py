@@ -170,6 +170,42 @@ class AcpiBackend(ABC):
         """Read current power profile index (0-3), or None if unknown."""
         ...
 
+    def has_cpu_ppt_control(self) -> bool:
+        """Whether writable CPU PPT sysfs controls are available."""
+        return False
+
+    def has_gpu_ctgp_control(self) -> bool:
+        """Whether writable GPU cTGP offset sysfs control is available."""
+        return False
+
+    def has_gpu_dynamic_boost_control(self) -> bool:
+        """Whether writable GPU Dynamic Boost sysfs control is available."""
+        return False
+
+    def set_cpu_ppt_limits(self, stapm_w: int, slow_w: int, fast_w: int) -> bool:
+        """Set CPU STAPM/Slow/Fast PPT limits in Watts."""
+        return False
+
+    def set_gpu_ctgp_offset(self, offset_w: int) -> bool:
+        """Set GPU configurable TGP offset above base (Watts)."""
+        return False
+
+    def set_gpu_dynamic_boost(self, enabled: bool) -> bool:
+        """Enable or disable NVIDIA Dynamic Boost via ACPI."""
+        return False
+
+    def read_usbc_adapter(self) -> Optional[bool]:
+        """Read EC USB-C adapter indicator if exposed, else None."""
+        return None
+
+    def read_npcf_ctgp_offset_w(self) -> Optional[int]:
+        """Read live NPCF cTGP offset (ACBT / 8) in Watts if exposed."""
+        return None
+
+    def read_npcf_dynamic_boost(self) -> Optional[bool]:
+        """Read live NPCF Dynamic Boost enabled flag (!DBAC) if exposed."""
+        return None
+
 
 # ──────────────────────────────────────────────
 # Mock backend (for testing)
@@ -515,6 +551,61 @@ class ModuleBackend(AcpiBackend):
         except (OSError, ValueError, IOError):
             return None
 
+    def _write_sysfs_int(self, name: str, val: int) -> bool:
+        """Write an integer to a sysfs file, returning True on success."""
+        path = GIGAMATE_ACPI_SYSFS / name
+        try:
+            path.write_text(f"{int(val)}\n")
+            return True
+        except (OSError, IOError):
+            return False
+
+    def has_cpu_ppt_control(self) -> bool:
+        return all(
+            (GIGAMATE_ACPI_SYSFS / name).exists()
+            for name in ("cpu_stapm_w", "cpu_slow_ppt_w", "cpu_fast_ppt_w")
+        )
+
+    def has_gpu_ctgp_control(self) -> bool:
+        return (GIGAMATE_ACPI_SYSFS / "gpu_ctgp_offset_w").exists()
+
+    def has_gpu_dynamic_boost_control(self) -> bool:
+        return (GIGAMATE_ACPI_SYSFS / "gpu_dynamic_boost").exists()
+
+    def set_cpu_ppt_limits(self, stapm_w: int, slow_w: int, fast_w: int) -> bool:
+        if not self.has_cpu_ppt_control():
+            return False
+        s_clamped = max(10, min(120, int(stapm_w)))
+        l_clamped = max(10, min(120, int(slow_w)))
+        f_clamped = max(10, min(120, int(fast_w)))
+        return (
+            self._write_sysfs_int("cpu_stapm_w", s_clamped)
+            and self._write_sysfs_int("cpu_slow_ppt_w", l_clamped)
+            and self._write_sysfs_int("cpu_fast_ppt_w", f_clamped)
+        )
+
+    def set_gpu_ctgp_offset(self, offset_w: int) -> bool:
+        if not self.has_gpu_ctgp_control():
+            return False
+        return self._write_sysfs_int("gpu_ctgp_offset_w", max(0, min(10, int(offset_w))))
+
+    def set_gpu_dynamic_boost(self, enabled: bool) -> bool:
+        if not self.has_gpu_dynamic_boost_control():
+            return False
+        return self._write_sysfs_int("gpu_dynamic_boost", 1 if enabled else 0)
+
+    def read_usbc_adapter(self) -> Optional[bool]:
+        val = self._read_sysfs_int("usbc_adapter")
+        return bool(val) if val in (0, 1) else None
+
+    def read_npcf_ctgp_offset_w(self) -> Optional[int]:
+        val = self._read_sysfs_int("npcf_acbt")
+        return (val // 8) if (val is not None and val >= 0) else None
+
+    def read_npcf_dynamic_boost(self) -> Optional[bool]:
+        val = self._read_sysfs_int("npcf_dbac")
+        return (val == 0) if val in (0, 1) else None
+
 
 # ──────────────────────────────────────────────
 # AcpiController — unified interface
@@ -650,6 +741,58 @@ class AcpiController:
             return None
         except Exception:
             return None
+
+    def _call_backend_bool(self, method: str, *args) -> bool:
+        if self._backend is None:
+            return False
+        fn = getattr(self._backend, method, None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn(*args))
+        except Exception:
+            return False
+
+    def _call_backend_opt(self, method: str):
+        if self._backend is None:
+            return None
+        fn = getattr(self._backend, method, None)
+        if fn is None:
+            return None
+        try:
+            return fn()
+        except Exception:
+            return None
+
+    def has_cpu_ppt_control(self) -> bool:
+        return self._call_backend_bool("has_cpu_ppt_control")
+
+    def has_gpu_ctgp_control(self) -> bool:
+        return self._call_backend_bool("has_gpu_ctgp_control")
+
+    def has_gpu_dynamic_boost_control(self) -> bool:
+        return self._call_backend_bool("has_gpu_dynamic_boost_control")
+
+    def set_cpu_ppt_limits(self, stapm_w: int, slow_w: int, fast_w: int) -> bool:
+        return self._call_backend_bool("set_cpu_ppt_limits", stapm_w, slow_w, fast_w)
+
+    def set_gpu_ctgp_offset(self, offset_w: int) -> bool:
+        return self._call_backend_bool("set_gpu_ctgp_offset", offset_w)
+
+    def set_gpu_dynamic_boost(self, enabled: bool) -> bool:
+        return self._call_backend_bool("set_gpu_dynamic_boost", enabled)
+
+    def read_usbc_adapter(self) -> Optional[bool]:
+        val = self._call_backend_opt("read_usbc_adapter")
+        return val if isinstance(val, bool) else None
+
+    def read_npcf_ctgp_offset_w(self) -> Optional[int]:
+        val = self._call_backend_opt("read_npcf_ctgp_offset_w")
+        return val if isinstance(val, int) and not isinstance(val, bool) else None
+
+    def read_npcf_dynamic_boost(self) -> Optional[bool]:
+        val = self._call_backend_opt("read_npcf_dynamic_boost")
+        return val if isinstance(val, bool) else None
 
 
 # ──────────────────────────────────────────────

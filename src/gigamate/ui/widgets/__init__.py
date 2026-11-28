@@ -25,6 +25,7 @@ from gigamate.ui.widgets.visuals import (
     PowerEnvelopeBarWidget,
     SparklineWidget,
     SpinningFanIcon,
+    UsbcBudgetBarWidget,
     VfCurveWidget,
     highlight_widget,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "PowerEnvelopeBarWidget",
     "SparklineWidget",
     "SpinningFanIcon",
+    "UsbcBudgetBarWidget",
     "VfCurveWidget",
     "highlight_widget",
 ]

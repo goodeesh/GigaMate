@@ -41,11 +41,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ... import dgpu_gate, dgpu_tune
+from ... import dgpu_gate, dgpu_tune, usbc_power
+from ...acpi import GIGAMATE_ACPI_SYSFS
 from ...battery import get_battery_manager
 from ...config import load as load_config, update_config
 from ...gpu import get_gpu_state, gpu_status_text
 from .. import icons
+from ..flow_layout import FlowContainer
 from ..theme import THEME
 from ..widgets import (
     LinkPillButton,
@@ -57,6 +59,8 @@ from ..widgets import (
     M3SegmentedBar,
     M3Slider,
     M3StatusPill,
+    M3Switch,
+    UsbcBudgetBarWidget,
     VfCurveWidget,
 )
 
@@ -82,6 +86,11 @@ class GpuPage(QWidget):
         self._uv_cfg_key = None
         self._max_cfg_key = None
         self._mem_offset_cfg_key = None
+        self._usbc_cfg_key = None
+        self._usbc_buf_cfg_key = None
+        self._usbc_env: Optional[usbc_power.BudgetEnvelope] = None
+        self._usbc_preview_total_w: int = 100
+        self._usbc_preview_mode: bool = False
         # NVML probe cache + wake-transition tracking. Probing is an NVML open,
         # so it is limited to reloads and wake transitions (see _recompute_normal_max).
         self._probed: dict = {}
@@ -104,6 +113,10 @@ class GpuPage(QWidget):
         self._gate_timer = QTimer(self)
         self._gate_timer.setInterval(100)
         self._gate_timer.timeout.connect(self._collect_gate_result)
+        self._usbc_save_timer = QTimer(self)
+        self._usbc_save_timer.setSingleShot(True)
+        self._usbc_save_timer.setInterval(300)
+        self._usbc_save_timer.timeout.connect(self._commit_usbc_settings)
         self._init_ui()
 
         # Prime the watcher state before the first timer tick so the dGPU-asleep
@@ -123,6 +136,8 @@ class GpuPage(QWidget):
         self._uv_cfg_key = None
         self._max_cfg_key = None
         self._mem_offset_cfg_key = None
+        self._usbc_cfg_key = None
+        self._usbc_buf_cfg_key = None
         # Load the watcher state file first so self._hw is populated before the
         # first _refresh. This ensures the dGPU-asleep fallback (reading
         # supported/device from the state file rather than from an NVML probe)
@@ -214,6 +229,8 @@ class GpuPage(QWidget):
         self._update_vf_curve()
         if hasattr(self, "apply_bar"):
             self._update_apply_bar_style(dirty=bool(self._staged_controls()) and not self._is_gated)
+        if hasattr(self, "usbc_budget_card"):
+            self._sync_usbc_budget_card()
 
     def _update_vf_curve(self) -> None:
         if not hasattr(self, "vf_curve"):
@@ -251,6 +268,7 @@ class GpuPage(QWidget):
         layout.addWidget(header)
 
         layout.addWidget(self._build_power_gate_card())
+        layout.addWidget(self._build_usbc_budget_card())
         layout.addWidget(self._build_core_clock_card())
         layout.addWidget(self._build_apply_bar())
         layout.addStretch()
@@ -371,6 +389,478 @@ class GpuPage(QWidget):
 
         self._sync_power_gate_card(recheck_supported=True)
         return self.power_gate_card
+
+    def _build_usbc_budget_card(self) -> M3Card:
+        self.usbc_budget_card = M3Card()
+        box = QVBoxLayout(self.usbc_budget_card)
+        box.setContentsMargins(18, 16, 18, 16)
+        box.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        usbc_icon = QLabel()
+        usbc_icon.setFixedSize(18, 18)
+        usbc_icon.setPixmap(icons.render_icon_pixmap("bolt", color=THEME.primary, size=18))
+        usbc_icon.setStyleSheet("background: transparent;")
+        hdr.addWidget(usbc_icon)
+
+        title = QLabel("USB-C POWER BUDGET")
+        title.setProperty("class", "SectionLabel")
+        hdr.addWidget(title)
+        hdr.addWidget(
+            M3IconHelpButton(
+                "Opt-in USB-C PD power budget:\n"
+                "• Overrides NVIDIA's 30 W \"Undersized Power Source\" cap when connected to a "
+                ">= 90 W USB-C PD charger.\n"
+                "• Charger wattage is detected read-only with a configurable 15%–25% safety buffer "
+                "(default 25%, min 15 W).\n"
+                "• Adjust the GPU <-> CPU split below; sustained battery drain (> 3 W for 5 s) "
+                "automatically steps power down safely."
+            )
+        )
+        hdr.addStretch()
+
+        self.usbc_switch = M3Switch()
+        self.usbc_switch.setToolTip(
+            "Opt in to override NVIDIA's 30 W cap on >= 90 W USB-C PD chargers"
+        )
+        self.usbc_switch.toggled.connect(self._on_usbc_toggled)
+        hdr.addWidget(self.usbc_switch)
+        box.addLayout(hdr)
+
+        pills = FlowContainer(spacing=8)
+        self.usbc_charger_pill = M3StatusPill("Detected: Barrel AC", tone="neutral")
+        self.usbc_state_pill = M3StatusPill("Off · Stock 30 W cap on USB-C", tone="neutral")
+        pills.addWidget(self.usbc_charger_pill)
+        pills.addWidget(self.usbc_state_pill)
+        box.addWidget(pills)
+
+        self.usbc_budget_bar = UsbcBudgetBarWidget()
+        box.addWidget(self.usbc_budget_bar)
+
+        split_hdr = QHBoxLayout()
+        split_hdr.setSpacing(8)
+        split_lbl = QLabel("GPU ↔ CPU Split")
+        split_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+        )
+        split_hdr.addWidget(split_lbl)
+        self.usbc_split_val = QLabel("55 W GPU / 20 W CPU")
+        self.usbc_split_val.setProperty("class", "ValueReadoutPill")
+        self.usbc_split_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        split_hdr.addWidget(self.usbc_split_val)
+        split_hdr.addStretch()
+        box.addLayout(split_hdr)
+
+        self.usbc_split_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
+        self.usbc_split_slider.setRange(50, 60)
+        self.usbc_split_slider.setSingleStep(1)
+        self.usbc_split_slider.setPageStep(5)
+        self.usbc_split_slider.setValue(55)
+        self.usbc_split_slider.valueChanged.connect(self._on_usbc_split_changed)
+        self.usbc_split_slider.sliderReleased.connect(self._commit_usbc_settings)
+        box.addWidget(self.usbc_split_slider)
+
+        buf_hdr = QHBoxLayout()
+        buf_hdr.setSpacing(8)
+        buf_lbl = QLabel("Safety Buffer")
+        buf_lbl.setStyleSheet(
+            f"color: {THEME.on_surface}; font-size: {THEME.text_section}px; font-weight: 600; background: transparent;"
+        )
+        buf_hdr.addWidget(buf_lbl)
+        self.usbc_buffer_val = QLabel("25% (25 W)")
+        self.usbc_buffer_val.setProperty("class", "ValueReadoutPill")
+        self.usbc_buffer_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        buf_hdr.addWidget(self.usbc_buffer_val)
+        buf_hdr.addStretch()
+        box.addLayout(buf_hdr)
+
+        self.usbc_buffer_slider = M3Slider(Qt.Orientation.Horizontal, ignore_wheel=True)
+        self.usbc_buffer_slider.setRange(usbc_power.MIN_BUFFER_PCT, usbc_power.MAX_BUFFER_PCT)
+        self.usbc_buffer_slider.setSingleStep(1)
+        self.usbc_buffer_slider.setPageStep(5)
+        self.usbc_buffer_slider.setValue(usbc_power.DEFAULT_BUFFER_PCT)
+        self.usbc_buffer_slider.valueChanged.connect(self._on_usbc_buffer_changed)
+        self.usbc_buffer_slider.sliderReleased.connect(self._commit_usbc_settings)
+        box.addWidget(self.usbc_buffer_slider)
+
+        self.usbc_status_lbl = QLabel("")
+        self.usbc_status_lbl.setStyleSheet(
+            f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+        )
+        self.usbc_status_lbl.setWordWrap(True)
+        box.addWidget(self.usbc_status_lbl)
+
+        note_row = QHBoxLayout()
+        note_row.setSpacing(6)
+        note_icon = QLabel()
+        note_icon.setFixedSize(14, 14)
+        note_icon.setPixmap(icons.render_icon_pixmap("info", color=THEME.on_surface_muted, size=14))
+        note_icon.setStyleSheet("background: transparent;")
+        note_row.addWidget(note_icon, alignment=Qt.AlignmentFlag.AlignTop)
+        usbc_note = QLabel(
+            "Charger wattage is auto-detected read-only; adjust the safety buffer (15%–25%, "
+            "default 25%), and sustained battery drain triggers automatic step-down."
+        )
+        usbc_note.setStyleSheet(
+            f"color: {THEME.on_surface_muted}; font-size: {THEME.text_overline}px; background: transparent;"
+        )
+        usbc_note.setWordWrap(True)
+        note_row.addWidget(usbc_note, 1)
+        box.addLayout(note_row)
+
+        self._usbc_hw_caps: tuple = (None, None, False, False, False)
+        self._sync_usbc_budget_card()
+        return self.usbc_budget_card
+
+    def _on_usbc_toggled(self, checked: bool) -> None:
+        if checked and not load_config().get("usbc_power_budget_disclaimer_accepted", False):
+            reply = QMessageBox.warning(
+                self,
+                usbc_power.DISCLAIMER_TITLE,
+                usbc_power.DISCLAIMER_TEXT,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self.usbc_switch.blockSignals(True)
+                self.usbc_switch.setChecked(False)
+                self.usbc_switch.blockSignals(False)
+                return
+            update_config(
+                lambda c: {
+                    **c,
+                    "usbc_power_budget_disclaimer_accepted": True,
+                    "usbc_power_budget_enabled": True,
+                }
+            )
+        else:
+            update_config(lambda c: {**c, "usbc_power_budget_enabled": bool(checked)})
+        self._sync_usbc_budget_card()
+
+    def _on_usbc_split_changed(self, value: int) -> None:
+        if self._usbc_env is not None and self._usbc_env.supported:
+            gpu_w, cpu_w = usbc_power.clamp_split(value, self._usbc_env)
+            buf_w = self._usbc_env.buffer_w
+            total_w = self._usbc_preview_total_w
+        else:
+            gpu_w = int(value)
+            cpu_w = 0
+            buf_w = 0
+            total_w = 0
+        self.usbc_split_val.setText(f"{gpu_w} W GPU / {cpu_w} W CPU")
+        self.usbc_budget_bar.set_allocation(
+            gpu_w,
+            cpu_w,
+            buf_w,
+            total_w,
+            accent_hex=self._accent_hex,
+            dimmed=self._usbc_preview_mode or not self.usbc_switch.isChecked(),
+        )
+        self._usbc_save_timer.start()
+
+    def _on_usbc_buffer_changed(self, value: int) -> None:
+        pct = max(usbc_power.MIN_BUFFER_PCT, min(usbc_power.MAX_BUFFER_PCT, int(value)))
+        tgp_w, max_w, has_ctgp, has_cpu_ppt, has_dyn_boost = self._usbc_hw_caps
+        calc_w = self._usbc_preview_total_w if self._usbc_preview_total_w > 0 else None
+        env = usbc_power.compute_budget_envelope(
+            calc_w,
+            tgp_w,
+            max_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_dyn_boost,
+            has_nvidia_gpu=True,
+            buffer_pct=pct,
+        )
+        self._usbc_env = env
+        self.usbc_buffer_val.setText(
+            f"{env.buffer_pct}% ({env.buffer_w} W)" if env.buffer_w > 0 else f"{env.buffer_pct}%"
+        )
+        if env.supported:
+            can_slide = env.gpu_max_w > env.gpu_min_w
+            self.usbc_split_slider.setEnabled(can_slide)
+            if not self.usbc_split_slider.isSliderDown():
+                self.usbc_split_slider.blockSignals(True)
+                self.usbc_split_slider.setRange(env.gpu_min_w, env.gpu_max_w)
+                self.usbc_split_slider.blockSignals(False)
+            gpu_w, cpu_w = usbc_power.clamp_split(self.usbc_split_slider.value(), env)
+            total_w = int(calc_w or 0)
+        else:
+            self.usbc_split_slider.setEnabled(False)
+            gpu_w = env.gpu_min_w
+            cpu_w = max(0, env.silicon_budget_w - gpu_w) if env.silicon_budget_w else 0
+            total_w = int(calc_w or 0) if env.buffer_w else 0
+        self.usbc_split_val.setText(f"{gpu_w} W GPU / {cpu_w} W CPU")
+        self.usbc_budget_bar.set_allocation(
+            gpu_w,
+            cpu_w,
+            env.buffer_w,
+            total_w,
+            accent_hex=self._accent_hex,
+            dimmed=self._usbc_preview_mode or not self.usbc_switch.isChecked(),
+        )
+        self._usbc_save_timer.start()
+
+    def _commit_usbc_settings(self) -> None:
+        if self._usbc_save_timer.isActive():
+            self._usbc_save_timer.stop()
+        val = int(self.usbc_split_slider.value())
+        if self._usbc_env is not None and self._usbc_env.supported:
+            val, _ = usbc_power.clamp_split(val, self._usbc_env)
+        buf_pct = max(
+            usbc_power.MIN_BUFFER_PCT,
+            min(usbc_power.MAX_BUFFER_PCT, int(self.usbc_buffer_slider.value())),
+        )
+        update_config(
+            lambda c: {**c, "usbc_gpu_budget_w": val, "usbc_buffer_pct": buf_pct}
+        )
+        if self._usbc_env is not None and self._usbc_env.supported:
+            self._usbc_cfg_key = (val, self._usbc_env.gpu_min_w, self._usbc_env.gpu_max_w)
+        self._usbc_buf_cfg_key = buf_pct
+
+    def _commit_usbc_split(self) -> None:
+        self._commit_usbc_settings()
+
+    def _sync_usbc_budget_card(self, gpu=None) -> None:
+        if not hasattr(self, "usbc_budget_card"):
+            return
+        gpu = gpu if gpu is not None else get_gpu_state()
+        visible = bool(gpu.present and gpu.vendor == "nvidia")
+        self.usbc_budget_card.setVisible(visible)
+        if not visible:
+            return
+
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        st = usbc_power.read_state_file()
+        src = usbc_power.detect_power_source()
+        caps = usbc_power.read_cached_gpu_caps_only()
+
+        tgp_w = st.get("default_tgp_w") or caps.default_tgp_w
+        max_w = st.get("max_constraint_w") or caps.max_constraint_w
+        has_cpu_ppt = all(
+            (GIGAMATE_ACPI_SYSFS / n).exists()
+            for n in ("cpu_stapm_w", "cpu_slow_ppt_w", "cpu_fast_ppt_w")
+        )
+        has_ctgp = (GIGAMATE_ACPI_SYSFS / "gpu_ctgp_offset_w").exists()
+        has_dyn_boost = (GIGAMATE_ACPI_SYSFS / "gpu_dynamic_boost").exists()
+        self._usbc_hw_caps = (tgp_w, max_w, has_ctgp, has_cpu_ppt, has_dyn_boost)
+
+        enabled = bool(cfg.get("usbc_power_budget_enabled", False))
+        self.usbc_switch.blockSignals(True)
+        self.usbc_switch.setChecked(enabled)
+        self.usbc_switch.blockSignals(False)
+
+        saved_buf_pct = int(
+            cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT
+        )
+        saved_buf_pct = max(
+            usbc_power.MIN_BUFFER_PCT, min(usbc_power.MAX_BUFFER_PCT, saved_buf_pct)
+        )
+        if not self.usbc_buffer_slider.isSliderDown() and self._usbc_buf_cfg_key != saved_buf_pct:
+            self.usbc_buffer_slider.blockSignals(True)
+            self.usbc_buffer_slider.setValue(saved_buf_pct)
+            self.usbc_buffer_slider.blockSignals(False)
+            self._usbc_buf_cfg_key = saved_buf_pct
+
+        is_usbc_pd = src.kind == "usbc_pd"
+        if is_usbc_pd:
+            if src.detected_wattage_w is not None:
+                if src.detected_wattage_w >= usbc_power.MIN_USBC_PD_WATTS:
+                    self.usbc_charger_pill.setText(f"Detected: {src.detected_wattage_w} W USB-C PD")
+                    self.usbc_charger_pill.set_tone("info")
+                else:
+                    self.usbc_charger_pill.setText(
+                        f"Detected: {src.detected_wattage_w} W USB-C PD (<{usbc_power.MIN_USBC_PD_WATTS} W)"
+                    )
+                    self.usbc_charger_pill.set_tone("warning")
+            else:
+                self.usbc_charger_pill.setText("Detected: USB-C PD (unknown W)")
+                self.usbc_charger_pill.set_tone("warning")
+        elif src.kind == "barrel_ac":
+            self.usbc_charger_pill.setText("Detected: Barrel AC")
+            self.usbc_charger_pill.set_tone("neutral")
+        else:
+            self.usbc_charger_pill.setText("Detected: Battery")
+            self.usbc_charger_pill.set_tone("neutral")
+
+        preview_mode = not is_usbc_pd
+        calc_w = src.detected_wattage_w if is_usbc_pd else 100
+        active_buf_pct = int(self.usbc_buffer_slider.value())
+        env = usbc_power.compute_budget_envelope(
+            calc_w,
+            tgp_w,
+            max_w,
+            has_ctgp_ctrl=has_ctgp,
+            has_cpu_ppt_ctrl=has_cpu_ppt,
+            has_dyn_boost_ctrl=has_dyn_boost,
+            has_nvidia_gpu=True,
+            buffer_pct=active_buf_pct,
+        )
+        self._usbc_env = env
+        self._usbc_preview_mode = preview_mode
+        self._usbc_preview_total_w = int(calc_w or 0)
+        self.usbc_buffer_val.setText(
+            f"{env.buffer_pct}% ({env.buffer_w} W)" if env.buffer_w > 0 else f"{env.buffer_pct}%"
+        )
+
+        saved_gpu_w = int(cfg.get("usbc_gpu_budget_w", env.default_gpu_w or 55) or 55)
+        if env.supported:
+            target_gpu_w, _ = usbc_power.clamp_split(saved_gpu_w, env)
+            can_slide = env.gpu_max_w > env.gpu_min_w
+            self.usbc_split_slider.setEnabled(can_slide)
+            if not self.usbc_split_slider.isSliderDown():
+                if (
+                    self.usbc_split_slider.minimum() != env.gpu_min_w
+                    or self.usbc_split_slider.maximum() != env.gpu_max_w
+                ):
+                    self.usbc_split_slider.blockSignals(True)
+                    self.usbc_split_slider.setRange(env.gpu_min_w, env.gpu_max_w)
+                    self.usbc_split_slider.blockSignals(False)
+                if self._usbc_cfg_key != (target_gpu_w, env.gpu_min_w, env.gpu_max_w):
+                    self.usbc_split_slider.blockSignals(True)
+                    self.usbc_split_slider.setValue(target_gpu_w)
+                    self.usbc_split_slider.blockSignals(False)
+                    self._usbc_cfg_key = (target_gpu_w, env.gpu_min_w, env.gpu_max_w)
+            disp_gpu_w, disp_cpu_w = usbc_power.clamp_split(self.usbc_split_slider.value(), env)
+        else:
+            self.usbc_split_slider.setEnabled(False)
+            disp_gpu_w = env.gpu_min_w
+            disp_cpu_w = max(0, env.silicon_budget_w - disp_gpu_w) if env.silicon_budget_w else 0
+
+        self.usbc_split_val.setText(f"{disp_gpu_w} W GPU / {disp_cpu_w} W CPU")
+
+        daemon_mode = str(st.get("mode") or "")
+        trimmed = False
+        bar_gpu_w = disp_gpu_w
+        bar_cpu_w = disp_cpu_w
+        dimmed = preview_mode or not enabled
+
+        bat_note = ""
+        if src.bat_present and src.bat_power_w is not None:
+            bat_note = f"Battery: {src.bat_status} ({src.bat_power_w:+.1f} W)"
+
+        if not enabled:
+            self.usbc_state_pill.setText("Off · Stock 30 W cap on USB-C")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Opt-in disabled — stock NVIDIA 30 W Undersized limit applies on USB-C PD."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif not env.supported and env.reason == "gpu_tgp_exceeds_budget":
+            self.usbc_state_pill.setText("Incompatible GPU TGP")
+            self.usbc_state_pill.set_tone("error")
+            self.usbc_status_lbl.setText(
+                f"Base GPU TGP ({tgp_w} W) exceeds the safe silicon budget "
+                f"({env.silicon_budget_w - env.cpu_floor_w} W max GPU on {calc_w} W charger); "
+                "stock 30 W safety cap kept."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.error}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif not env.supported and env.reason == "gpu_tgp_unknown":
+            self.usbc_state_pill.setText("Wake dGPU once to read TGP")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Base GPU TGP not cached yet — wakes cleanly next time the dGPU becomes active."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and not env.supported:
+            self.usbc_state_pill.setText(f"Charger < {usbc_power.MIN_USBC_PD_WATTS} W · Stock 30 W")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(
+                f"Detected USB-C charger is below {usbc_power.MIN_USBC_PD_WATTS} W; keeping stock 30 W cap."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("active") and daemon_mode == "auto_trimmed":
+            trimmed = True
+            dimmed = False
+            if not self.usbc_split_slider.isSliderDown():
+                bar_gpu_w = int(st.get("applied_gpu_w") or disp_gpu_w)
+                bar_cpu_w = int(st.get("applied_cpu_w") or disp_cpu_w)
+            aux_s = st.get("aux_state")
+            self.usbc_state_pill.setText(f"Auto-Trimmed · {bar_gpu_w} W GPU (P{aux_s})")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(
+                f"Battery drain protection stepped power down ({bar_gpu_w} W GPU + {bar_cpu_w} W CPU). "
+                + (bat_note or "")
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("active") and daemon_mode == "active":
+            dimmed = False
+            if not self.usbc_split_slider.isSliderDown():
+                bar_gpu_w = int(st.get("applied_gpu_w") or disp_gpu_w)
+                bar_cpu_w = int(st.get("applied_cpu_w") or disp_cpu_w)
+            self.usbc_state_pill.setText(f"Active · {bar_gpu_w} W GPU + {bar_cpu_w} W CPU")
+            self.usbc_state_pill.set_tone("success")
+            ctrl_note = "EC/NPCF limits enforced" if (has_ctgp and has_cpu_ppt) else "NVRM P0 + Profile 0"
+            self.usbc_status_lbl.setText(
+                f"Unlocked above 30 W cap ({ctrl_note}). " + (bat_note or "")
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.success}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and daemon_mode == "settling":
+            self.usbc_state_pill.setText("Settling PD contract…")
+            self.usbc_state_pill.set_tone("info")
+            self.usbc_status_lbl.setText("Waiting for USB-C PD negotiation and EC events to settle.")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.info}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and gpu.gated_off:
+            self.usbc_state_pill.setText("Standby · dGPU Gated Off")
+            self.usbc_state_pill.set_tone("gated")
+            self.usbc_status_lbl.setText("Engages automatically once the dGPU powers back on.")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.gated}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and not self._gpu_awake:
+            self.usbc_state_pill.setText("Standby · Ready when dGPU wakes")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                "Sleep-safe: waiting for the dGPU to wake before applying USB-C PD budget."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        elif is_usbc_pd and st.get("last_error"):
+            self.usbc_state_pill.setText("Pending / Retry")
+            self.usbc_state_pill.set_tone("warning")
+            self.usbc_status_lbl.setText(f"Daemon retry pending: {st.get('last_error')}")
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.warning}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+        else:
+            src_label = "Barrel AC" if src.kind == "barrel_ac" else "Battery"
+            self.usbc_state_pill.setText(f"Standby · On {src_label}")
+            self.usbc_state_pill.set_tone("neutral")
+            self.usbc_status_lbl.setText(
+                f"Enabled for >= {usbc_power.MIN_USBC_PD_WATTS} W USB-C PD (showing 100 W preview while on {src_label})."
+            )
+            self.usbc_status_lbl.setStyleSheet(
+                f"color: {THEME.on_surface_variant}; font-size: {THEME.text_caption}px; font-weight: 500; background: transparent;"
+            )
+
+        self.usbc_budget_bar.set_allocation(
+            bar_gpu_w,
+            bar_cpu_w,
+            env.buffer_w,
+            self._usbc_preview_total_w if env.supported else 0,
+            accent_hex=self._accent_hex,
+            dimmed=dimmed,
+            trimmed=trimmed,
+        )
 
     def _build_core_clock_card(self) -> M3Card:
         card = M3Card()
@@ -1271,6 +1761,7 @@ class GpuPage(QWidget):
                 wedged = False
         # Free sysfs read; every NVML decision on this page keys off it.
         self._gpu_awake = bool(gpu.present and not gated and gpu.status == "active")
+        self._sync_usbc_budget_card(gpu=gpu)
         if not gpu.present:
             self.gpu_state_lbl.setText("Not present (iGPU only)")
             self.gpu_state_lbl.setStyleSheet(

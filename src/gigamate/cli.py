@@ -405,6 +405,19 @@ def cmd_gpu_status(args) -> None:
     elif gpu.smartshift_supported:
         bias_str = f" (bias: {gpu.smartshift_bias:+d})" if gpu.smartshift_bias is not None else ""
         print(f"  SmartShift:   Supported{bias_str}")
+    try:
+        from . import usbc_power
+
+        cfg = load_config()
+        src = usbc_power.detect_power_source()
+        if bool(cfg.get("usbc_power_budget_enabled")) or src.kind == "usbc_pd":
+            st = usbc_power.read_state_file()
+            w_str = f"{src.detected_wattage_w} W " if src.detected_wattage_w else ""
+            en_str = "on" if cfg.get("usbc_power_budget_enabled") else "off (opt-in)"
+            mode_str = st.get("mode") or ("active" if src.kind == "usbc_pd" else "standby")
+            print(f"  USB-C Budget: {en_str} ({w_str}{src.kind}, state={mode_str})")
+    except Exception:
+        pass
 
 
 def _dgpu_status_with_applied(dgpu_tune, st):
@@ -821,6 +834,122 @@ def cmd_gpu_power(args) -> None:
 
     print("Unknown action; use: status, off, on, eco, auto, optimus, probe, sync", file=sys.stderr)
     sys.exit(2)
+
+
+def cmd_gpu_usbc_budget(args) -> None:
+    """Inspect or configure the opt-in USB-C PD Power Budget."""
+    from . import usbc_power
+
+    action_raw = getattr(args, "action", None) or "status"
+    value_raw = getattr(args, "value", None)
+    action = str(action_raw).strip().lower()
+
+    if action == "on":
+        update_config(
+            lambda c: {
+                **c,
+                "usbc_power_budget_enabled": True,
+                "usbc_power_budget_disclaimer_accepted": True,
+            }
+        )
+        print("USB-C PD Power Budget: enabled (opt-in).")
+        print("  Takes effect automatically within ~2 s while on a >= 90 W USB-C PD charger.")
+        return
+
+    if action == "off":
+        update_config(lambda c: {**c, "usbc_power_budget_enabled": False})
+        print("USB-C PD Power Budget: disabled (stock 30 W NVIDIA safety cap restored on USB-C PD).")
+        return
+
+    if action == "set" or action_raw.lstrip("+-").isdigit():
+        raw_w = value_raw if action == "set" else action_raw
+        try:
+            watts = int(str(raw_w))
+        except (TypeError, ValueError):
+            print("Invalid GPU budget: expected an integer in 30..150 (e.g. 'set 55').", file=sys.stderr)
+            sys.exit(2)
+        if not (30 <= watts <= 150):
+            print(f"GPU budget {watts} W is out of valid range (30..150).", file=sys.stderr)
+            sys.exit(2)
+        update_config(lambda c: {**c, "usbc_gpu_budget_w": watts})
+        print(f"USB-C GPU target split saved: {watts} W (clamped to active charger/GPU envelope).")
+        return
+
+    if action == "buffer":
+        try:
+            pct = int(str(value_raw))
+        except (TypeError, ValueError):
+            print("Invalid safety buffer: expected an integer percentage in 15..25 (e.g. 'buffer 20').", file=sys.stderr)
+            sys.exit(2)
+        if not (usbc_power.MIN_BUFFER_PCT <= pct <= usbc_power.MAX_BUFFER_PCT):
+            print(
+                f"Safety buffer {pct}% is out of valid range ({usbc_power.MIN_BUFFER_PCT}..{usbc_power.MAX_BUFFER_PCT}%).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        update_config(lambda c: {**c, "usbc_buffer_pct": pct})
+        print(f"USB-C safety buffer saved: {pct}% (rest goes to GPU + CPU split).")
+        return
+
+    if action != "status":
+        print("Unknown action; use: status, on, off, set <gpu_w>, buffer <15..25>, or <gpu_w>", file=sys.stderr)
+        sys.exit(2)
+
+    cfg = load_config()
+    src = usbc_power.detect_power_source()
+    gpu = get_gpu_state()
+    ctrl = AcpiController()
+    caps = usbc_power.read_cached_gpu_caps_only()
+    st = usbc_power.read_state_file()
+    tgp_w = st.get("default_tgp_w") or caps.default_tgp_w
+    max_w = st.get("max_constraint_w") or caps.max_constraint_w
+    has_cpu_ppt = ctrl.available and ctrl.has_cpu_ppt_control()
+    has_ctgp = ctrl.available and ctrl.has_gpu_ctgp_control()
+    has_db = ctrl.available and ctrl.has_gpu_dynamic_boost_control()
+    fw_usbc = ctrl.read_usbc_adapter() if ctrl.available else src.firmware_usbc_flag
+    buf_pct = int(cfg.get("usbc_buffer_pct", usbc_power.DEFAULT_BUFFER_PCT) or usbc_power.DEFAULT_BUFFER_PCT)
+    env = usbc_power.compute_budget_envelope(
+        src.detected_wattage_w,
+        tgp_w,
+        max_w,
+        has_ctgp_ctrl=has_ctgp,
+        has_cpu_ppt_ctrl=has_cpu_ppt,
+        has_dyn_boost_ctrl=has_db,
+        has_nvidia_gpu=bool(gpu.present and gpu.vendor == "nvidia"),
+        buffer_pct=buf_pct,
+    )
+
+    print("GigaMate — USB-C PD Power Budget")
+    print()
+    print(f"  Opt-in:       {'enabled' if cfg.get('usbc_power_budget_enabled') else 'disabled'}")
+    print(f"  Target GPU:   {cfg.get('usbc_gpu_budget_w', 55)} W")
+    print(f"  Safety buffer:{buf_pct:3d}% ({usbc_power.MIN_BUFFER_PCT}..{usbc_power.MAX_BUFFER_PCT}%)")
+    w_info = f"{src.detected_wattage_w} W ({src.wattage_source})" if src.detected_wattage_w else "unknown"
+    curr_info = f", {src.negotiated_current_a:.2f} A" if src.negotiated_current_a is not None else ""
+    print(f"  Power source: {src.kind} (charger={w_info}{curr_info}, ac_online={src.ac_online})")
+    print(
+        f"  ACPI ctrls:   cpu_ppt={'yes' if has_cpu_ppt else 'no'}, "
+        f"gpu_ctgp={'yes' if has_ctgp else 'no'}, "
+        f"dyn_boost={'yes' if has_db else 'no'}, "
+        f"usbc_adapter={fw_usbc}"
+    )
+    if tgp_w is not None:
+        print(f"  GPU VBIOS:    base TGP {tgp_w} W" + (f" (max {max_w} W)" if max_w else ""))
+    if env.supported:
+        g_w, c_w = usbc_power.clamp_split(int(cfg.get("usbc_gpu_budget_w", env.default_gpu_w)), env)
+        print(
+            f"  Envelope:     {env.buffer_w} W buffer ({env.buffer_pct}%) + {env.silicon_budget_w} W silicon "
+            f"(GPU {env.gpu_min_w}..{env.gpu_max_w} W -> split {g_w} W GPU / {c_w} W CPU)"
+        )
+    elif src.kind == "usbc_pd":
+        print(f"  Envelope:     unsupported ({env.reason})")
+    else:
+        print("  Envelope:     standby (waiting for >= 90 W USB-C PD charger)")
+    if st:
+        applied = f"{st.get('applied_gpu_w')} W GPU / {st.get('applied_cpu_w')} W CPU" if st.get("active") else "inactive"
+        print(f"  Daemon state: {st.get('mode', 'unknown')} ({applied})")
+        if st.get("last_error"):
+            print(f"  Last error:   {st['last_error']}")
 
 
 # ────────────────────────────────────────────
@@ -1857,6 +1986,14 @@ def _subcommand_main() -> None:
     gpu_power_parser.add_argument(
         "--prev-mode", default=None,
         help="With 'confirm-dialog', previous mode before prompt")
+    gpu_usbc_parser = gpu_sub.add_parser(
+        "usbc-budget", help="Opt-in USB-C PD power budget (override 30 W cap on >=90 W USB-C PD)")
+    gpu_usbc_parser.add_argument(
+        "action", nargs="?", default="status",
+        help="'status', 'on', 'off', 'set', 'buffer', or target GPU watts (30-150)")
+    gpu_usbc_parser.add_argument(
+        "value", nargs="?", default=None,
+        help="Target GPU watts (30-150) for 'set', or buffer percent (15-25) for 'buffer'")
 
     # --- hotkeys subcommand ---
     hotkeys_parser = sub.add_parser("hotkeys", help="Hardware hotkey mappings and capture")
@@ -1944,9 +2081,11 @@ def _subcommand_main() -> None:
             cmd_gpu_auto(args)
         elif args.gpu_action == "power":
             cmd_gpu_power(args)
+        elif args.gpu_action == "usbc-budget":
+            cmd_gpu_usbc_budget(args)
         else:
-            print("GPU actions: status, power, undervolt, maxclock, memoffset, auto")
-            print("Examples: gigamate gpu status | gigamate gpu power eco | gigamate gpu undervolt 100 | gigamate gpu maxclock 2100")
+            print("GPU actions: status, power, usbc-budget, undervolt, maxclock, memoffset, auto")
+            print("Examples: gigamate gpu status | gigamate gpu power eco | gigamate gpu usbc-budget status | gigamate gpu undervolt 100")
             sys.exit(1)
     elif args.command == "hotkeys":
         _dispatch_hotkeys(args)
