@@ -155,19 +155,19 @@ run_distro() {
             ;;
         fedora)
             image="fedora:41"
-            install_cmd="dnf install -y /pkgs/fedora/gigamate-dkms-*.rpm /pkgs/fedora/gigamate-*.rpm"
+            install_cmd="dnf install -y /pkgs/fedora/gigamate-dkms-*.rpm /pkgs/fedora/gigamate-[0-9]*.rpm"
             remove_cmd="dnf remove -y gigamate gigamate-dkms"
             expected_method="dnf"
             ;;
         opensuse)
             image="opensuse/tumbleweed"
-            install_cmd="zypper --non-interactive --no-gpg-checks install /pkgs/opensuse/gigamate-dkms-*.rpm /pkgs/opensuse/gigamate-*.rpm"
+            install_cmd="zypper --non-interactive --no-gpg-checks install /pkgs/opensuse/gigamate-dkms-*.rpm /pkgs/opensuse/gigamate-[0-9]*.rpm"
             remove_cmd="zypper --non-interactive remove gigamate gigamate-dkms"
             expected_method="zypper"
             ;;
         arch)
             image="archlinux:latest"
-            install_cmd="pacman -Sy --noconfirm && pacman -U --noconfirm /pkgs/arch/gigamate-dkms-*.pkg.tar.zst /pkgs/arch/gigamate-*.pkg.tar.zst"
+            install_cmd="pacman -Syu --noconfirm && pacman -U --noconfirm /pkgs/arch/gigamate-dkms-*.pkg.tar.zst /pkgs/arch/gigamate-[0-9]*.pkg.tar.zst"
             remove_cmd="pacman -Rns --noconfirm gigamate gigamate-dkms"
             expected_method="pacman"
             ;;

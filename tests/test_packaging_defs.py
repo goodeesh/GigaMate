@@ -450,9 +450,9 @@ bash -n <<< "${{@: -1}}"
 
     expected = [
         ("ubuntu:24.04", "apt", "apt-get install -y /pkgs/deb/gigamate-dkms_*.deb /pkgs/deb/gigamate_*.deb", "apt-get remove -y gigamate gigamate-dkms"),
-        ("fedora:41", "dnf", "dnf install -y /pkgs/fedora/gigamate-dkms-*.rpm /pkgs/fedora/gigamate-*.rpm", "dnf remove -y gigamate gigamate-dkms"),
-        ("opensuse/tumbleweed", "zypper", "zypper --non-interactive --no-gpg-checks install /pkgs/opensuse/gigamate-dkms-*.rpm /pkgs/opensuse/gigamate-*.rpm", "zypper --non-interactive remove gigamate gigamate-dkms"),
-        ("archlinux:latest", "pacman", "pacman -Sy --noconfirm && pacman -U --noconfirm /pkgs/arch/gigamate-dkms-*.pkg.tar.zst /pkgs/arch/gigamate-*.pkg.tar.zst", "pacman -Rns --noconfirm gigamate gigamate-dkms"),
+        ("fedora:41", "dnf", "dnf install -y /pkgs/fedora/gigamate-dkms-*.rpm /pkgs/fedora/gigamate-[0-9]*.rpm", "dnf remove -y gigamate gigamate-dkms"),
+        ("opensuse/tumbleweed", "zypper", "zypper --non-interactive --no-gpg-checks install /pkgs/opensuse/gigamate-dkms-*.rpm /pkgs/opensuse/gigamate-[0-9]*.rpm", "zypper --non-interactive remove gigamate gigamate-dkms"),
+        ("archlinux:latest", "pacman", "pacman -Syu --noconfirm && pacman -U --noconfirm /pkgs/arch/gigamate-dkms-*.pkg.tar.zst /pkgs/arch/gigamate-[0-9]*.pkg.tar.zst", "pacman -Rns --noconfirm gigamate gigamate-dkms"),
     ]
 
     for call_file, (image, method, install_cmd, remove_cmd) in zip(calls, expected):
