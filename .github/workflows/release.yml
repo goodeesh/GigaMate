@@ -257,6 +257,7 @@ jobs:
       - name: Create or update GitHub Release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           IS_PRERELEASE: ${{ needs.build-packages.outputs.is_prerelease }}
         run: |
@@ -266,10 +267,10 @@ jobs:
             extra+=(--prerelease)
           fi
 
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --generate-notes "${extra[@]}"
+          gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GH_REPO" --generate-notes "${extra[@]}"
 
-          gh release upload "$TAG" \
+          gh release upload "$TAG" --repo "$GH_REPO" \
             dist/install.sh.sha256 \
             dist/gigamate.tar.gz.sha256 \
             dist/SHA256SUMS \
